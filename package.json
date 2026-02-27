@@ -1,0 +1,14 @@
+{
+  "name": "adops-copilot",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm --workspace @adops/web run dev",
+    "build": "npm --workspace @adops/web run build",
+    "start": "npm --workspace @adops/web run start",
+    "lint": "npm --workspace @adops/web run lint",
+    "typecheck": "npm --workspace @adops/web run typecheck"
+  }
+}
