@@ -1,14 +1,18 @@
 {
-  "name": "adops-copilot",
+  "name": "adops-advisor",
   "private": true,
   "workspaces": [
     "apps/*"
   ],
   "scripts": {
-    "dev": "npm --workspace @adops/web run dev",
-    "build": "npm --workspace @adops/web run build",
-    "start": "npm --workspace @adops/web run start",
-    "lint": "npm --workspace @adops/web run lint",
-    "typecheck": "npm --workspace @adops/web run typecheck"
+    "dev": "concurrently -n web,api,agent -c cyan,magenta,green \"npm run dev:web\" \"npm run dev:api\" \"npm run dev:agent\"",
+    "dev:web": "npm --workspace @adops/web run dev",
+    "dev:api": "npm --workspace @adops/api run dev",
+    "dev:agent": "cd services/adk-agent && python3 -m ad_ops_advisor.http_server",
+    "build": "npm --workspace @adops/web run build && npm --workspace @adops/api run build",
+    "typecheck": "npm --workspace @adops/web run typecheck && npm --workspace @adops/api run typecheck"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
   }
 }

@@ -1,0 +1,65 @@
+{
+  "name": "response_quality",
+  "description": "Agent responses must be useful for non-expert in-house advertisers while preserving evidence, caveats, human-in-the-loop control, and confidence calibration.",
+  "status": "draft",
+  "requirement_refs": [
+    "REQUIREMENTS.md#3-提供価値",
+    "REQUIREMENTS.md#10-ai-advisor要件",
+    "REQUIREMENTS.md#13-ai回答フォーマット"
+  ],
+  "scenarios": [
+    {
+      "id": "beginner_friendly_performance_answer",
+      "user_message": "初心者にもわかるように、CPA悪化の見方を教えて",
+      "expected": {
+        "must_include": [
+          "結論",
+          "根拠",
+          "CPA",
+          "CVR",
+          "CPC",
+          "まず見る",
+          "人間向け作業手順",
+          "自信度"
+        ],
+        "must_not_include": [
+          "専門用語だけ",
+          "必ず改善",
+          "媒体側を変更しました"
+        ]
+      }
+    },
+    {
+      "id": "setup_advice_asks_for_missing_context",
+      "user_message": "誰をターゲットにすべき？",
+      "given_context": {
+        "workspace_profile": {
+          "product_summary": null,
+          "monthly_budget": null,
+          "conversion_definition": null
+        }
+      },
+      "expected": {
+        "must_include": [
+          "商材",
+          "CV",
+          "月予算",
+          "質問",
+          "仮説",
+          "Low"
+        ],
+        "must_not_include": [
+          "最適ターゲットは確定",
+          "この層だけで十分",
+          "必ず獲得できます"
+        ]
+      }
+    }
+  ],
+  "global_assertions": [
+    "回答は広告運用に詳しくない担当者でも次の確認行動が分かる粒度にする",
+    "重要な判断には根拠、未確認事項、リスク、自信度を添える",
+    "High confidenceは十分な数値根拠または明確なpolicy判断に限定する",
+    "媒体writeを実行したように見える文言を使わない"
+  ]
+}

@@ -1,322 +1,505 @@
-# Ad Insight Copilot — REQUIREMENTS.md（ドラフト v0.1）
+# AdOps Advisor - REQUIREMENTS.md v0.3
 
-> このドキュメントは MVP v1.0 要件定義（最終版）をもとにした「実装のための要求仕様」ドラフトです。
-> 未確定事項は **{{TODO: 未確定}}** として残します。
+## 1. プロダクト定義
 
----
+AdOps Advisor は、自社で広告運用を行う中小企業の担当者向けの **AI広告コンサルタント** である。
 
-## 1. 概要
+主役はダッシュボードではない。ダッシュボードはAIが判断するための補助情報であり、プロダクト価値の中心は「広告運用に詳しくない担当者が、AIに相談しながら広告設計・分析・改善判断を進められること」にある。
 
-### 1.1 プロダクト名
+旧MVPの Google Sheets 手動取り込み前提は廃止する。今後は Google Ads / Meta Ads / Yahoo Ads のAPI連携を前提に再設計する。
 
-* Ad Insight Copilot（仮）
+## 2. 対象ユーザー
 
-### 1.2 目的
+- 自社で広告を運用している中小企業の担当者
+- 広告運用の専門知識が深くないマーケティング担当者
+- 広告代理店ではなく、自社の商材・予算・成果に責任を持つ人
+- 広告の初期設計から運用改善まで相談相手が欲しい人
 
-広告運用リテラシーが高くないインハウス担当者向けに、媒体ローデータを吸収し、KPI可視化・異常検知・原因仮説・次アクション提示・ヘルプ誘導を行う「思考支援ツール」を提供する。
+## 3. 提供価値
 
-### 1.3 対象ユーザー
+AdOps Advisor は、広告コンサルタントのように振る舞う。
 
-* インハウス広告担当者（専門知識が限定的）
+広告開始前:
 
-### 1.4 MVP（v1.0）スコープ
+- 商材理解
+- ペルソナ設計
+- ターゲット整理
+- 訴求軸の整理
+- 媒体選定
+- 初期キャンペーン構成の提案
 
-#### 含む
+広告運用中:
 
-* Google Sheets 連携（**手動更新**）
-* 4媒体ローデータ対応（Google / Yahoo / Meta / TikTok）
-* 正規化処理（統一スキーマへ変換）
-* KPI算出（CTR/CVR/CPA/ROAS）
-* ルールベース異常検知
-* Gemini による提案生成（テンプレ固定）
-* 異常タイプ→タグ→ヘルプ記事表示
-* AIサイドバーUI + チャット（セッション中履歴保持）
+- KPIの読み解き
+- CPA悪化、CVR低下、CTR低下などの原因仮説
+- 媒体横断での優先順位付け
+- 次に見るべきキャンペーンの提示
+- 人間が管理画面で実行するための作業手順作成
 
-#### 含まない
+実施後:
 
-* 媒体API直接接続
-* 自動入札変更
-* Slack通知
-* 自動スケジュール更新
-* マルチクライアント機能
+- 提案が採用されたかを記録
+- 実施後の結果や担当者フィードバックを記憶
+- 次回以降の提案に反映
 
----
+## 4. MVPスコープ
 
-## 2. 前提・技術方針
+### 含む
 
-### 2.1 標準スタック
+- Supabase Auth によるログイン
+- 1 workspace = 1会社
+- 1 workspace に複数広告アカウントを連携可能
+- Google Ads / Meta Ads / Yahoo Ads の read-only API連携
+- 最低限のダッシュボード
+- Google Agent Development Kit（ADK）ベースのAIチャット
+- ログインユーザー単位の長期記憶
+- workspace単位の会社・商材・広告アカウント文脈
+- human-in-the-loop の改善提案
+- 人間向け作業指示書
+- human task 管理
+- operator feedback の記録
+- agent tool call / audit log の記録
 
-* Next.js（App Router）
-* Tailwind CSS
-* Supabase（DB + Auth + Storage）
-* Vercel
+### 含まない
 
-> ユーザー回答より：MVPは **SaaS** 前提
+- 媒体APIによる広告設定の直接変更
+- 予算変更、入札変更、キャンペーン停止、広告作成の自動実行
+- 自動最適化
+- 定期実行型の自律エージェント
+- Slack通知
+- 代理店向けマルチクライアント管理
+- 高度なBIツール
+- CSV / Google Sheets を主データソースにすること
 
-### 2.2 認証
+CSV / Sheets は将来的なデモ、検証、fallback では使ってよいが、プロダクトの主軸にはしない。
 
-* 簡易ログイン（MVP）
-* {{TODO: 未確定}} 簡易ログインの方式（メールリンク/共通PW/招待リンク/テストユーザー固定など）
+## 5. ワークスペース設計
 
-### 2.3 Gemini 利用
+MVPでは以下の設計にする。
 
-* workspace 単位で APIキーを保持・利用
-* APIキーは暗号化保存する
+- `workspace` = 1会社
+- `user` = Supabase Auth のログインユーザー
+- 1 workspace に複数 user を紐付けられる設計にしておく
+- 1 workspace に Google / Meta / Yahoo の複数広告アカウントを紐付けられる
+- ユーザー記憶は user 単位
+- 会社情報・商材情報・広告アカウント情報は workspace 単位
 
----
+代理店向けの複数クライアント切り替えUIはMVPでは作らない。ただしDBは将来拡張できる形にしておく。
 
-## 3. ドメイン・権限モデル
+## 6. 認証・広告アカウント連携
 
-### 3.1 ワークスペース
+### UX方針
 
-* 1社 = 1 workspace
-* 全テーブルに workspace_id を保持
+ユーザーには「ログインしたらそのまま広告アカウントも連携できる」ように感じさせたい。
 
-### 3.2 ロール
+ただし、アプリログインと広告API認可は技術的に別物として扱う。
 
-* owner / editor / viewer
-* MVPでは owner のみ実装可（ただし設計は拡張可能）
+ユーザーに広告媒体のAPIキー、developer token、client secret、app secret の取得や入力を求めない。ユーザー向けUIは `Google Ads と連携` のようなOAuthボタンを基本にし、各媒体の認可画面でログインしてread-only権限を許可してもらう。媒体アプリのclient secretやdeveloper tokenが必要な場合はAdOps Advisor側のサーバー設定として管理し、ワークスペース利用者には見せない。
 
----
+### 技術方針
 
-## 4. データ連携（Google Sheets）
+- アプリログイン: Supabase Auth
+- Google Ads連携: Google Ads API 用 OAuth
+- Meta Ads連携: Meta Marketing API 用 OAuth
+- Yahoo Ads連携: Yahoo Ads API 用 OAuth
 
-### 4.1 接続方式
+OAuth token は暗号化して保存する。token はサーバー側だけで扱い、ブラウザ、ログ、AIプロンプト、agent memory に出してはいけない。
 
-* Sheets の **URL** を登録して取得
-* {{TODO: 未確定}} 取得方式（公開URL/サービスアカウント/ユーザーOAuth）
+## 7. インフラ方針
 
-### 4.2 必須シート名
+### 現時点の推奨
 
-* GoogleAds
-* YahooAds
-* MetaAds
-* TikTokAds
+MVP初期は **Cloudflare + Cloud Run + Supabase** の組み合わせを第一候補にする。
 
-### 4.3 更新（手動）
+- Web / 軽量API / OAuth callback:
+  - Cloudflare Pages / Workers を候補にする
+- ADK Agent Service:
+  - Google Cloud Run を第一候補にする
+- DB / Auth:
+  - Supabase
 
-* UIの「更新」ボタン押下で処理開始
-* 成功時：「更新完了」表示
-* 失敗時：エラー表示 + 前回データ保持 + ログ保存
-* 重複データ登録なし
+### 公開版 / SaaS本番の候補
 
----
+公開版では、Google Ads API、ADK、分析処理、監査・運用監視をGoogle Cloud側に寄せるため、**Google Cloud中心構成** を第一候補にする。
 
-## 5. 入力データ仕様
+- Web / API:
+  - Cloud Run または Cloudflare Pages / Workers + Cloud Run API
+- ADK Agent Service:
+  - Google Cloud Run
+- DB:
+  - Cloud SQL for PostgreSQL
+- secret / encryption key:
+  - Secret Manager / Cloud KMS
+- 長期分析・集計:
+  - BigQuery
 
-### 5.1 ローデータ形式
+ただしMVP開発速度を優先し、当面はSupabase Auth/Postgresで進める。DB schemaとservice実装は **Postgres-first** とし、Supabase固有機能への依存は認証・RLS・DB境界に閉じ込める。agent/service層はCloud SQL for PostgreSQLへ移行しやすい形を保つ。
 
-#### GoogleAds
+### 理由
 
-* Date / Campaign / Ad group / Cost / Impr. / Clicks / Conversions / Conv. value
+Cloudflare はフロント配信、軽量API、OAuth callback、エッジ実行に強い。一方で、ADK本体はPython依存、Google系SDK、長めのagent処理、将来的なジョブ実行・観測性を考えると Cloud Run の方が扱いやすい。
 
-#### YahooAds
+したがって、全部をCloudflareに寄せるより、以下の分担がよい。
 
-* 日付 / キャンペーン名 / 広告グループ名 / ご利用金額 / インプレッション数 / クリック数 / コンバージョン数 / コンバージョン値
+```txt
+Cloudflare Pages / Workers
+  - Web UI
+  - BFF / 軽量API
+  - OAuth callback
 
-#### MetaAds
+Google Cloud Run
+  - ADK Agent Service
+  - 重い分析処理
+  - Google系SDKとの連携
 
-* Reporting starts / Campaign name / Ad set name / Amount spent / Impressions / Link clicks / Purchases / Purchase value
-
-#### TikTokAds
-
-* Date / Campaign name / Ad group name / Spend / Impressions / Clicks / Conversions / Conversion value
-
----
-
-## 6. 正規化仕様
-
-### 6.1 内部共通スキーマ
-
-* date
-* platform
-* campaign
-* adgroup
-* cost
-* impressions
-* clicks
-* conversions
-* revenue
-
-### 6.2 マッピング
-
-* 媒体ごとの列名を統一マッピングして内部共通スキーマへ変換
-
-### 6.3 バリデーション
-
-| 条件         | 動作       |
-| ---------- | -------- |
-| 必須列欠損      | 更新失敗     |
-| 数値型不一致     | 更新失敗     |
-| 日付フォーマット違い | 自動変換     |
-| データ7日未満    | 異常検知スキップ |
-
----
-
-## 7. KPI 定義
-
-* CTR = clicks / impressions
-* CVR = conversions / clicks
-* CPA = cost / conversions
-* ROAS = revenue / cost
-
-制約：
-
-* ゼロ割禁止
-* null は表示上「-」
-
----
-
-## 8. 異常検知
-
-### 8.1 比較ロジック
-
-* 当日 vs 直近7日平均
-
-### 8.2 判定条件
-
-| 種別    | 条件                 |
-| ----- | ------------------ |
-| CPA悪化 | 当日CPA > 7日平均 × 1.2 |
-| CV減少  | 当日CV < 7日平均 × 0.7  |
-| CTR低下 | 前日比 -25%           |
-
-### 8.3 重要度
-
-* High：+30%以上
-* Medium：+20%以上
-* Low：軽微
-
----
-
-## 9. AI（Gemini）
-
-### 9.1 入力構造
-
-```json
-{
-  "summary": {},
-  "anomalies": [],
-  "top_campaigns": [],
-  "period": "7d"
-}
+Supabase
+  - Auth
+  - Postgres
+  - Row Level Security
 ```
 
-### 9.2 出力テンプレ（固定）
+公開版候補:
 
-* ■ 結論
-* ■ 根拠（数値）
-* ■ 考えられる原因
-* ■ 優先アクション（最大3）
-* ■ 参考ヘルプ
+```txt
+Google Cloud Run
+  - Web/API backend
+  - ADK Agent Service
 
-### 9.3 制約
+Cloud SQL for PostgreSQL
+  - SaaS core DB
 
-* 数値根拠必須
-* 曖昧表現禁止
-* 専門用語は平易化
+Secret Manager / Cloud KMS
+  - OAuth token encryption key
+  - service credentials
 
----
+BigQuery
+  - 広告metricsの長期分析・集計
+```
 
-## 10. ヘルプ
+### 未確定
 
-### 10.1 記事モデル
+Next.jsを使うか、別のWebフレームワークを使うかは未確定。Cloudflareを使うなら、Cloudflare Pagesとの相性を考慮して決める。
 
-* id
-* platform
-* tags
-* difficulty
-* body
-* updated_at
+## 8. データ要件
 
-### 10.2 タグ
+### 広告アカウント情報
 
-* bidding
-* budget_change
-* conversion_tracking
-* creative
-* reporting
+各連携広告アカウントについて、最低限以下を保持する。
 
-### 10.3 紐付け
+- platform
+- external account id
+- account name
+- currency
+- timezone
+- status
+- connection status
 
-* 異常タイプ → 固定タグ → 記事表示
+### 指標データ
 
----
+最低限、以下の粒度を扱えるようにする。
 
-## 11. UI / 画面要件
+- account
+- campaign
+- ad group / ad set
+- ad / creative（取得可能な場合）
 
-### 11.1 レイアウト
+最低限の指標:
 
-* 左サイドナビ固定（250px）
-* 右コンテンツ
-* ヘッダーなし
+- impressions
+- clicks
+- cost
+- conversions
+- revenue / conversion value
+- CTR
+- CVR
+- CPC
+- CPA
+- ROAS
 
-### 11.2 ダッシュボード
+KPI算出ルール:
 
-* KPIカード
-* 異常一覧
-* AIボタン（右下固定）
+- CTR = clicks / impressions
+- CVR = conversions / clicks
+- CPC = cost / clicks
+- CPA = cost / conversions
+- ROAS = revenue / cost
+- ゼロ割は禁止
+- 算出不能な値はUIでは `-` 表示
 
-### 11.3 BI画面
+## 9. ダッシュボード要件
 
-* 期間切替（7/14/30日）
-* 媒体フィルタ
-* 時系列グラフ
-* 構成比グラフ
+ダッシュボードは最小限でよい。AIに相談するための状況把握画面として作る。
 
-### 11.4 AIサイドバー
+必須:
 
-* 幅 400px
-* 自動分析表示
-* チャット履歴保持（セッション中）
-* 閉じるボタン
+- 連携アカウント状態
+- 期間フィルタ
+- 媒体 / アカウントフィルタ
+- KPIカード
+- キャンペーン別パフォーマンス表
+- シンプルな時系列グラフ
+- 最近のAI提案 / human task
 
----
+MVPでは不要:
 
-## 12. エラー処理
+- 高度なBI
+- 自由なレポートビルダー
+- スライド自動生成
+- 細かいデザイン作り込み
 
-### 12.1 Sheets取得失敗
+## 10. AI Advisor要件
 
-* エラー表示
-* 前回データ保持
-* ログ保存
+AI Advisor は、広告に関する広い質問に答えられることを目指す。
 
-### 12.2 AI失敗
+例:
 
-* 再試行ボタン
-* ログ保存
+- 「誰をターゲットにすべき？」
+- 「ペルソナを一緒に考えて」
+- 「キャンペーン構成どうすればいい？」
+- 「CPAが悪化した理由を教えて」
+- 「どのキャンペーンから見るべき？」
+- 「次に何をすればいい？」
+- 「作業チェックリストにして」
+- 「初心者にもわかるように説明して」
 
----
+広告データが足りない場合は、推測で断言せず、足りない情報を明示する。商材情報が足りない場合は、必要な質問をする。
 
-## 13. 非機能要件
+## 11. ADK Agent構成
 
-### 13.1 パフォーマンス
+最初から巨大なmulti-agent構成にしない。まずは小さく始める。
 
-* 更新 15秒以内
-* AI応答 5秒以内
-* 初期表示 3秒以内
+### 初期agent
 
-### 13.2 セキュリティ
+- `root_agent`
+  - 全質問の入口
+  - intent判定
+  - tool / sub-agent 呼び出し
+  - 最終回答の統合
 
-* Workspace 分離
-* APIキー暗号化保存
-* アクセスログ保持
+- `setup_advisor_agent`
+  - 広告開始前の相談
+  - 商材、ペルソナ、ターゲット、訴求、媒体選定、初期構成
 
----
+- `performance_analyst_agent`
+  - 広告指標の読み取り
+  - 期間比較
+  - KPI変化の説明
+  - 原因仮説
 
-## 14. ユーザーストーリー（MVP）
+- `action_plan_agent`
+  - 提案を人間向け作業手順に変換
+  - チェックリスト、リスク、期待効果、観察計画
 
-* US-01 データ更新
-* US-02 KPI閲覧
-* US-03 異常検知
-* US-04 AI提案表示
-* US-05 チャット利用
-* US-06 ヘルプ誘導
+- `qa_agent`
+  - 根拠確認
+  - 自信度調整
+  - 危険な断定の抑制
+  - write禁止チェック
 
----
+### 後で分離するagent候補
 
-## 15. 成功指標
+- `budget_advisor_agent`
+- `creative_review_agent`
+- `reporting_agent`
+- `help_agent`
 
-* AIサイドバー利用率 60%以上
-* 週3回以上利用 40%以上
-* ヘルプクリック率 30%以上
+## 12. Tool Policy
+
+### 許可するtool
+
+- 広告アカウント一覧の取得
+- 指標データの取得
+- KPI計算
+- 期間比較
+- 異常検知
+- user memory の読み書き
+- recommendation の作成
+- human task の作成
+- operator feedback の記録
+
+### 禁止するtool
+
+- campaign budget 更新
+- campaign 停止 / 有効化
+- bid / bid strategy 変更
+- ad 作成 / 編集
+- targeting 変更
+- 媒体APIへの mutation
+
+MVPではwrite系toolをコードベースに作らない。存在しないtoolは誤って呼ばれない。
+
+## 13. AI回答フォーマット
+
+運用改善の回答では、原則として以下の形にする。
+
+```txt
+結論:
+何が起きているか
+
+根拠:
+どの期間・どの数値を見たか
+
+原因仮説:
+なぜそうなった可能性があるか
+
+推奨アクション:
+優先度つきの打ち手
+
+人間向け作業手順:
+媒体管理画面で人間がどう確認・操作するか
+
+実施前チェック:
+変更前に確認すべきこと
+
+リスク:
+何が悪化する可能性があるか
+
+実施後の観察:
+いつ、どの指標を見るか
+
+自信度:
+High / Medium / Low と理由
+```
+
+## 14. Memory要件
+
+Memory は会話と operator feedback から自動抽出する。
+
+### user memory
+
+- 担当者の好み
+- 説明の粒度
+- 重視KPI
+- 過去の意思決定
+- 採用されやすい提案 / されにくい提案
+- 過去のフィードバック
+
+### workspace profile
+
+- 会社概要
+- 商材概要
+- ターゲット
+- CV定義
+- 月予算
+- 制約条件
+- 連携広告アカウント
+
+### thread state
+
+- 現在の会話内だけの一時文脈
+
+Memory に OAuth token、API key、顧客リスト、個人情報、秘密情報を保存してはいけない。
+
+## 15. Human Task / Feedback
+
+AIの提案は `human_tasks` に変換できるようにする。
+
+task status:
+
+- `draft`
+- `suggested`
+- `accepted`
+- `doing`
+- `done`
+- `rejected`
+- `ignored`
+
+operator feedback では以下を記録する。
+
+- 提案を採用したか
+- 採用しなかった理由
+- 実施したか
+- 実施後に成果が改善したか
+- 担当者コメント
+- 必要なら実施後の観察指標
+
+## 16. DB設計方針
+
+初期schemaには以下を含める。
+
+- `workspaces`
+- `workspace_members`
+- `workspace_profiles`
+- `ad_platform_connections`
+- `ad_accounts`
+- `campaign_snapshots`
+- `ad_group_snapshots`
+- `ad_daily_metrics`
+- `agent_threads`
+- `agent_messages`
+- `user_memories`
+- `agent_tool_calls`
+- `recommendations`
+- `human_tasks`
+- `operator_feedback`
+- `audit_logs`
+
+事業データには原則 `workspace_id` を持たせる。
+
+## 17. セキュリティ・ガードレール
+
+- すべてのデータアクセスで workspace scope を強制する
+- OAuth token は暗号化保存する
+- token をAIプロンプトに渡さない
+- agent tool call を記録する
+- 数値根拠なしの成果断定は禁止
+- 提案には自信度を付ける
+- 予算関連の提案にはリスク説明を必須にする
+- 「必ず改善します」のような保証表現は禁止
+- ユーザーが依頼しても、媒体設定の直接変更は拒否する
+
+## 18. 開発マイルストーン
+
+### Milestone 0: Repository Reboot
+
+- 旧Sheets-first MVPコードを削除
+- `REQUIREMENTS.md` を新方針で書き直す
+- `AGENTS.md` を書き直す
+- DB schema 初稿を追加
+- ADK service skeleton を追加
+
+### Milestone 1: Auth / Workspace基盤
+
+- Supabase Auth
+- workspace / member model
+- 基本app shell
+
+### Milestone 2: Platform OAuth / Read-only Data
+
+- Google Ads / Meta Ads / Yahoo Ads のOAuth連携
+- token暗号化保存
+- 広告アカウント一覧取得
+- campaign metrics 取得
+
+### Milestone 3: Minimal Dashboard
+
+- 連携アカウント状態
+- KPI cards
+- campaign table
+- trend chart
+
+### Milestone 4: ADK Chat MVP
+
+- root agent
+- setup advisor
+- performance analyst
+- action plan agent
+- QA guardrail
+- user memory extraction
+
+### Milestone 5: Human Tasks / Feedback
+
+- recommendation 保存
+- human task 作成
+- operator feedback 記録
+- feedback を次回以降の会話に反映
+
+## 19. 未確定事項
+
+- Supabase Auth の初期providerを email / Google / 両方 のどれにするか
+- Webフレームワークを何にするか
+- Cloudflare Pages / Workers をどこまで使うか
+- ADK Agent Service を最初から Cloud Run に載せるか、ローカル開発優先にするか
+- OAuth token の具体的な暗号化方式
+- 3媒体で共通化できる指標と、媒体固有指標の扱い
+- platform APIから都度読むか、DBにどの粒度でcacheするか

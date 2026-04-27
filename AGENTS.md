@@ -1,109 +1,199 @@
-# AGENTS.md（v0.1）— Ad Insight Copilot
+# AGENTS.md - AdOps Advisor
 
-> Think of AGENTS.md as a README for agents: a dedicated, predictable place to provide context and instructions to help AI coding agents work on this project. 
-> このリポジトリは **Gemini CLI / Codex での vibe coding** を前提に最適化する。
+このリポジトリは、自社で広告運用を行う中小企業向けの **AI広告コンサルタント** を作るためのものです。
 
-## 0. ゴール（最重要）
+## 1. 最重要方針
 
-* 広告運用リテラシーが高くないインハウス担当者向けに、Sheetsローデータを取り込み、KPI可視化・異常検知・原因仮説・次アクション・ヘルプ誘導を行う **SaaS MVP** を作る。
-* **MVPは手動更新**（自動スケジュール/媒体API連携はスコープ外）。
+AdOps Advisor は、human-in-the-loop 前提の広告運用支援プロダクトです。
 
----
+Google Ads / Meta Ads / Yahoo Ads のAPIから read-only でデータを取得し、AIが分析・提案・人間向け作業手順を作ります。MVPでは媒体設定を直接変更しません。
 
-## 1. 現状の要件スコープ（MVP v1.0）
+## 2. 現在の設計方針
 
-### 含む
+- 認証: Supabase Auth
+- tenant model: 1 workspace = 1会社
+- 1 workspace に複数広告アカウントを紐付け可能
+- 長期記憶: ログインユーザー単位
+- 会社・商材・広告アカウント文脈: workspace単位
+- AI runtime: Google Agent Development Kit（ADK）
+- Dashboard: AI Advisorの補助
+- 主データソース: 広告媒体API
+- 旧Google Sheets前提のMVPは廃止済み
 
-* Google Sheets（URL）連携（手動更新）
-* 4媒体（Google/Yahoo/Meta/TikTok）ローデータ取り込み
-* 正規化（共通スキーマ化）＋バリデーション
-* KPI算出（CTR/CVR/CPA/ROAS、ゼロ割禁止、nullは「-」）
-* ルールベース異常検知（当日 vs 直近7日平均等）
-* Gemini による提案生成（テンプレ固定、数値根拠必須、平易化）
-* ヘルプ記事モデル＋異常タイプ→タグ→記事表示
-* AIサイドバー（自動分析＋チャット、セッション中履歴保持）
+## 3. インフラ方針
 
-### 含まない
+現時点では以下を第一候補とします。
 
-* 媒体API直接接続、Slack通知、自動更新、自動入札変更、マルチクライアント
+```txt
+Cloudflare Pages / Workers
+  - Web UI
+  - 軽量API
+  - OAuth callback
 
----
+Google Cloud Run
+  - ADK Agent Service
+  - Python依存のagent処理
+  - 重めの分析処理
 
-## 2. 技術スタック（前提）
+Supabase
+  - Auth
+  - Postgres
+  - RLS
+```
 
-* Next.js（App Router）
-* Tailwind CSS
-* Supabase（DB + Auth + Storage）
-* Vercel
+Cloudflareにすべて寄せる判断はまだしません。ADK本体はPython/Google SDK/処理時間/運用監視の都合で Cloud Run の方が扱いやすい可能性が高いです。
 
-### 認証（MVP）
+## 4. リポジトリ構成
 
-* 簡易ログイン
-* {{TODO: 未確定}} 方式（例：メールリンク / マジックリンク / 招待URL / テストユーザー固定 など）
+```txt
+services/adk-agent/        # ADK Python agent service
+supabase/migrations/       # DB schema
+docs/                      # 設計メモ
+packages/shared-schemas/   # 将来の共通schema
+```
 
-### Gemini
+旧 `apps/web` や旧Next.js実装は削除済みです。
 
-* **workspace単位**でAPIキーを保持し利用
-* APIキーは暗号化保存（復号はサーバー側のみ）
+## 5. 作業前に読むもの
 
----
+1. `REQUIREMENTS.md`
+2. `DESIGN.md`
+3. `docs/architecture.md`
+4. `docs/database.md`
+5. `docs/adk-design.md`
+6. 作業対象のserviceファイル
 
-## 3. 作業の進め方（エージェント向けルール）
+## 6. 実装ルール
 
-### 3.1 進め方（必須）
+- まずどのRequirement/Milestoneに関係する作業か確認する
+- 小さい差分で進める
+- 仕様が曖昧なら先にdocs/requirementsを更新する
+- human-in-the-loop制約を守る
+- MVP中は媒体write toolを作らない
+- AIに渡す文脈からsecret/tokenを除外する
 
-1. まず `REQUIREMENTS.md` を参照し、作業対象の US（US-01〜06）を1つ選ぶ
-2. そのUSに必要な **DBスキーマ / API / UI / エラー処理 / ログ** を洗い出す
-3. 実装前に **最小の差分** で PR 単位（またはコミット単位）に分割提案
-4. 不明点は推測で埋めない。**{{TODO: 未確定}}** として残し、質問を最大5つまで作る
+## 7. コマンド実行ルール
 
-### 3.2 禁止事項（安全）
+確認なしでOK:
 
-* **コマンドの自動実行は禁止**（提案はOK、実行はユーザーが行う）
-* 破壊的操作は禁止（例：`rm -rf`、DBのdrop/大量delete、強制push）
-* マイグレーション／本番データ変更は必ず手順を明示し、ロールバック案を併記
-* 秘密情報（APIキー、トークン）をコード・ログ・Issue に貼らない
+- ファイル読み取り
+- 検索
+- formatter
+- lint / typecheck / test
+- 非破壊的なscaffold作成
 
----
+事前確認が必要:
 
-## 4. 期待するリポジトリ構造（案）
+- 依存関係のinstall
+- network accessが必要なコマンド
+- remote DBへのmigration適用
+- push
+- PR作成
+- taskと無関係なユーザー作成物の削除
 
-> 実装開始時に作る。現時点は方針のみ。
+明示依頼なしでは禁止:
 
-* `apps/web` : Next.jsフロント
-* `supabase/` : migrations / config
-* `packages/shared` : 型・ユーティリティ（必要なら）
-* `docs/` : {{TODO: 未確定}}（将来。MVPでは最小）
+- force push
+- DB drop
+- production data削除
+- secret commit
+- 広告媒体write/execution tool追加
 
----
+## 8. セキュリティルール
 
-## 5. データパイプライン（MVP方針）
+- OAuth token / refresh token / API key / Supabase service role key をログに出さない
+- secretをLLM promptに渡さない
+- tokenはserver-sideで暗号化保存する
+- 事業データは原則 `workspace_id` を持つ
+- data accessではworkspace scopeを必ず検証する
+- agent memoryにsecretや顧客リストを保存しない
 
-1. Sheets URL 登録
-2. Raw Import Layer（媒体別の生データを保持）
-3. Normalizer（共通スキーマへ）
-4. Unified Metrics Table（集計・KPI）
-5. Anomaly Engine（ルール判定）
-6. Gemini（提案生成）
-7. UI（Dashboard / BI / AI sidebar）
+## 9. ADKルール
 
-{{TODO: 未確定}} Sheets取得方式（公開URL/サービスアカウント/OAuth）により実装が大きく変わるため、最初に確定する。
+初期agentは以下に絞る。
 
----
+- `root_agent`
+- `setup_advisor_agent`
+- `performance_analyst_agent`
+- `action_plan_agent`
+- `qa_agent`
 
-## 6. ログ・エラーハンドリング
+最初から大きなmulti-agent構成にしない。root_agentが肥大化してから分割する。
 
-* Sheets取得失敗：エラー表示、前回データ保持、ログ保存
-* AI失敗：再試行ボタン、ログ保存
-* 監査：アクセスログ保持（最低限）
+許可tool:
 
----
+- ad account read
+- metrics read
+- KPI計算
+- 期間比較
+- 異常検知
+- user memory read/write
+- recommendation作成
+- human task作成
+- operator feedback記録
 
-## 7. まず着手する実装優先度（提案）
+禁止tool:
 
-* P0: US-01（更新）に必要な「Sheets取り込み + バリデーション + 重複排除」
-* P0: 正規化 + KPI算出 + ダッシュボード最小表示（US-02）
-* P1: 異常検知（US-03）
-* P1: Gemini提案（US-04）＋ヘルプ紐付け（US-06）
-* P2: チャット（US-05：セッション中履歴）
+- budget変更
+- campaign停止
+- bid変更
+- ad作成
+- platform mutation
 
+## 10. AI回答ルール
+
+運用改善提案には以下を含める。
+
+- 結論
+- 根拠
+- 原因仮説
+- 推奨アクション
+- 人間向け作業手順
+- 実施前チェック
+- リスク
+- 実施後の観察
+- 自信度
+
+根拠が足りない場合は、足りないと明示する。
+
+## 11. DBルール
+
+schema変更は `supabase/migrations/` に置く。
+
+- 可能な限りadditiveにする
+- riskがある変更はrollback方針を書く
+- production dataをdropできる前提にしない
+- token columnは暗号化前提で命名する
+
+## 12. UIルール
+
+DashboardはAI Advisorの補助です。巨大なBIを先に作らない。
+
+優先:
+
+- onboarding
+- 広告アカウント連携状態
+- 最低限のKPI
+- AI chat
+- recommendation / human task review
+
+画面を作るときは `DESIGN.md` を優先します。AIチャットは独立ページではなく、右サイドドロワーとして扱います。チャートは原則 `recharts` を使い、手書きDOMグラフは避けます。MVP初期のメインナビは `ダッシュボード / BI分析 / Adコラム / データ連携` を基本とし、Human Tasks は独立ページではなくAI回答内の作業手順として扱います。
+
+## 13. ブランチ
+
+このworkspaceでは `codex/<topic>` 形式のbranch作成が失敗する場合があります。
+
+推奨:
+
+```txt
+codex-<topic>
+```
+
+## 14. 現在の優先順位
+
+1. requirements / architecture docsを固める
+2. DB schema方針を固める
+3. ADK service skeletonを育てる
+4. Supabase Auth / workspace基盤
+5. Google / Meta / Yahoo read-only OAuth
+6. 最初に価値が出るADK chat loop

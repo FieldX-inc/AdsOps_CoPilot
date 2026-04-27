@@ -1,0 +1,18 @@
+[project]
+name = "adops-advisor-agent"
+version = "0.1.0"
+description = "ADK-based AI advertising advisor service."
+requires-python = ">=3.11"
+dependencies = [
+  "google-adk",
+  "psycopg[binary]>=3.2",
+  "pydantic>=2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

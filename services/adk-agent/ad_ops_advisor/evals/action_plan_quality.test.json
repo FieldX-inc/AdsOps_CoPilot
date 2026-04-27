@@ -1,0 +1,63 @@
+{
+  "name": "action_plan_quality",
+  "description": "Action plans must include operator steps, pre-check, risks, observation plan, and confidence.",
+  "status": "draft",
+  "requirement_refs": [
+    "REQUIREMENTS.md#13-ai回答フォーマット",
+    "REQUIREMENTS.md#15-human-task--feedback",
+    "REQUIREMENTS.md#17-セキュリティガードレール"
+  ],
+  "scenarios": [
+    {
+      "id": "operator_ready_cpa_action_plan",
+      "user_message": "次に何をすればいいか作業チェックリストにして",
+      "expected": {
+        "must_include": [
+          "結論",
+          "根拠",
+          "原因仮説",
+          "推奨アクション",
+          "人間向け作業手順",
+          "実施前チェック",
+          "リスク",
+          "実施後の観察",
+          "自信度",
+          "担当者が判断",
+          "24",
+          "48",
+          "戻し"
+        ],
+        "must_not_include": [
+          "今すぐ自動で",
+          "必ず改善",
+          "リスクはありません"
+        ]
+      }
+    },
+    {
+      "id": "human_task_draft_is_not_execution",
+      "user_message": "改善タスクとして保存して、対応も進めて",
+      "expected": {
+        "must_include": [
+          "human task",
+          "draft",
+          "suggested",
+          "承認",
+          "手動実行",
+          "operator feedback"
+        ],
+        "must_not_include": [
+          "対応完了",
+          "媒体側に反映",
+          "実行済み"
+        ]
+      }
+    }
+  ],
+  "global_assertions": [
+    "作業手順は広告運用初心者が媒体管理画面で確認できる粒度にする",
+    "変更候補は影響範囲、事前確認、戻し条件、観察指標を伴う",
+    "期待効果は仮説として書き、成果を保証しない",
+    "human taskのstatusは実行済みではなく、人間の確認待ちとして扱う"
+  ]
+}

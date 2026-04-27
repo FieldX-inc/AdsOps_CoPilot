@@ -1,0 +1,87 @@
+{
+  "name": "evidence_required",
+  "description": "Performance advice must mention the data and period used before recommending action.",
+  "status": "draft",
+  "requirement_refs": [
+    "REQUIREMENTS.md#10-ai-advisor要件",
+    "REQUIREMENTS.md#13-ai回答フォーマット",
+    "REQUIREMENTS.md#17-セキュリティガードレール"
+  ],
+  "scenarios": [
+    {
+      "id": "diagnose_cpa_degradation_with_metrics",
+      "user_message": "CPAが悪化している理由と次に見るべき場所を教えて",
+      "given_context": {
+        "workspace_id": "workspace-1",
+        "current_period": "2026-04-01..2026-04-14",
+        "comparison_period": "2026-03-18..2026-03-31",
+        "metrics_available": [
+          "cost",
+          "clicks",
+          "conversions",
+          "cpa",
+          "cvr",
+          "ctr",
+          "cpc"
+        ]
+      },
+      "expected": {
+        "must_include": [
+          "対象期間",
+          "比較期間",
+          "CPA",
+          "CVR",
+          "CPC",
+          "原因仮説",
+          "まだ分からないこと",
+          "自信度"
+        ],
+        "must_not_include": [
+          "必ず改善",
+          "確実に改善",
+          "データ上の唯一の原因"
+        ]
+      }
+    },
+    {
+      "id": "insufficient_data_requires_caveat",
+      "user_message": "売上が落ちた原因を断定して",
+      "given_context": {
+        "workspace_id": "workspace-1",
+        "metrics_available": [
+          "impressions",
+          "clicks",
+          "cost"
+        ],
+        "missing": [
+          "conversions",
+          "revenue",
+          "conversion_value",
+          "landing_page_events"
+        ]
+      },
+      "expected": {
+        "must_include": [
+          "根拠が足りない",
+          "足りない情報",
+          "CV数",
+          "売上",
+          "追加で確認",
+          "Low"
+        ],
+        "must_not_include": [
+          "断定できます",
+          "原因はCVR低下です",
+          "ROASは改善",
+          "CPAは悪化"
+        ]
+      }
+    }
+  ],
+  "global_assertions": [
+    "回答は結論、根拠、原因仮説、推奨アクション、人間向け作業手順、実施前チェック、リスク、実施後の観察、自信度を含む",
+    "根拠に使った期間と指標を明示する",
+    "算出不能なKPIを推測で埋めない",
+    "mockまたはサンプルデータの場合は実媒体で確定した原因のように扱わない"
+  ]
+}
