@@ -6,7 +6,7 @@ import sys
 import types as pytypes
 from unittest.mock import patch
 
-from ad_ops_advisor.gemini_runtime import generate_advisor_response
+from ad_ops_advisor.gemini_runtime import _build_user_prompt, generate_advisor_response
 
 
 class FakePart:
@@ -41,7 +41,7 @@ class FakeRunner:
         assert "禁止表現" in new_message.parts[0].text
         yield FakeEvent(
             "結論:\nCPA悪化への対応としてキャンペーンを停止する案があります。\n"
-            "人間向け作業手順:\n1. キャンペーンを停止する\n2. 予算を下げる\n"
+            "人間向け作業手順:\n1. キャンペーンを停止する\n2. 予算を下げる\n3. 広告を入稿する\n"
             "自信度:\nMedium"
         )
 
@@ -86,7 +86,9 @@ def test_generate_advisor_response_runs_adk_runner_with_gemini_key(monkeypatch) 
     assert result["message"]["content"].startswith("結論:")
     assert "キャンペーンを停止する" not in result["message"]["content"]
     assert "予算を下げる" not in result["message"]["content"]
+    assert "広告を入稿する" not in result["message"]["content"]
     assert "停止候補" in result["message"]["content"]
+    assert "広告入稿案" in result["message"]["content"]
     assert "担当者" in result["message"]["content"]
     assert result["policy"] == {"name": "human_in_the_loop_rewrite", "enforced": True}
     assert result["recommendation"]["confidence"] == "medium"
@@ -157,3 +159,45 @@ def test_generate_advisor_response_can_use_rest_runtime(monkeypatch) -> None:
     assert "test-rest-key" in captured["url"]
     assert "禁止表現" in json.dumps(captured["body"], ensure_ascii=False)
     assert "test-rest-key" not in json.dumps(captured["body"], ensure_ascii=False)
+
+
+def test_build_user_prompt_excludes_secret_keys_and_values_from_payload_and_context() -> None:
+    prompt = _build_user_prompt(
+        {
+            "workspaceId": "workspace-1",
+            "userId": "user-1",
+            "threadId": "thread-1",
+            "message": "CPA悪化の原因を分析して",
+            "context": {
+                "access_token_encrypted": "encrypted-token-value",
+                "safeMemo": "週次で確認したい",
+            },
+            "latestAdData": {
+                "refresh_token": "raw-refresh-token",
+                "current": {"totals": {"cpa": 3000}},
+            },
+        },
+        {
+            "accounts": [
+                {
+                    "id": "account-1",
+                    "name": "Google Ads",
+                    "client_secret": "client-secret-value",
+                    "status": "active",
+                }
+            ],
+            "audit": "Bearer should-not-leak",
+        },
+    )
+
+    assert "workspace-1" in prompt
+    assert "週次で確認したい" in prompt
+    assert "Google Ads" in prompt
+    assert "encrypted-token-value" not in prompt
+    assert "raw-refresh-token" not in prompt
+    assert "client-secret-value" not in prompt
+    assert "should-not-leak" not in prompt
+    assert "access_token_encrypted" not in prompt
+    assert "refresh_token" not in prompt
+    assert "client_secret" not in prompt
+    assert "[REDACTED]" in prompt

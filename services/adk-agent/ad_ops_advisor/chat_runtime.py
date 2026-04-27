@@ -4,7 +4,7 @@ from typing import Any
 
 from .analysis import build_mock_chat_response, build_no_write_refusal_response
 from .gemini_runtime import GeminiRuntimeError, generate_advisor_response, is_gemini_configured
-from .policies.no_write_policy import has_platform_write_intent
+from .policies.no_write_policy import contains_secret, has_platform_write_intent
 from .repositories import RepositoryError, get_repository, is_database_configured
 
 
@@ -14,7 +14,11 @@ def handle_chat(payload: dict[str, Any]) -> dict[str, Any]:
     ADK execution is still allowed to fall back to deterministic local analysis
     while the production ADK runner is being wired in.
     """
-    if has_platform_write_intent(str(payload.get("message") or "")):
+    message = str(payload.get("message") or "")
+    if contains_secret(payload):
+        return build_secret_refusal_response(payload)
+
+    if has_platform_write_intent(message):
         return build_no_write_refusal_response(payload)
 
     if is_gemini_configured() and not is_database_configured():
@@ -120,6 +124,63 @@ def handle_chat(payload: dict[str, Any]) -> dict[str, Any]:
         {"mode": response.get("mode", "db_backed_fallback")},
     )
     return response
+
+
+def build_secret_refusal_response(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "message": {
+            "role": "assistant",
+            "content": """結論:
+secret、OAuth token、API key、service role keyらしき値は分析に使えません。安全のため、入力内容は再掲せず、広告指標や連携状態などsecretを除いた情報だけで相談してください。
+
+根拠:
+- AdOps Advisorはsecret/tokenをLLM prompt、agent memory、ログ、回答に含めない方針です
+- OAuth tokenはserver-sideで暗号化保存し、ブラウザやAI文脈には渡しません
+
+原因仮説:
+今回の入力にはcredentialらしき文字列が含まれる可能性があります。実secretだった場合、共有画面や会話履歴に残すと危険です。
+
+推奨アクション:
+1. 実secretを貼った可能性がある場合は、そのcredentialを無効化またはローテーションする
+2. 広告アカウント名、期間、KPI、困っている症状だけを入力し直す
+3. 連携はAPIキー入力ではなく、OAuth read-only導線で行う
+
+人間向け作業手順:
+1. 入力した値が実credentialか確認する
+2. 実credentialなら管理画面でローテーションする
+3. credentialを除いた相談文でAIに再質問する
+
+実施前チェック:
+共有画面、ログ、チャット履歴にsecretらしき値が残っていないか確認してください。
+
+リスク:
+secretを会話やログに残すと、不正アクセスや権限漏洩につながる可能性があります。
+
+実施後の観察:
+ローテーション後、古いcredentialが無効になっていることと、アプリの連携状態に影響がないことを確認してください。
+
+自信度:
+High。secretをAI文脈に入れない方針は明確です。""",
+        },
+        "recommendation": {
+            "title": "secretを除外して相談内容を入力し直す",
+            "confidence": "high",
+            "operatorSteps": [
+                "実credentialか確認する",
+                "必要ならcredentialをローテーションする",
+                "secretを含まない広告指標だけで再質問する",
+            ],
+        },
+        "humanTaskDraft": {
+            "title": "secret混入の有無を確認する",
+            "priority": "high",
+            "status": "suggested",
+        },
+        "policy": {
+            "name": "secret_exclusion",
+            "enforced": True,
+        },
+    }
 
 
 def _to_analysis_input(metrics: dict[str, Any]) -> dict[str, Any]:

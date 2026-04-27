@@ -1,3 +1,6 @@
+import re
+from typing import Any
+
 FORBIDDEN_TOOL_PREFIXES = (
     "update_",
     "pause_",
@@ -38,12 +41,14 @@ WRITE_INTENT_MARKERS = (
     "pause",
     "enable",
     "create",
+    "submit",
     "apply",
     "mutate",
     "set ",
     "変更して",
     "停止して",
     "作成して",
+    "入稿して",
     "適用して",
     "実行して",
     "上げて",
@@ -63,6 +68,16 @@ SECRET_VALUE_MARKERS = (
     "developer_token",
 )
 
+SECRET_VALUE_PATTERNS = (
+    re.compile(r"\b(api[_-]?key|developer[_-]?token|client[_-]?secret)\b[^\n]{0,80}[:=]\s*['\"]?[A-Za-z0-9_\-.]{12,}", re.IGNORECASE),
+    re.compile(r"\b(?:sk|pk|rk)-(?:test|live|proj|dummy)?-?[A-Za-z0-9_-]{10,}\b", re.IGNORECASE),
+    re.compile(r"\bAIza[A-Za-z0-9_-]{20,}\b"),
+    re.compile(r"\b(access[_-]?token|refresh[_-]?token|oauth[_-]?token)\b[^\n]{0,80}[:=]\s*['\"]?[A-Za-z0-9_\-.]{12,}", re.IGNORECASE),
+    re.compile(r"\bbearer\s+[A-Za-z0-9_\-.]{20,}", re.IGNORECASE),
+    re.compile(r"\b(service[_-]?role|supabase[_-]?service[_-]?role[_-]?key)\b[^\n]{0,80}[:=]\s*['\"]?[A-Za-z0-9_\-.]{12,}", re.IGNORECASE),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
+)
+
 
 def is_forbidden_tool_name(tool_name: str) -> bool:
     lowered = tool_name.lower()
@@ -80,4 +95,21 @@ def has_platform_write_intent(message: str) -> bool:
 def looks_secret(value: str) -> bool:
     """Return True when text appears to contain credentials or platform tokens."""
     lowered = value.lower()
-    return any(marker in lowered for marker in SECRET_VALUE_MARKERS)
+    return any(marker in lowered for marker in SECRET_VALUE_MARKERS) or any(
+        pattern.search(value) for pattern in SECRET_VALUE_PATTERNS
+    )
+
+
+def contains_secret(value: Any) -> bool:
+    """Recursively detect secrets in payloads before DB, tool, or LLM routing."""
+    if isinstance(value, str):
+        return looks_secret(value)
+    if isinstance(value, dict):
+        return any(
+            looks_secret(str(key)) or contains_secret(item)
+            for key, item in value.items()
+            if key not in {"workspaceId", "userId", "threadId"}
+        )
+    if isinstance(value, (list, tuple)):
+        return any(contains_secret(item) for item in value)
+    return False

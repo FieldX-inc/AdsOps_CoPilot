@@ -1,5 +1,6 @@
 import { StrictMode, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { createClient, type Session } from "@supabase/supabase-js";
 import {
   Bar,
   BarChart,
@@ -62,6 +63,39 @@ type ChatThreadResponse = {
   messages: ChatMessage[];
 };
 
+type ReadinessResponse = {
+  mode: "mock" | "adk-proxy";
+  status: string;
+  scopes?: {
+    mock: ReadinessScope;
+    production: ReadinessScope;
+  };
+  goNoGo: {
+    decision: string;
+    note: string;
+  };
+  checks: Array<{
+    id: string;
+    label: string;
+    status: "pass" | "todo" | "risk";
+    evidence: string[];
+  }>;
+  nextActions: string[];
+};
+
+type ReadinessScope = {
+  label: string;
+  decision: string;
+  note: string;
+  checks: Array<{
+    id: string;
+    label: string;
+    status: "pass" | "todo" | "risk";
+    evidence: string[];
+  }>;
+  nextActions?: string[];
+};
+
 type TodoItem = {
   id: string;
   text: string;
@@ -116,6 +150,30 @@ type DashboardResponse = {
   }>;
 };
 
+type ConnectionStatusResponse = {
+  workspaceId: string;
+  mode: "mock" | "production";
+  policy: {
+    access: "read-only";
+    mediaWriteEnabled: false;
+    note: string;
+  };
+  accounts: DashboardResponse["adAccounts"];
+  connections?: Array<{
+    id: string;
+    platform: Exclude<PlatformFilter, "all">;
+    status: "pending" | "connected" | "expired" | "revoked" | "error";
+    provider_account_id?: string | null;
+    expires_at?: string | null;
+  }>;
+  nextConnectors: Array<{
+    platform: Exclude<PlatformFilter, "all">;
+    label: string;
+    status: "planned" | "ready";
+    oauthPath: string;
+  }>;
+};
+
 type HelpArticle = {
   id: string;
   title: string;
@@ -130,11 +188,22 @@ type ColumnDetail = {
 };
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8787";
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const supabase = supabaseUrl && supabaseAnonKey ? createClient(supabaseUrl, supabaseAnonKey) : null;
 const columnBookmarkStorageKey = "adops-advisor:column-bookmarks";
 const demoPayload = {
   workspaceId: "demo-workspace",
   userId: "demo-user",
   threadId: "demo-thread",
+};
+
+type WorkspaceSession = {
+  workspaceId: string;
+  userId: string;
+  threadId: string;
+  workspaceName: string;
+  userEmail: string;
 };
 
 const welcomeMessage: ChatMessage = {
@@ -568,6 +637,7 @@ function App() {
   const [dashboardLoading, setDashboardLoading] = useState(true);
   const [dashboardError, setDashboardError] = useState("");
   const [usingDemoData, setUsingDemoData] = useState(false);
+  const [readiness, setReadiness] = useState<ReadinessResponse | null>(null);
   const [aiOpen, setAiOpen] = useState(false);
   const [input, setInput] = useState("");
   const [threadId, setThreadId] = useState(demoPayload.threadId);
@@ -579,18 +649,86 @@ function App() {
   const [thinkingStatus, setThinkingStatus] = useState("root_agent が会話内容を確認しています。");
   const [threadLoading, setThreadLoading] = useState(false);
   const [error, setError] = useState("");
+  const [session, setSession] = useState<Session | null>(null);
+  const [workspaceSession, setWorkspaceSession] = useState<WorkspaceSession | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState("");
+
+  const activePayload = workspaceSession ?? demoPayload;
+
+  function authHeaders(extra?: HeadersInit): HeadersInit {
+    return {
+      ...(extra ?? {}),
+      ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+    };
+  }
+
+  useEffect(() => {
+    if (!supabase) {
+      setAuthLoading(false);
+      setAuthError("VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY が未設定です。");
+      return;
+    }
+
+    let mounted = true;
+    supabase.auth.getSession().then(({ data }) => {
+      if (!mounted) return;
+      setSession(data.session);
+      setAuthLoading(false);
+    });
+    const { data: subscription } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+      if (!nextSession) {
+        setWorkspaceSession(null);
+        setMessages([welcomeMessage]);
+      }
+    });
+    return () => {
+      mounted = false;
+      subscription.subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!session) return;
+    const controller = new AbortController();
+    setAuthError("");
+    fetch(`${apiBaseUrl}/workspace/bootstrap`, {
+      headers: authHeaders(),
+      signal: controller.signal,
+    })
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.error ?? "workspaceの初期化に失敗しました。");
+        const nextWorkspaceSession = {
+          workspaceId: data.workspace.id as string,
+          userId: data.user.id as string,
+          threadId: data.workspace.id as string,
+          workspaceName: data.workspace.name as string,
+          userEmail: (data.user.email as string | undefined) ?? "",
+        };
+        setWorkspaceSession(nextWorkspaceSession);
+        setThreadId(nextWorkspaceSession.threadId);
+      })
+      .catch((caught) => {
+        if (caught instanceof DOMException && caught.name === "AbortError") return;
+        setAuthError(caught instanceof Error ? caught.message : "workspaceの初期化に失敗しました。");
+      });
+    return () => controller.abort();
+  }, [session]);
 
   useEffect(() => {
     writeColumnBookmarks(bookmarkedArticleIds);
   }, [bookmarkedArticleIds]);
 
   useEffect(() => {
+    if (!workspaceSession) return;
     const controller = new AbortController();
     setDashboardLoading(true);
     setDashboardError("");
     fetch(
-      `${apiBaseUrl}/dashboard?workspaceId=${demoPayload.workspaceId}&range=${range}&platform=${platform}`,
-      { signal: controller.signal },
+      `${apiBaseUrl}/dashboard?workspaceId=${activePayload.workspaceId}&range=${range}&platform=${platform}`,
+      { headers: authHeaders(), signal: controller.signal },
     )
       .then(async (res) => {
         const data = await res.json();
@@ -606,11 +744,28 @@ function App() {
       })
       .finally(() => setDashboardLoading(false));
     return () => controller.abort();
-  }, [range, platform]);
+  }, [range, platform, workspaceSession?.workspaceId, session?.access_token]);
 
   useEffect(() => {
+    if (!workspaceSession) return;
     const controller = new AbortController();
-    fetch(`${apiBaseUrl}/agent/threads?workspaceId=${demoPayload.workspaceId}`, { signal: controller.signal })
+    fetch(`${apiBaseUrl}/readiness?workspaceId=${activePayload.workspaceId}`, { headers: authHeaders(), signal: controller.signal })
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.error ?? "社内テスト準備状況の取得に失敗しました。");
+        setReadiness(normalizeReadiness(data as ReadinessResponse));
+      })
+      .catch((caught) => {
+        if (caught instanceof DOMException && caught.name === "AbortError") return;
+        setReadiness(createDemoReadiness());
+      });
+    return () => controller.abort();
+  }, [workspaceSession?.workspaceId, session?.access_token]);
+
+  useEffect(() => {
+    if (!workspaceSession) return;
+    const controller = new AbortController();
+    fetch(`${apiBaseUrl}/agent/threads?workspaceId=${activePayload.workspaceId}`, { headers: authHeaders(), signal: controller.signal })
       .then(async (res) => {
         const data = await res.json();
         if (!res.ok) throw new Error(data?.error ?? "チャットセッションの取得に失敗しました。");
@@ -628,12 +783,13 @@ function App() {
         ]);
       });
     return () => controller.abort();
-  }, []);
+  }, [workspaceSession?.workspaceId, session?.access_token]);
 
   useEffect(() => {
+    if (!workspaceSession) return;
     const controller = new AbortController();
     setThreadLoading(true);
-    fetch(`${apiBaseUrl}/agent/threads/${threadId}?workspaceId=${demoPayload.workspaceId}`, { signal: controller.signal })
+    fetch(`${apiBaseUrl}/agent/threads/${threadId}?workspaceId=${activePayload.workspaceId}`, { headers: authHeaders(), signal: controller.signal })
       .then(async (res) => {
         const data = await res.json();
         if (!res.ok) throw new Error(data?.error ?? "チャット履歴の取得に失敗しました。");
@@ -644,10 +800,10 @@ function App() {
       })
       .finally(() => setThreadLoading(false));
     return () => controller.abort();
-  }, [threadId]);
+  }, [threadId, workspaceSession?.workspaceId, session?.access_token]);
 
   function refreshThreads() {
-    fetch(`${apiBaseUrl}/agent/threads?workspaceId=${demoPayload.workspaceId}`)
+    fetch(`${apiBaseUrl}/agent/threads?workspaceId=${activePayload.workspaceId}`, { headers: authHeaders() })
       .then((res) => res.json())
       .then((data) => setThreads((data.threads as ChatThreadSummary[]) ?? []))
       .catch(() => undefined);
@@ -690,9 +846,9 @@ function App() {
     try {
       const res = await fetch(`${apiBaseUrl}/agent/chat/stream`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
-          ...demoPayload,
+          ...activePayload,
           threadId,
           message: text,
           context: {
@@ -720,9 +876,61 @@ function App() {
     }
   }
 
+  if (authLoading) {
+    return <AuthShell title="認証を確認しています" message="Supabase sessionを復元しています。" />;
+  }
+
+  if (!session || !workspaceSession) {
+    return (
+      <AuthPage
+        error={authError}
+        session={session}
+        onMagicLink={async (email) => {
+          if (!supabase) {
+            setAuthError("Supabase Auth clientが未設定です。");
+            return;
+          }
+          setAuthError("");
+          const { error: signInError } = await supabase.auth.signInWithOtp({
+            email,
+            options: { emailRedirectTo: window.location.origin },
+          });
+          if (signInError) setAuthError(signInError.message);
+          else setAuthError("確認メールを送信しました。メール内リンクからログインしてください。");
+        }}
+        onPasswordLogin={async (email, password) => {
+          if (!supabase) {
+            setAuthError("Supabase Auth clientが未設定です。");
+            return;
+          }
+          setAuthError("");
+          const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
+          if (signInError) setAuthError(signInError.message);
+        }}
+        onPasswordSignup={async (email, password) => {
+          if (!supabase) {
+            setAuthError("Supabase Auth clientが未設定です。");
+            return;
+          }
+          setAuthError("");
+          const { error: signUpError } = await supabase.auth.signUp({
+            email,
+            password,
+            options: { emailRedirectTo: window.location.origin },
+          });
+          if (signUpError) setAuthError(signUpError.message);
+          else setAuthError("ユーザーを作成しました。確認メールが必要な設定の場合はメール内リンクを開いてください。");
+        }}
+        onLogout={async () => {
+          await supabase?.auth.signOut();
+        }}
+      />
+    );
+  }
+
   return (
     <div className="app-shell">
-      <Sidebar active={view} onNavigate={setView} />
+      <Sidebar active={view} workspace={workspaceSession} onNavigate={setView} onLogout={() => supabase?.auth.signOut()} />
       <main id="main-content" className="main-content">
         {view === "dashboard" && (
           <DashboardPage
@@ -732,7 +940,8 @@ function App() {
             range={range}
             platform={platform}
             latestRecommendation={latestRecommendation}
-            usingDemoData={usingDemoData}
+            usingDemoData={isMockDataExperience(usingDemoData, readiness)}
+            readiness={readiness}
             onRangeChange={setRange}
             onPlatformChange={setPlatform}
             onOpenAi={() => setAiOpen(true)}
@@ -751,7 +960,7 @@ function App() {
             error={dashboardError}
             range={range}
             platform={platform}
-            usingDemoData={usingDemoData}
+            usingDemoData={isMockDataExperience(usingDemoData, readiness)}
             onRangeChange={setRange}
             onPlatformChange={setPlatform}
           />
@@ -765,7 +974,14 @@ function App() {
             onSelectArticle={setSelectedArticleId}
           />
         )}
-        {view === "connections" && <ConnectionsPage data={dashboardData} onOpenAi={() => setAiOpen(true)} />}
+        {view === "connections" && (
+          <ConnectionsPage
+            session={session}
+            workspace={workspaceSession}
+            usingDemoData={isMockDataExperience(usingDemoData, readiness)}
+            onOpenAi={() => setAiOpen(true)}
+          />
+        )}
       </main>
 
       <button type="button" className="ai-launcher" onClick={() => setAiOpen(true)}>
@@ -814,12 +1030,23 @@ function App() {
   );
 }
 
-function Sidebar({ active, onNavigate }: { active: View; onNavigate: (view: View) => void }) {
+function Sidebar({
+  active,
+  workspace,
+  onNavigate,
+  onLogout,
+}: {
+  active: View;
+  workspace: WorkspaceSession;
+  onNavigate: (view: View) => void;
+  onLogout: () => void;
+}) {
   return (
     <aside className="sidebar">
       <div className="brand-card">
-        <p>MVP</p>
+        <p>{workspace.workspaceName}</p>
         <strong>AdOps Advisor</strong>
+        <span>{workspace.userEmail}</span>
       </div>
       <nav aria-label="メインナビゲーション" className="nav">
         {navItems.map((item) => (
@@ -833,25 +1060,120 @@ function Sidebar({ active, onNavigate }: { active: View; onNavigate: (view: View
         ))}
       </nav>
       <form className="logout-box">
-        <button type="button">ログアウト</button>
+        <button type="button" onClick={onLogout}>ログアウト</button>
       </form>
     </aside>
+  );
+}
+
+function normalizeLoginId(value: string) {
+  const trimmed = value.trim();
+  if (trimmed === "dev") return "dev@fieldx.site";
+  return trimmed;
+}
+
+function AuthShell({ title, message }: { title: string; message: string }) {
+  return (
+    <div className="auth-shell">
+      <section className="auth-panel">
+        <p className="eyebrow">Supabase Auth</p>
+        <h1>{title}</h1>
+        <p>{message}</p>
+      </section>
+    </div>
+  );
+}
+
+function AuthPage({
+  error,
+  session,
+  onMagicLink,
+  onPasswordLogin,
+  onPasswordSignup,
+  onLogout,
+}: {
+  error: string;
+  session: Session | null;
+  onMagicLink: (email: string) => Promise<void>;
+  onPasswordLogin: (email: string, password: string) => Promise<void>;
+  onPasswordSignup: (email: string, password: string) => Promise<void>;
+  onLogout: () => Promise<void>;
+}) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [showMagicLink, setShowMagicLink] = useState(false);
+
+  return (
+    <div className="auth-shell">
+      <section className="auth-panel">
+        <p className="eyebrow">AdOps Advisor</p>
+        <h1>ログイン</h1>
+        <p>社内テスト用IDで入れます。ID: dev / PASS: dev1234</p>
+        {!session ? (
+          <div>
+            <form
+              className="auth-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void onPasswordLogin(normalizeLoginId(email), password);
+              }}
+            >
+              <label>
+                メールアドレス または ID
+                <input value={email} onChange={(event) => setEmail(event.target.value)} type="text" autoComplete="username" required />
+              </label>
+              <label>
+                パスワード
+                <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="current-password" minLength={6} required />
+              </label>
+              <div className="auth-actions">
+                <button type="submit">ログイン</button>
+                <button type="button" className="secondary-button" onClick={() => void onPasswordSignup(normalizeLoginId(email), password)}>
+                  アカウント作成
+                </button>
+              </div>
+            </form>
+            <button type="button" className="text-button auth-help" onClick={() => setShowMagicLink((current) => !current)}>
+              メールリンクでログインする
+            </button>
+            {showMagicLink && (
+              <div className="magic-link-box">
+                <p>メール送信制限に当たる場合があります。通常は上のパスワードログインを使ってください。</p>
+                <button type="button" className="secondary-button" onClick={() => void onMagicLink(normalizeLoginId(email))}>
+                  Magic Linkを送る
+                </button>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="auth-form">
+            <p>ログイン済みです。workspaceを初期化しています。</p>
+            <button type="button" onClick={() => void onLogout()}>ログアウト</button>
+          </div>
+        )}
+        {error && <p className="form-message">{error}</p>}
+      </section>
+    </div>
   );
 }
 
 function OnboardingPanel({
   data,
   usingDemoData,
+  readiness,
   onOpenAi,
   onOpenConnections,
 }: {
   data: DashboardResponse | null;
   usingDemoData: boolean;
+  readiness: ReadinessResponse | null;
   onOpenAi: () => void;
   onOpenConnections: () => void;
 }) {
-  const connected = data?.adAccounts.filter((account) => account.status === "connected").length ?? 0;
+  const connected = usingDemoData ? 0 : data?.adAccounts.filter((account) => account.status === "connected").length ?? 0;
   const total = data?.adAccounts.length ?? 3;
+  const mockScope = readiness?.scopes?.mock;
+  const productionScope = readiness?.scopes?.production;
   const steps = [
     { label: "広告アカウントをread-only連携", done: connected > 0 },
     { label: "KPIと異常を確認", done: Boolean(data) },
@@ -881,7 +1203,36 @@ function OnboardingPanel({
         <button type="button" onClick={onOpenConnections}>連携状態を見る</button>
         <button type="button" className="secondary-button" onClick={onOpenAi}>AIに相談する</button>
       </div>
+      {readiness && (
+        <div className="readiness-summary">
+          <ReadinessScopeCard scope={mockScope ?? createLegacyMockScope(readiness)} tone="go" />
+          <ReadinessScopeCard scope={productionScope ?? createLegacyProductionScope(readiness)} tone="blocked" />
+        </div>
+      )}
     </section>
+  );
+}
+
+function ReadinessScopeCard({ scope, tone }: { scope: ReadinessScope; tone: "go" | "blocked" }) {
+  const passed = scope.checks.filter((check) => check.status === "pass").length;
+  const remaining = scope.checks.filter((check) => check.status !== "pass");
+
+  return (
+    <article className={`readiness-scope ${tone}`}>
+      <div>
+        <p className="eyebrow">{scope.label}</p>
+        <strong>{scope.decision}</strong>
+        <span>{passed}/{scope.checks.length} checks OK - {scope.note}</span>
+      </div>
+      <ul>
+        {(remaining.length ? remaining : scope.checks.slice(0, 2)).slice(0, 3).map((check) => (
+          <li key={check.id}>
+            <span>{check.status === "pass" ? "OK" : check.status === "risk" ? "要確認" : "未完了"}</span>
+            {check.label}
+          </li>
+        ))}
+      </ul>
+    </article>
   );
 }
 
@@ -893,6 +1244,7 @@ function DashboardPage({
   platform,
   latestRecommendation,
   usingDemoData,
+  readiness,
   onRangeChange,
   onPlatformChange,
   onOpenAi,
@@ -906,6 +1258,7 @@ function DashboardPage({
   platform: PlatformFilter;
   latestRecommendation: ChatResponse["recommendation"] | null;
   usingDemoData: boolean;
+  readiness: ReadinessResponse | null;
   onRangeChange: (range: number) => void;
   onPlatformChange: (platform: PlatformFilter) => void;
   onOpenAi: () => void;
@@ -917,9 +1270,11 @@ function DashboardPage({
       <PageHeader title="ダッシュボード" description="APIが持つ最新広告データからKPI、異常、優先対応キャンペーンを表示します。">
         <FilterControls range={range} platform={platform} onRangeChange={onRangeChange} onPlatformChange={onPlatformChange} />
       </PageHeader>
+      {usingDemoData && <MockDataBanner location="Dashboard" />}
       <OnboardingPanel
         data={data}
         usingDemoData={usingDemoData}
+        readiness={readiness}
         onOpenAi={onOpenAi}
         onOpenConnections={onOpenConnections}
       />
@@ -1035,7 +1390,7 @@ function BiPage({
       <PageHeader title="BI分析" description="時系列、構成比、キャンペーン比較をAPIデータから分析します。">
         <FilterControls range={range} platform={platform} onRangeChange={onRangeChange} onPlatformChange={onPlatformChange} />
       </PageHeader>
-      {usingDemoData && <p className="demo-banner">API未接続のため、ユーザーテスト用のデモデータを表示しています。</p>}
+      {usingDemoData && <MockDataBanner location="BI分析" />}
       <StatusLine loading={loading} error={error} />
       {data ? (
         <>
@@ -1043,7 +1398,7 @@ function BiPage({
             <SimpleMetric label="費用" value={formatMoney(data.summary.cost)} />
             <SimpleMetric label="売上" value={formatMoney(data.summary.revenue)} />
             <SimpleMetric label="ROAS" value={formatPercent(data.summary.roas)} />
-            <SimpleMetric label="CVR" value={formatPercent(data.summary.cvr, 2)} />
+            <SimpleMetric label="CPA" value={formatMoney(data.summary.cpa)} />
           </section>
           <section className="bi-grid">
             <article className="card chart-card">
@@ -1298,17 +1653,89 @@ function BookmarkButton({
   );
 }
 
-function ConnectionsPage({ data, onOpenAi }: { data: DashboardResponse | null; onOpenAi: () => void }) {
-  const accounts = data?.adAccounts ?? [];
-  const platformLabels: Record<Exclude<PlatformFilter, "all">, string> = {
-    google: "Google Ads",
-    meta: "Meta Ads",
-    yahoo: "Yahoo Ads",
-  };
+function ConnectionsPage({
+  session,
+  workspace,
+  usingDemoData,
+  onOpenAi,
+}: {
+  session: Session;
+  workspace: WorkspaceSession;
+  usingDemoData: boolean;
+  onOpenAi: () => void;
+}) {
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatusResponse | null>(null);
+  const [connectionLoading, setConnectionLoading] = useState(true);
+  const [connectionNotice, setConnectionNotice] = useState("");
+  const [customers, setCustomers] = useState<Array<{ resourceName: string; customerId: string }>>([]);
+  const plannedConnections: Array<{
+    platform: Exclude<PlatformFilter, "all">;
+    label: string;
+    accountHint: string;
+  }> = [
+    { platform: "google", label: "Google Ads", accountHint: "Google Ads API read-only OAuth" },
+    { platform: "meta", label: "Meta Ads", accountHint: "Meta Marketing API read-only OAuth" },
+    { platform: "yahoo", label: "Yahoo Ads", accountHint: "Yahoo広告 API read-only OAuth" },
+  ];
+  const policyNote =
+    connectionStatus?.policy.note ??
+    "MVPでは広告媒体APIへの変更操作は行わず、人間が管理画面で実行する手順だけを返します。";
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setConnectionLoading(true);
+    setConnectionNotice("");
+    fetch(`${apiBaseUrl}/connections/status?workspaceId=${workspace.workspaceId}`, {
+      headers: { Authorization: `Bearer ${session.access_token}` },
+      signal: controller.signal,
+    })
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.error ?? "連携予定の取得に失敗しました。");
+        setConnectionStatus(data as ConnectionStatusResponse);
+      })
+      .catch((caught) => {
+        if (caught instanceof DOMException && caught.name === "AbortError") return;
+        setConnectionStatus(null);
+        setConnectionNotice(caught instanceof Error ? `mock予定表示に切り替えています: ${caught.message}` : "mock予定表示に切り替えています。");
+      })
+      .finally(() => setConnectionLoading(false));
+    return () => controller.abort();
+  }, [session.access_token, workspace.workspaceId]);
+
+  const googleStatus = connectionStatus?.connections?.find((connection) => connection.platform === "google")?.status ?? "pending";
+
+  async function openGoogleOAuth() {
+    const res = await fetch(`${apiBaseUrl}/oauth/google/start-url`, {
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
+    const data = await res.json();
+    if (!res.ok || !data.url) {
+      setConnectionNotice(data?.error ?? "Google OAuth開始URLを取得できませんでした。");
+      return;
+    }
+    window.location.href = data.url;
+  }
+
+  async function loadGoogleCustomers() {
+    setConnectionNotice("");
+    const res = await fetch(`${apiBaseUrl}/google-ads/customers?workspaceId=${workspace.workspaceId}`, {
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setConnectionNotice(data?.error ?? "Google Ads account listの取得に失敗しました。");
+      return;
+    }
+    setCustomers(data.customers ?? []);
+  }
 
   return (
     <div>
       <PageHeader title="データ連携" description="APIキーを取得せず、広告管理画面へのログイン許可だけで連携します。" />
+      {usingDemoData && <MockDataBanner location="データ連携" />}
+      <StatusLine loading={connectionLoading} error="" />
+      {connectionNotice && <p className="muted connection-fallback">{connectionNotice}</p>}
       <section className="card connection-intro">
         <div>
           <p className="eyebrow">OAuth read-only</p>
@@ -1317,9 +1744,23 @@ function ConnectionsPage({ data, onOpenAi }: { data: DashboardResponse | null; o
             「連携する」を押すと各広告媒体の認可画面へ移動し、ユーザーはログインして読み取り権限を許可するだけです。
             トークンはサーバー側で暗号化保存し、ブラウザやAIへの文脈には含めません。
           </p>
+          <p className="connection-policy">{policyNote}</p>
         </div>
-        <button type="button" onClick={onOpenAi}>連携後の分析を相談</button>
+        <button type="button" onClick={onOpenAi}>mockデータでAI相談</button>
       </section>
+      {customers.length > 0 && (
+        <section className="card account-picker">
+          <h2>取得できたGoogle Adsアカウント</h2>
+          <ul>
+            {customers.map((customer) => (
+              <li key={customer.resourceName}>
+                <strong>{customer.customerId}</strong>
+                <span>{customer.resourceName}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       <section className="oauth-flow">
         {["ログイン", "読み取りを許可", "分析に利用"].map((step, index) => (
           <div className="oauth-step" key={step}>
@@ -1329,29 +1770,69 @@ function ConnectionsPage({ data, onOpenAi }: { data: DashboardResponse | null; o
         ))}
       </section>
       <section className="connection-grid">
-        {accounts.length > 0 ? (
-          accounts.map((account) => (
-            <article className="card connection-card" key={account.id}>
-              <p className="badge">APIキー不要</p>
-              <h2>{platformLabels[account.platform]}</h2>
-              <p className="muted">{account.name}</p>
-              <p className="muted">status: {account.status}</p>
-              <p className="muted">last fetched: {formatDateTime(account.lastFetchedAt)}</p>
-              <button type="button">{account.status === "connected" ? "連携済み" : `${platformLabels[account.platform]} と連携`}</button>
+        {plannedConnections.map((connection) => {
+          const connector = findPlannedConnector(connectionStatus, connection.platform);
+          return (
+            <article className="card connection-card" key={connection.platform}>
+              <div className="connection-card-header">
+                <p className="badge">APIキー不要</p>
+                <p className="connection-status">{connection.platform === "google" ? statusLabel(googleStatus) : "未接続"}</p>
+              </div>
+              <h2>{connection.label}</h2>
+              <p className="muted">{connection.accountHint} を予定しています。現時点では社内テスト用のmockデータで画面とAI相談を確認します。</p>
+              <ul className="connection-notes">
+                <li>read-only OAuth予定</li>
+                <li>媒体write / 自動変更なし</li>
+                <li>secretやtokenはブラウザに表示しない</li>
+              </ul>
+              {connector?.oauthPath && (
+                <p className="connection-route">
+                  予定導線: <code>{connector.oauthPath}</code>
+                </p>
+              )}
+              {connection.platform === "google" ? (
+                <div className="connection-actions">
+                  <button type="button" onClick={() => void openGoogleOAuth()}>
+                    Google Ads と連携
+                  </button>
+                  <button type="button" className="secondary-button" disabled={googleStatus !== "connected"} onClick={() => void loadGoogleCustomers()}>
+                    アカウント一覧を取得
+                  </button>
+                </div>
+              ) : (
+                <button type="button" disabled>{connection.label} OAuth準備中</button>
+              )}
             </article>
-          ))
-        ) : (
-          ["Google Ads", "Meta Ads", "Yahoo Ads"].map((platformName) => (
-            <article className="card connection-card" key={platformName}>
-              <p className="badge">APIキー不要</p>
-              <h2>{platformName}</h2>
-              <p className="muted">広告管理画面でログインして読み取り権限を許可するだけの導線にします。現在はmockデータでAI体験を確認できます。</p>
-              <button type="button">{platformName} と連携</button>
-            </article>
-          ))
-        )}
+          );
+        })}
       </section>
     </div>
+  );
+}
+
+function statusLabel(status: string) {
+  const labels: Record<string, string> = {
+    connected: "接続済み",
+    pending: "未接続",
+    expired: "期限切れ",
+    error: "エラー",
+    revoked: "解除済み",
+  };
+  return labels[status] ?? "未接続";
+}
+
+function findPlannedConnector(
+  status: ConnectionStatusResponse | null,
+  platform: Exclude<PlatformFilter, "all">,
+) {
+  return status?.nextConnectors.find((connector) => connector.platform === platform);
+}
+
+function MockDataBanner({ location }: { location: string }) {
+  return (
+    <p className="demo-banner">
+      {location} は社内ユーザーテスト用のmock広告データを表示しています。Google / Meta / Yahoo の実広告アカウントは未接続です。
+    </p>
   );
 }
 
@@ -1823,6 +2304,157 @@ function filterDemoArticles(tags: string[]) {
   if (tags.length === 0) return demoArticles;
   const normalizedTags = tags.map((tag) => tag.toLowerCase());
   return demoArticles.filter((article) => article.tags.some((tag) => normalizedTags.includes(tag.toLowerCase())));
+}
+
+function createDemoReadiness(): ReadinessResponse {
+  return {
+    mode: "mock",
+    status: "ready_with_mock_data",
+    scopes: {
+      mock: {
+        label: "mock test",
+        decision: "Go",
+        note: "credentialなしで社内体験検証できます。",
+        checks: [
+          {
+            id: "local-services",
+            label: "Web / API / ADK agentをローカル起動できる",
+            status: "pass",
+            evidence: ["npm run dev"],
+          },
+          {
+            id: "mock-data",
+            label: "実広告credentialなしでKPI、異常、AI回答を確認できる",
+            status: "pass",
+            evidence: ["dashboard fallback", "demo AI response"],
+          },
+          {
+            id: "human-in-loop",
+            label: "媒体writeを行わず、人間向け作業手順として提案する",
+            status: "pass",
+            evidence: ["mediaWriteEnabled=false"],
+          },
+        ],
+        nextActions: ["社内テスト範囲をmockデータの体験検証に限定する。"],
+      },
+      production: {
+        label: "production readiness",
+        decision: "No-Go",
+        note: "Supabase Auth、実OAuth、共有URLが未完了です。",
+        checks: [
+          {
+            id: "auth-oauth",
+            label: "Supabase Authと実OAuth callbackのE2E",
+            status: "todo",
+            evidence: ["demo workspaceで代替"],
+          },
+          {
+            id: "real-media-apis",
+            label: "Google / Meta / Yahoo read-only APIの実接続",
+            status: "todo",
+            evidence: ["mock広告データで代替"],
+          },
+          {
+            id: "deployment",
+            label: "共有URL、テスト用env、ログ確認手順",
+            status: "todo",
+            evidence: ["ローカル実施なら不要"],
+          },
+        ],
+        nextActions: ["実OAuth、認証、デプロイは次マイルストーンで扱う。"],
+      },
+    },
+    goNoGo: {
+      decision: "go_for_internal_mock_test",
+      note: "API未起動時もデモデータで確認できます。実OAuthと認証は次フェーズです。",
+    },
+    checks: [
+      {
+        id: "local-services",
+        label: "Web / API / ADK agentをローカル起動できる",
+        status: "pass",
+        evidence: ["npm run dev"],
+      },
+      {
+        id: "mock-data",
+        label: "実広告credentialなしでKPI、異常、AI回答を確認できる",
+        status: "pass",
+        evidence: ["dashboard fallback", "demo AI response"],
+      },
+      {
+        id: "human-in-loop",
+        label: "媒体writeを行わず、人間向け作業手順として提案する",
+        status: "pass",
+        evidence: ["mediaWriteEnabled=false"],
+      },
+      {
+        id: "auth-oauth",
+        label: "Supabase Authと実OAuth callbackのE2E",
+        status: "todo",
+        evidence: ["demo workspaceで代替"],
+      },
+      {
+        id: "real-media-apis",
+        label: "Google / Meta / Yahoo read-only APIの実接続",
+        status: "todo",
+        evidence: ["mock広告データで代替"],
+      },
+      {
+        id: "deployment",
+        label: "共有URL、テスト用env、ログ確認手順",
+        status: "todo",
+        evidence: ["ローカル実施なら不要"],
+      },
+    ],
+    nextActions: [
+      "社内テスト範囲をmockデータの体験検証に限定する。",
+      "実OAuth、認証、デプロイは次マイルストーンで扱う。",
+    ],
+  };
+}
+
+function normalizeReadiness(readiness: ReadinessResponse): ReadinessResponse {
+  if (readiness.scopes?.mock && readiness.scopes.production) return readiness;
+  return {
+    ...readiness,
+    scopes: {
+      mock: createLegacyMockScope(readiness),
+      production: createLegacyProductionScope(readiness),
+    },
+  };
+}
+
+function createLegacyMockScope(readiness: ReadinessResponse): ReadinessScope {
+  const mockChecks = readiness.checks.filter((check) =>
+    ["local-services", "mock-data", "human-in-loop"].includes(check.id),
+  );
+  return {
+    label: "mock test",
+    decision: mockChecks.every((check) => check.status === "pass") ? "Go" : "要確認",
+    note: readiness.goNoGo.note,
+    checks: mockChecks.length ? mockChecks : readiness.checks,
+    nextActions: readiness.nextActions,
+  };
+}
+
+function createLegacyProductionScope(readiness: ReadinessResponse): ReadinessScope {
+  const productionChecks = readiness.checks.filter((check) =>
+    ["auth-oauth", "real-media-apis", "deployment"].includes(check.id),
+  );
+  return {
+    label: "production readiness",
+    decision: productionChecks.every((check) => check.status === "pass") ? "Go" : "No-Go",
+    note: "実広告データで限定運用するには未完了項目があります。",
+    checks: productionChecks.length ? productionChecks : readiness.checks.filter((check) => check.status !== "pass"),
+    nextActions: readiness.nextActions,
+  };
+}
+
+function isMockDataExperience(usingDemoData: boolean, readiness: ReadinessResponse | null) {
+  if (usingDemoData) return true;
+  if (!readiness) return false;
+  const productionChecks = readiness.scopes?.production.checks ?? [];
+  return readiness.status.includes("mock") || productionChecks.some((check) => check.status !== "pass");
 }
 
 function readColumnBookmarks() {

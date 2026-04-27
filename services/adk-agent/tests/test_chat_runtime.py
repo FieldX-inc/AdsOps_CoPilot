@@ -5,6 +5,18 @@ from unittest.mock import patch
 from ad_ops_advisor.chat_runtime import handle_chat
 from ad_ops_advisor.gemini_runtime import GeminiRuntimeError
 
+REQUIRED_ANSWER_SECTIONS = (
+    "結論",
+    "根拠",
+    "原因仮説",
+    "推奨アクション",
+    "人間向け作業手順",
+    "実施前チェック",
+    "リスク",
+    "実施後の観察",
+    "自信度",
+)
+
 
 class FakeRepository:
     def __init__(self) -> None:
@@ -173,6 +185,92 @@ def test_handle_chat_write_intent_short_circuits_before_database_routing() -> No
 
     assert result["policy"] == {"name": "no_media_write", "enforced": True}
     assert "直接変更・停止・作成することはできません" in result["message"]["content"]
+    assert "CPAが悪いキャンペーンの予算を下げて" not in result["message"]["content"]
+    assert_no_media_write_execution_claims(result)
+    assert_response_contract(result)
+
+
+def test_handle_chat_ad_submission_request_is_no_write_policy() -> None:
+    with (
+        patch("ad_ops_advisor.chat_runtime.is_database_configured", return_value=True),
+        patch("ad_ops_advisor.chat_runtime.get_repository", side_effect=AssertionError("database should not be used")),
+    ):
+        result = handle_chat(
+            {
+                "workspaceId": "workspace-1",
+                "userId": "user-1",
+                "threadId": "thread-1",
+                "message": "反応が良さそうな広告を入稿して",
+            }
+        )
+
+    assert result["policy"] == {"name": "no_media_write", "enforced": True}
+    assert "反応が良さそうな広告を入稿して" not in result["message"]["content"]
+    assert_no_media_write_execution_claims(result)
+    assert_response_contract(result)
+
+
+def test_handle_chat_secret_input_short_circuits_before_database_routing() -> None:
+    with (
+        patch("ad_ops_advisor.chat_runtime.is_database_configured", return_value=True),
+        patch("ad_ops_advisor.chat_runtime.get_repository", side_effect=AssertionError("database should not be used")),
+    ):
+        result = handle_chat(
+            {
+                "workspaceId": "workspace-1",
+                "userId": "user-1",
+                "threadId": "thread-1",
+                "message": "このapi_key=sk-test-dummy-not-a-real-secretで分析して",
+            }
+        )
+
+    assert result["policy"] == {"name": "secret_exclusion", "enforced": True}
+    assert "secret、OAuth token、API key" in result["message"]["content"]
+    assert "sk-test-dummy-not-a-real-secret" not in result["message"]["content"]
+    assert_response_contract(result)
+
+
+def test_handle_chat_bare_secret_value_short_circuits_before_database_routing() -> None:
+    with (
+        patch("ad_ops_advisor.chat_runtime.is_database_configured", return_value=True),
+        patch("ad_ops_advisor.chat_runtime.get_repository", side_effect=AssertionError("database should not be used")),
+    ):
+        result = handle_chat(
+            {
+                "workspaceId": "workspace-1",
+                "userId": "user-1",
+                "threadId": "thread-1",
+                "message": "このキーで分析して sk-test-dummy-not-a-real-secret",
+            }
+        )
+
+    assert result["policy"] == {"name": "secret_exclusion", "enforced": True}
+    assert "sk-test-dummy-not-a-real-secret" not in result["message"]["content"]
+    assert_response_contract(result)
+
+
+def test_handle_chat_secret_in_context_short_circuits_before_database_or_llm_routing() -> None:
+    with (
+        patch("ad_ops_advisor.chat_runtime.is_database_configured", return_value=True),
+        patch("ad_ops_advisor.chat_runtime.is_gemini_configured", return_value=True),
+        patch("ad_ops_advisor.chat_runtime.get_repository", side_effect=AssertionError("database should not be used")),
+        patch("ad_ops_advisor.chat_runtime.generate_advisor_response", side_effect=AssertionError("LLM should not be used")),
+    ):
+        result = handle_chat(
+            {
+                "workspaceId": "workspace-1",
+                "userId": "user-1",
+                "threadId": "thread-1",
+                "message": "CPA悪化を見て",
+                "context": {
+                    "refresh_token": "raw-refresh-token-value",
+                },
+            }
+        )
+
+    assert result["policy"] == {"name": "secret_exclusion", "enforced": True}
+    assert "raw-refresh-token-value" not in result["message"]["content"]
+    assert_response_contract(result)
 
 
 def test_handle_chat_uses_adk_gemini_runtime_without_database_when_configured() -> None:
@@ -249,3 +347,29 @@ def test_handle_chat_records_adk_gemini_mode_for_db_backed_response() -> None:
 
     assert result["mode"] == "adk_gemini"
     assert repository.appended_messages[-1][5] == {"mode": "adk_gemini"}
+
+
+def assert_response_contract(result: dict) -> None:
+    content = result["message"]["content"]
+
+    assert result["message"]["role"] == "assistant"
+    for section in REQUIRED_ANSWER_SECTIONS:
+        assert f"{section}:" in content
+    assert result["recommendation"]["operatorSteps"]
+    assert result["humanTaskDraft"]["status"] == "suggested"
+
+
+def assert_no_media_write_execution_claims(result: dict) -> None:
+    content = result["message"]["content"]
+
+    forbidden_claims = (
+        "変更しました",
+        "停止しました",
+        "作成しました",
+        "適用しました",
+        "予算を下げました",
+        "入札を上げました",
+    )
+    for claim in forbidden_claims:
+        assert claim not in content
+    assert "手動実行" in content or "管理画面" in content

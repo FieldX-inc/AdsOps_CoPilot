@@ -487,7 +487,13 @@ export function getConnectionStatus(
   workspaceId: string,
   platform: PlatformFilter = "all",
 ): ConnectionStatusResponse {
-  const accounts = platform === "all" ? adAccounts : adAccounts.filter((account) => account.platform === platform);
+  const accounts = (platform === "all" ? adAccounts : adAccounts.filter((account) => account.platform === platform)).map(
+    (account) => ({
+      ...account,
+      status: "pending" as const,
+      lastFetchedAt: "",
+    }),
+  );
 
   return {
     workspaceId,

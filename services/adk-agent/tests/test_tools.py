@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from ad_ops_advisor.policies.no_write_policy import has_platform_write_intent, is_forbidden_tool_name
+from ad_ops_advisor import tool_audit
+from ad_ops_advisor.policies.no_write_policy import contains_secret, has_platform_write_intent, is_forbidden_tool_name
 from ad_ops_advisor.tools import human_task_tools, memory_tools
 
 
@@ -10,6 +11,10 @@ class FakeRepository:
     def __init__(self) -> None:
         self.memory_call = None
         self.task_call = None
+        self.tool_calls = []
+
+    def record_tool_call(self, *args, **kwargs) -> None:
+        self.tool_calls.append((args, kwargs))
 
     def write_user_memory(self, workspace_id: str, user_id: str, memory_type: str, content: str) -> dict:
         self.memory_call = (workspace_id, user_id, memory_type, content)
@@ -41,6 +46,8 @@ def test_write_user_memory_uses_workspace_user_scope() -> None:
     repository = FakeRepository()
 
     with (
+        patch.object(tool_audit, "is_database_configured", return_value=True),
+        patch.object(tool_audit, "get_repository", return_value=repository),
         patch.object(memory_tools, "is_database_configured", return_value=True),
         patch.object(memory_tools, "get_repository", return_value=repository),
     ):
@@ -52,6 +59,7 @@ def test_write_user_memory_uses_workspace_user_scope() -> None:
 
 def test_write_user_memory_rejects_secret_like_content_before_repository() -> None:
     with (
+        patch.object(tool_audit, "is_database_configured", return_value=False),
         patch.object(memory_tools, "is_database_configured", return_value=True),
         patch.object(memory_tools, "get_repository", side_effect=AssertionError("repository should not be used")),
     ):
@@ -70,6 +78,8 @@ def test_create_human_task_uses_workspace_user_scope() -> None:
     repository = FakeRepository()
 
     with (
+        patch.object(tool_audit, "is_database_configured", return_value=True),
+        patch.object(tool_audit, "get_repository", return_value=repository),
         patch.object(human_task_tools, "is_database_configured", return_value=True),
         patch.object(human_task_tools, "get_repository", return_value=repository),
     ):
@@ -99,5 +109,13 @@ def test_no_write_policy_detects_forbidden_tools_and_messages() -> None:
     assert is_forbidden_tool_name("update_campaign_budget")
     assert is_forbidden_tool_name("pause_campaign")
     assert has_platform_write_intent("CPAが悪いキャンペーンを停止して")
+    assert has_platform_write_intent("新しい広告を入稿して")
     assert has_platform_write_intent("Please change the budget to 10000")
     assert not has_platform_write_intent("CPAが悪い理由を分析して")
+
+
+def test_secret_policy_detects_labeled_and_bare_secret_values_in_payloads() -> None:
+    assert contains_secret("api_key=sk-test-dummy-not-a-real-secret")
+    assert contains_secret("このキーで分析して sk-test-dummy-not-a-real-secret")
+    assert contains_secret({"context": {"refresh_token": "raw-refresh-token-value"}})
+    assert not contains_secret({"workspaceId": "workspace-1", "message": "CPAが悪い理由を分析して"})

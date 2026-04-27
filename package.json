@@ -8,7 +8,7 @@
     "dev": "concurrently -n web,api,agent -c cyan,magenta,green \"npm run dev:web\" \"npm run dev:api\" \"npm run dev:agent\"",
     "dev:web": "npm --workspace @adops/web run dev",
     "dev:api": "npm --workspace @adops/api run dev",
-    "dev:agent": "cd services/adk-agent && python3 -m ad_ops_advisor.http_server",
+    "dev:agent": "cd services/adk-agent && python3.11 -m ad_ops_advisor.http_server",
     "build": "npm --workspace @adops/web run build && npm --workspace @adops/api run build",
     "typecheck": "npm --workspace @adops/web run typecheck && npm --workspace @adops/api run typecheck"
   },

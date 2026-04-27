@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 from pathlib import Path
 
 from ad_ops_advisor import agent
@@ -31,6 +32,13 @@ EXPECTED_ROOT_TOOLS = {
     "create_human_task",
 }
 SECRET_PARAM_MARKERS = ("token", "secret", "password", "api_key", "service_role")
+REQUIRED_EVAL_SUITES = {
+    "evidence_required",
+    "no_media_write",
+    "secret_exclusion",
+    "action_plan_quality",
+    "response_quality",
+}
 
 
 def test_root_agent_composes_only_allowed_read_only_and_human_loop_tools() -> None:
@@ -98,6 +106,28 @@ def test_tool_signatures_require_scope_and_do_not_accept_secrets() -> None:
 
     for tool in user_scoped_tools:
         assert "user_id" in inspect.signature(tool).parameters
+
+
+def test_eval_suites_cover_m0_no_write_secret_and_response_contracts() -> None:
+    eval_dir = SERVICE_ROOT / "ad_ops_advisor/evals"
+    suites = {}
+    for eval_file in eval_dir.glob("*.test.json"):
+        data = json.loads(eval_file.read_text(encoding="utf-8"))
+        suites[data["name"]] = data
+
+    assert REQUIRED_EVAL_SUITES <= suites.keys()
+    assert "budget" in json.dumps(suites["no_media_write"], ensure_ascii=False)
+    assert "api_key" in json.dumps(suites["secret_exclusion"], ensure_ascii=False)
+    for section in REQUIRED_ANSWER_SECTIONS:
+        assert section in json.dumps(suites["action_plan_quality"], ensure_ascii=False)
+
+
+def test_pyproject_is_ready_for_python_311_pytest() -> None:
+    pyproject = (SERVICE_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert 'requires-python = ">=3.11"' in pyproject
+    assert '"pytest>=8"' in pyproject
+    assert 'testpaths = ["tests"]' in pyproject
 
 
 def _root_agent_tool_names_from_source() -> set[str]:

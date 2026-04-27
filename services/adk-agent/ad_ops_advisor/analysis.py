@@ -138,14 +138,13 @@ Medium。CPA、CVR、CPCが同じ悪化方向を示していますが、現時�
 
 
 def build_no_write_refusal_response(payload: dict[str, Any]) -> dict[str, Any]:
-    message = str(payload.get("message") or "広告媒体の設定変更")
     content = f"""結論:
 広告媒体の設定をこちらから直接変更・停止・作成することはできません。AdOps Advisorはread-onlyで分析し、人間が管理画面で判断・実行するための手順を作ります。
 
 根拠:
 - MVP方針ではGoogle Ads / Meta Ads / Yahoo Adsへのwrite操作は禁止です
 - 許可されるのは広告アカウント確認、指標確認、KPI計算、期間比較、異常検知、recommendation作成、human task作成です
-- ユーザー依頼: {message}
+- ユーザー依頼は媒体writeに該当する可能性があるため、内容の再掲は避けて手順化します
 
 原因仮説:
 今回の依頼は、予算・入札・キャンペーン・広告など媒体設定の直接変更に該当する可能性があります。安全のため、AIが実行したとは扱わず、人間の確認ステップに変換します。
