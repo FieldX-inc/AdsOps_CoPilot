@@ -125,6 +125,10 @@ export async function handleGoogleOAuthCallback(code: string | null, state: stri
 
 export async function listAccessibleGoogleCustomers(auth: AuthContext) {
   const accessToken = await readGoogleAccessToken(auth);
+  return listAccessibleGoogleCustomersForToken(accessToken);
+}
+
+async function listAccessibleGoogleCustomersForToken(accessToken: string) {
   const res = await fetch(`https://googleads.googleapis.com/${googleAdsApiVersion}/customers:listAccessibleCustomers`, {
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -216,7 +220,8 @@ export async function syncGoogleCustomer(auth: AuthContext, customerId: string, 
     name: normalizedManagerCustomerId ? `Google Ads ${normalized} (MCC ${normalizedManagerCustomerId})` : `Google Ads ${normalized}`,
     status: "connected",
   });
-  const rows = await fetchGoogleAdGroupMetrics(accessToken, normalized, days, { loginCustomerId: normalizedManagerCustomerId });
+  const loginCustomerIds = await resolveGoogleAdsLoginCustomerIds(accessToken, normalized, normalizedManagerCustomerId);
+  const { rows, loginCustomerId } = await fetchGoogleAdGroupMetricsWithLoginFallback(accessToken, normalized, days, loginCustomerIds);
   const campaignIds = new Map<string, string>();
   for (const row of rows) {
     const campaign = await upsertCampaignSnapshot({
@@ -261,11 +266,60 @@ export async function syncGoogleCustomer(auth: AuthContext, customerId: string, 
   return {
     customerId: normalized,
     managerCustomerId: normalizedManagerCustomerId || null,
+    loginCustomerId,
     adAccountId: account.id,
     rowsSynced: rows.length,
     campaignCount: new Set(rows.map((row) => row.campaignId)).size,
     adGroupCount: new Set(rows.map((row) => row.adGroupId)).size,
   };
+}
+
+async function resolveGoogleAdsLoginCustomerIds(accessToken: string, customerId: string, preferredManagerCustomerId: string) {
+  const candidates: Array<string | null> = [];
+  if (preferredManagerCustomerId) candidates.push(preferredManagerCustomerId);
+  try {
+    const customers = await listAccessibleGoogleCustomersForToken(accessToken);
+    for (const customer of customers) {
+      if (normalizeCustomerId(customer.customerId) !== customerId) continue;
+      const managerCustomerId = normalizeCustomerId(customer.managerCustomerId ?? "");
+      candidates.push(managerCustomerId || null);
+    }
+  } catch {
+    // Sync can still work with the selected candidate even if discovery is temporarily unavailable.
+  }
+  candidates.push(null);
+  return dedupeLoginCustomerIds(candidates);
+}
+
+function dedupeLoginCustomerIds(customerIds: Array<string | null>) {
+  const seen = new Set<string>();
+  const result: Array<string | null> = [];
+  for (const customerId of customerIds) {
+    const key = customerId ?? "direct";
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(customerId);
+  }
+  return result;
+}
+
+async function fetchGoogleAdGroupMetricsWithLoginFallback(
+  accessToken: string,
+  customerId: string,
+  days: number,
+  loginCustomerIds: Array<string | null>,
+) {
+  let lastPermissionError: unknown = null;
+  for (const loginCustomerId of loginCustomerIds) {
+    try {
+      const rows = await fetchGoogleAdGroupMetrics(accessToken, customerId, days, { loginCustomerId });
+      return { rows, loginCustomerId };
+    } catch (error) {
+      if (!isGoogleAdsPermissionError(error)) throw error;
+      lastPermissionError = error;
+    }
+  }
+  throw lastPermissionError ?? new Error("Google Ads metrics取得に失敗しました。");
 }
 
 export function isGoogleAdsWriteConfigured() {
@@ -621,6 +675,11 @@ function googleAdsHeaders(accessToken: string, options: GoogleAdsRequestOptions 
     "Content-Type": "application/json",
     ...(loginCustomerId ? { "login-customer-id": loginCustomerId } : {}),
   };
+}
+
+function isGoogleAdsPermissionError(error: unknown) {
+  const message = errorMessage(error);
+  return /\b403\b|PERMISSION_DENIED|does not have permission/i.test(message);
 }
 
 function assertGoogleAdsWriteEnabled() {
