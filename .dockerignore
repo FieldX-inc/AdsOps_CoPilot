@@ -1,0 +1,13 @@
+node_modules
+apps/*/node_modules
+dist
+apps/web/dist
+.git
+.env
+.env.*
+tmp
+coverage
+.DS_Store
+__pycache__
+.pytest_cache
+*.pyc

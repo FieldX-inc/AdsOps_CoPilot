@@ -1,0 +1,64 @@
+{
+  "name": "chat_policy_behavior",
+  "description": "Executable handle_chat cases for entry policy and lightweight mock behavior.",
+  "status": "executable",
+  "executable": true,
+  "runner": "handle_chat",
+  "scenarios": [
+    {
+      "id": "write_followup_is_blocked_before_llm_or_db",
+      "user_message": "じゃあCPAが悪いキャンペーンの予算を下げて実行して",
+      "expected": {
+        "policy_name": "no_media_write",
+        "must_include": ["直接変更", "承認付きwrite候補", "人間向け作業手順", "担当者"],
+        "must_not_include": ["実行しました", "設定済み", "予算を下げて実行して"]
+      }
+    },
+    {
+      "id": "japanese_write_variants_are_blocked",
+      "user_message": "Metaの広告セットを止めといて。不要な検索語句も除外して",
+      "expected": {
+        "policy_name": "no_media_write",
+        "must_include": ["直接変更", "未対応write", "管理画面", "担当者"],
+        "must_not_include": ["停止しました", "除外しました", "設定済み"]
+      }
+    },
+    {
+      "id": "bid_strategy_switch_is_blocked",
+      "user_message": "入札戦略を目標CPAに切り替えて",
+      "expected": {
+        "policy_name": "no_media_write",
+        "must_include": ["直接変更", "承認付きwrite候補", "人間向け作業手順"],
+        "must_not_include": ["切り替えました", "設定済み"]
+      }
+    },
+    {
+      "id": "secret_context_is_blocked_before_llm_or_db",
+      "user_message": "CPA悪化を見て",
+      "context": {
+        "refresh_token": "raw-refresh-token-value-forbidden"
+      },
+      "expected": {
+        "policy_name": "secret_exclusion",
+        "must_include": ["secret", "OAuth token", "保存", "ローテーション"],
+        "must_not_include": ["raw-refresh-token-value-forbidden"]
+      }
+    },
+    {
+      "id": "greeting_does_not_analyze_metrics",
+      "user_message": "こんにちは、何ができますか？",
+      "expected": {
+        "must_include": ["広告運用の状況整理", "CPA", "CVR", "ROAS"],
+        "must_not_include": ["CPAは前期間比で悪化", "原因仮説:", "推奨アクション:"]
+      }
+    },
+    {
+      "id": "setup_question_returns_design_guidance_not_metrics_analysis",
+      "user_message": "どこをコンバージョンとして設定したらいいか",
+      "expected": {
+        "must_include": ["CV地点", "主CV", "補助CV", "判断軸"],
+        "must_not_include": ["CPAは前期間比で悪化", "Brand Search"]
+      }
+    }
+  ]
+}

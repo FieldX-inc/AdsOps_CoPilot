@@ -10,8 +10,10 @@ from .env import load_local_env
 load_local_env()
 
 from .chat_runtime import handle_chat
-from .gemini_runtime import is_gemini_configured
+from .openai_agents_runtime import openai_agents_configuration_status
 from .repositories import RepositoryError, is_database_configured
+from .runtime import AgentRuntimeError, is_agent_runtime_configured, selected_agent_runtime
+from .setup_intake_runtime import handle_setup_intake
 
 
 HOST = os.environ.get("HOST", "0.0.0.0")
@@ -19,7 +21,7 @@ PORT = int(os.environ.get("PORT", "8000"))
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "AdOpsAdvisorAgent/0.1"
+    server_version = "AdOpsAdvisorOpenAIAgent/0.1"
 
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -37,12 +39,27 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib API
         if self.path == "/health":
+            selected_runtime = selected_agent_runtime()
+            runtime_configured = is_agent_runtime_configured()
+            openai_runtime_status = openai_agents_configuration_status()
+            production = os.environ.get("APP_ENV", "").strip().lower() == "production"
+            runtime = selected_runtime if runtime_configured or production else "mock"
+            data_safety_configured = (
+                os.environ.get("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA") == "0"
+                and os.environ.get("OPENAI_AGENTS_DONT_LOG_MODEL_DATA") == "1"
+                and os.environ.get("OPENAI_AGENTS_DONT_LOG_TOOL_DATA") == "1"
+            )
             self._send_json(
                 200,
                 {
-                    "ok": True,
-                    "service": "adk-agent",
-                    "mode": "gemini" if is_gemini_configured() else "mock",
+                    "ok": (not production)
+                    or (runtime_configured and data_safety_configured and runtime in {"openai", "openai_agents"}),
+                    "service": "openai-agent",
+                    "mode": runtime,
+                    "selectedRuntime": selected_runtime,
+                    "runtimeConfigured": runtime_configured and runtime in {"openai", "openai_agents"},
+                    "runtimeDiagnostics": openai_runtime_status,
+                    "dataSafetyConfigured": data_safety_configured,
                     "databaseConfigured": is_database_configured(),
                 },
             )
@@ -65,7 +82,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": "not found"})
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib API
-        if self.path != "/chat":
+        if self.path not in {"/chat", "/setup-intake/message"}:
             self._send_json(404, {"error": "not found"})
             return
 
@@ -78,17 +95,25 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "JSON bodyを読み取れませんでした。"})
             return
 
-        missing = [
-            key
-            for key in ("workspaceId", "userId", "threadId", "message")
-            if not str(payload.get(key, "")).strip()
-        ]
+        required = ("workspaceId", "userId", "message") if self.path == "/setup-intake/message" else ("workspaceId", "userId", "threadId", "message")
+        missing = [key for key in required if not str(payload.get(key, "")).strip()]
         if missing:
             self._send_json(400, {"error": f"必須項目が不足しています: {', '.join(missing)}"})
             return
 
         try:
-            self._send_json(200, handle_chat(payload))
+            if self.path == "/setup-intake/message":
+                self._send_json(200, handle_setup_intake(payload))
+            else:
+                self._send_json(200, handle_chat(payload))
+        except AgentRuntimeError as exc:
+            self._send_json(
+                502,
+                {
+                    "error": "Agent runtime failed.",
+                    "detail": str(exc),
+                },
+            )
         except RepositoryError as exc:
             self._send_json(403, {"error": str(exc)})
 
@@ -98,7 +123,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"adk-agent listening on http://localhost:{PORT}")
+    print(f"openai-agent listening on http://localhost:{PORT}")
     server.serve_forever()
 
 

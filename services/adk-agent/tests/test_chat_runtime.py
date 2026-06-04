@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import pytest
 from unittest.mock import patch
 
 from ad_ops_advisor.chat_runtime import handle_chat
-from ad_ops_advisor.gemini_runtime import GeminiRuntimeError
+from ad_ops_advisor.runtime import AgentRuntimeError
 
 REQUIRED_ANSWER_SECTIONS = (
     "結論",
@@ -16,6 +17,10 @@ REQUIRED_ANSWER_SECTIONS = (
     "実施後の観察",
     "自信度",
 )
+
+WORKSPACE_ID = "11111111-1111-4111-8111-111111111111"
+USER_ID = "22222222-2222-4222-8222-222222222222"
+THREAD_ID = "33333333-3333-4333-8333-333333333333"
 
 
 class FakeRepository:
@@ -35,6 +40,9 @@ class FakeRepository:
     ) -> dict:
         self.appended_messages.append((workspace_id, thread_id, role, content, user_id, metadata))
         return {"id": f"message-{len(self.appended_messages)}", "role": role}
+
+    def ensure_agent_thread(self, workspace_id: str, user_id: str, thread_id: str, title: str) -> dict:
+        return {"id": thread_id, "workspace_id": workspace_id, "user_id": user_id, "title": title}
 
     def record_tool_call(
         self,
@@ -135,14 +143,14 @@ def test_handle_chat_db_backed_route_uses_scoped_context_and_selected_account() 
 
     with (
         patch("ad_ops_advisor.chat_runtime.is_database_configured", return_value=True),
-        patch("ad_ops_advisor.chat_runtime.is_gemini_configured", return_value=False),
+        patch("ad_ops_advisor.chat_runtime.is_agent_runtime_configured", return_value=False),
         patch("ad_ops_advisor.chat_runtime.get_repository", return_value=repository),
     ):
         result = handle_chat(
             {
-                "workspaceId": "workspace-1",
-                "userId": "user-1",
-                "threadId": "thread-1",
+                "workspaceId": WORKSPACE_ID,
+                "userId": USER_ID,
+                "threadId": THREAD_ID,
                 "adAccountId": "selected-account",
                 "dateRange": "last_30_days",
                 "message": "CPAが悪化している理由を教えて",
@@ -151,13 +159,13 @@ def test_handle_chat_db_backed_route_uses_scoped_context_and_selected_account() 
 
     assert result["message"]["role"] == "assistant"
     assert "Brand Search" in result["message"]["content"]
-    assert repository.compare_call == ("workspace-1", "selected-account", "last_30_days", "previous_7_days")
+    assert repository.compare_call == (WORKSPACE_ID, "selected-account", "last_30_days", "previous_7_days")
     assert repository.appended_messages[0][:5] == (
-        "workspace-1",
-        "thread-1",
+        WORKSPACE_ID,
+        THREAD_ID,
         "user",
         "CPAが悪化している理由を教えて",
-        "user-1",
+        USER_ID,
     )
     assert repository.appended_messages[-1][2] == "assistant"
     assert repository.appended_messages[-1][5] == {"mode": "db_backed_fallback"}
@@ -176,15 +184,16 @@ def test_handle_chat_write_intent_short_circuits_before_database_routing() -> No
     ):
         result = handle_chat(
             {
-                "workspaceId": "workspace-1",
-                "userId": "user-1",
-                "threadId": "thread-1",
+                "workspaceId": WORKSPACE_ID,
+                "userId": USER_ID,
+                "threadId": THREAD_ID,
                 "message": "CPAが悪いキャンペーンの予算を下げて",
             }
         )
 
     assert result["policy"] == {"name": "no_media_write", "enforced": True}
-    assert "直接変更・停止・作成することはできません" in result["message"]["content"]
+    assert "AIチャット単体では広告媒体の設定を直接変更・停止・作成しません" in result["message"]["content"]
+    assert "承認付きwrite候補" in result["message"]["content"]
     assert "CPAが悪いキャンペーンの予算を下げて" not in result["message"]["content"]
     assert_no_media_write_execution_claims(result)
     assert_response_contract(result)
@@ -252,9 +261,9 @@ def test_handle_chat_bare_secret_value_short_circuits_before_database_routing() 
 def test_handle_chat_secret_in_context_short_circuits_before_database_or_llm_routing() -> None:
     with (
         patch("ad_ops_advisor.chat_runtime.is_database_configured", return_value=True),
-        patch("ad_ops_advisor.chat_runtime.is_gemini_configured", return_value=True),
+        patch("ad_ops_advisor.chat_runtime.is_agent_runtime_configured", return_value=True),
         patch("ad_ops_advisor.chat_runtime.get_repository", side_effect=AssertionError("database should not be used")),
-        patch("ad_ops_advisor.chat_runtime.generate_advisor_response", side_effect=AssertionError("LLM should not be used")),
+        patch("ad_ops_advisor.chat_runtime.generate_agent_response", side_effect=AssertionError("LLM should not be used")),
     ):
         result = handle_chat(
             {
@@ -273,80 +282,306 @@ def test_handle_chat_secret_in_context_short_circuits_before_database_or_llm_rou
     assert_response_contract(result)
 
 
-def test_handle_chat_uses_adk_gemini_runtime_without_database_when_configured() -> None:
+def test_handle_chat_uses_openai_agent_runtime_without_database_when_configured() -> None:
     with (
         patch("ad_ops_advisor.chat_runtime.is_database_configured", return_value=False),
-        patch("ad_ops_advisor.chat_runtime.is_gemini_configured", return_value=True),
+        patch("ad_ops_advisor.chat_runtime.is_agent_runtime_configured", return_value=True),
         patch(
-            "ad_ops_advisor.chat_runtime.generate_advisor_response",
+            "ad_ops_advisor.chat_runtime.generate_agent_response",
             return_value={
-                "message": {"role": "assistant", "content": "結論:\nADK/Geminiからの回答です。"},
-                "mode": "adk_gemini",
+                "message": {"role": "assistant", "content": "結論:\nOpenAI Agentからの回答です。"},
+                "mode": "openai_agents",
             },
         ) as generate,
     ):
         result = handle_chat(
             {
-                "workspaceId": "workspace-1",
-                "userId": "user-1",
-                "threadId": "thread-1",
+                "workspaceId": WORKSPACE_ID,
+                "userId": USER_ID,
+                "threadId": THREAD_ID,
                 "message": "CPAが悪化している理由を教えて",
             }
         )
 
-    assert result["mode"] == "adk_gemini"
-    assert "ADK/Gemini" in result["message"]["content"]
+    assert result["mode"] == "openai_agents"
+    assert "OpenAI Agent" in result["message"]["content"]
     generate.assert_called_once()
 
 
-def test_handle_chat_falls_back_to_mock_when_adk_gemini_runtime_fails() -> None:
+def test_handle_chat_raises_when_openai_agent_runtime_fails() -> None:
     with (
         patch("ad_ops_advisor.chat_runtime.is_database_configured", return_value=False),
-        patch("ad_ops_advisor.chat_runtime.is_gemini_configured", return_value=True),
+        patch("ad_ops_advisor.chat_runtime.is_agent_runtime_configured", return_value=True),
         patch(
-            "ad_ops_advisor.chat_runtime.generate_advisor_response",
-            side_effect=GeminiRuntimeError("ADK/Gemini request failed"),
+            "ad_ops_advisor.chat_runtime.generate_agent_response",
+            side_effect=AgentRuntimeError("OpenAI Agent request failed"),
         ),
     ):
-        result = handle_chat(
-            {
-                "workspaceId": "workspace-1",
-                "userId": "user-1",
-                "threadId": "thread-1",
-                "message": "CPAが悪化している理由を教えて",
-            }
-        )
-
-    assert result["mode"] == "mock_fallback"
-    assert "結論:" in result["message"]["content"]
+        with pytest.raises(AgentRuntimeError, match="OpenAI Agent request failed"):
+            handle_chat(
+                {
+                    "workspaceId": WORKSPACE_ID,
+                    "userId": USER_ID,
+                    "threadId": THREAD_ID,
+                    "message": "CPAが悪化している理由を教えて",
+                }
+            )
 
 
-def test_handle_chat_records_adk_gemini_mode_for_db_backed_response() -> None:
+def test_handle_chat_records_openai_agent_mode_for_db_backed_response() -> None:
     repository = FakeRepository()
 
     with (
         patch("ad_ops_advisor.chat_runtime.is_database_configured", return_value=True),
-        patch("ad_ops_advisor.chat_runtime.is_gemini_configured", return_value=True),
+        patch("ad_ops_advisor.chat_runtime.is_agent_runtime_configured", return_value=True),
         patch("ad_ops_advisor.chat_runtime.get_repository", return_value=repository),
         patch(
-            "ad_ops_advisor.chat_runtime.generate_advisor_response",
+            "ad_ops_advisor.chat_runtime.generate_agent_response",
             return_value={
-                "message": {"role": "assistant", "content": "結論:\nDB文脈つきADK/Gemini回答です。"},
-                "mode": "adk_gemini",
+                "message": {"role": "assistant", "content": "結論:\nDB文脈つきOpenAI Agent回答です。"},
+                "mode": "openai_agents",
             },
         ),
     ):
         result = handle_chat(
             {
-                "workspaceId": "workspace-1",
-                "userId": "user-1",
-                "threadId": "thread-1",
+                "workspaceId": WORKSPACE_ID,
+                "userId": USER_ID,
+                "threadId": THREAD_ID,
                 "message": "CPAが悪化している理由を教えて",
             }
         )
 
-    assert result["mode"] == "adk_gemini"
-    assert repository.appended_messages[-1][5] == {"mode": "adk_gemini"}
+    assert result["mode"] == "openai_agents"
+    assert repository.appended_messages[-1][5] == {"mode": "openai_agents"}
+
+
+def test_handle_chat_skips_metric_prefetch_for_greeting() -> None:
+    repository = FakeRepository()
+
+    with (
+        patch("ad_ops_advisor.chat_runtime.is_database_configured", return_value=True),
+        patch("ad_ops_advisor.chat_runtime.is_agent_runtime_configured", return_value=True),
+        patch("ad_ops_advisor.chat_runtime.get_repository", return_value=repository),
+        patch(
+            "ad_ops_advisor.chat_runtime.generate_agent_response",
+            return_value={
+                "message": {"role": "assistant", "content": "こんにちは。広告運用について相談できます。"},
+                "mode": "openai_agents",
+            },
+        ) as generate,
+    ):
+        result = handle_chat(
+            {
+                "workspaceId": WORKSPACE_ID,
+                "userId": USER_ID,
+                "threadId": THREAD_ID,
+                "message": "こんにちは",
+            }
+        )
+
+    assert result["mode"] == "openai_agents"
+    assert repository.compare_call is None
+    assert repository.tool_calls == []
+    sent_payload = generate.call_args.args[0]
+    sent_context = generate.call_args.args[1]
+    assert sent_payload["context"]["intent"]["intent"] == "greeting_casual"
+    assert sent_payload["context"]["routePlan"]["route"] == "greeting_casual"
+    assert sent_payload["context"]["routePlan"]["targetAgents"] == ["router_agent"]
+    assert sent_context["intent"]["requires_metrics_context"] is False
+    assert sent_context["routePlan"]["requires_metrics_context"] is False
+
+
+def test_handle_chat_passes_experienced_mode_into_route_plan() -> None:
+    with (
+        patch("ad_ops_advisor.chat_runtime.is_database_configured", return_value=False),
+        patch("ad_ops_advisor.chat_runtime.is_agent_runtime_configured", return_value=True),
+        patch(
+            "ad_ops_advisor.chat_runtime.generate_agent_response",
+            return_value={
+                "message": {"role": "assistant", "content": "結論:\n玄人モードで分析します。"},
+                "mode": "openai_agents",
+            },
+        ) as generate,
+    ):
+        result = handle_chat(
+            {
+                "workspaceId": WORKSPACE_ID,
+                "userId": USER_ID,
+                "threadId": THREAD_ID,
+                "message": "CPAが悪化している理由を教えて",
+                "context": {
+                    "advisorMode": "experienced",
+                    "agentEntry": "performance_analyst_experienced",
+                },
+            }
+        )
+
+    assert result["mode"] == "openai_agents"
+    sent_payload = generate.call_args.args[0]
+    route_plan = sent_payload["context"]["routePlan"]
+    assert route_plan["advisorMode"] == "experienced"
+    assert route_plan["entryAgent"] == "performance_analyst_experienced"
+    assert "実務者向け" in route_plan["modeContract"]
+
+
+def test_handle_chat_mock_greeting_does_not_analyze_metrics() -> None:
+    with (
+        patch("ad_ops_advisor.chat_runtime.is_database_configured", return_value=False),
+        patch("ad_ops_advisor.chat_runtime.is_agent_runtime_configured", return_value=False),
+    ):
+        result = handle_chat(
+            {
+                "workspaceId": "demo-workspace",
+                "userId": "demo-user",
+                "threadId": "demo-thread",
+                "message": "こんにちは",
+            }
+        )
+
+    content = result["message"]["content"]
+    assert "広告運用の状況整理" in content
+    assert "CPAは前期間比で悪化" not in content
+    assert "原因仮説:" not in content
+    assert result["humanTaskDraft"]["priority"] == "low"
+
+
+def test_handle_chat_skips_metric_prefetch_for_setup_question() -> None:
+    repository = FakeRepository()
+
+    with (
+        patch("ad_ops_advisor.chat_runtime.is_database_configured", return_value=True),
+        patch("ad_ops_advisor.chat_runtime.is_agent_runtime_configured", return_value=True),
+        patch("ad_ops_advisor.chat_runtime.get_repository", return_value=repository),
+        patch(
+            "ad_ops_advisor.chat_runtime.generate_agent_response",
+            return_value={
+                "message": {"role": "assistant", "content": "CV地点の設計軸を整理します。"},
+                "mode": "openai_agents",
+            },
+        ) as generate,
+    ):
+        result = handle_chat(
+            {
+                "workspaceId": WORKSPACE_ID,
+                "userId": USER_ID,
+                "threadId": THREAD_ID,
+                "message": "どこをコンバージョンとして設定したらいいか",
+            }
+        )
+
+    assert result["mode"] == "openai_agents"
+    assert repository.compare_call is None
+    assert repository.tool_calls == []
+    assert generate.call_args.args[0]["context"]["intent"]["intent"] == "setup"
+
+
+def test_handle_chat_mock_setup_question_returns_design_guidance() -> None:
+    with (
+        patch("ad_ops_advisor.chat_runtime.is_database_configured", return_value=False),
+        patch("ad_ops_advisor.chat_runtime.is_agent_runtime_configured", return_value=False),
+    ):
+        result = handle_chat(
+            {
+                "workspaceId": "demo-workspace",
+                "userId": "demo-user",
+                "threadId": "demo-thread",
+                "message": "どこをコンバージョンとして設定したらいいか",
+            }
+        )
+
+    content = result["message"]["content"]
+    assert "CV地点" in content
+    assert "主CVと補助CV" in content
+    assert "CPAは前期間比で悪化" not in content
+    assert result["recommendation"]["title"] == "CV地点の判断軸を整理する"
+
+
+def test_handle_chat_mock_budget_question_returns_delivery_diagnosis_order() -> None:
+    with (
+        patch("ad_ops_advisor.chat_runtime.is_database_configured", return_value=False),
+        patch("ad_ops_advisor.chat_runtime.is_agent_runtime_configured", return_value=False),
+    ):
+        result = handle_chat(
+            {
+                "workspaceId": "demo-workspace",
+                "userId": "demo-user",
+                "threadId": "demo-thread",
+                "message": "予算が使いきれないときは何を見ればいい？",
+            }
+        )
+
+    content = result["message"]["content"]
+    assert "配信機会が足りない" in content
+    assert "目標が厳しすぎる" in content
+    assert "CPAは前期間比で悪化" not in content
+    assert result["recommendation"]["title"] == "予算消化と学習状態を分けて確認する"
+
+
+def test_handle_chat_api_persistence_mode_skips_agent_database_writes() -> None:
+    with (
+        patch("ad_ops_advisor.chat_runtime.is_database_configured", return_value=True),
+        patch("ad_ops_advisor.chat_runtime.is_agent_runtime_configured", return_value=False),
+        patch("ad_ops_advisor.chat_runtime.get_repository", side_effect=AssertionError("Agent runtime should not persist API-managed chat")),
+    ):
+        result = handle_chat(
+            {
+                "workspaceId": WORKSPACE_ID,
+                "userId": USER_ID,
+                "threadId": THREAD_ID,
+                "message": "CPAが悪化している理由を教えて",
+                "context": {"apiPersistence": True},
+            }
+        )
+
+    assert result["mode"] == "mock_api_persistence"
+    assert result["message"]["role"] == "assistant"
+
+
+def test_handle_chat_uses_openai_agent_for_non_uuid_demo_context_without_db_persistence() -> None:
+    with (
+        patch("ad_ops_advisor.chat_runtime.is_database_configured", return_value=True),
+        patch("ad_ops_advisor.chat_runtime.is_agent_runtime_configured", return_value=True),
+        patch(
+            "ad_ops_advisor.chat_runtime.generate_agent_response",
+            return_value={
+                "message": {"role": "assistant", "content": "結論:\nデモ文脈でもOpenAI Agent回答です。"},
+                "mode": "openai_agents",
+            },
+        ) as generate,
+    ):
+        result = handle_chat(
+            {
+                "workspaceId": "demo-workspace",
+                "userId": "demo-user",
+                "threadId": "demo-thread",
+                "message": "ROASについて見て",
+            }
+        )
+
+    generate.assert_called_once()
+    assert result["mode"] == "openai_agents"
+    assert "DB persistence was skipped" in result["runtimeWarning"]
+
+
+def test_handle_chat_raises_for_non_uuid_demo_context_when_openai_agent_fails() -> None:
+    with (
+        patch("ad_ops_advisor.chat_runtime.is_database_configured", return_value=True),
+        patch("ad_ops_advisor.chat_runtime.is_agent_runtime_configured", return_value=True),
+        patch(
+            "ad_ops_advisor.chat_runtime.generate_agent_response",
+            side_effect=AgentRuntimeError("OpenAI Agent request failed"),
+        ),
+    ):
+        with pytest.raises(AgentRuntimeError, match="OpenAI Agent request failed"):
+            handle_chat(
+                {
+                    "workspaceId": "demo-workspace",
+                    "userId": "demo-user",
+                    "threadId": "demo-thread",
+                    "message": "ROASについて見て",
+                }
+            )
 
 
 def assert_response_contract(result: dict) -> None:

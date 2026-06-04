@@ -1,0 +1,36 @@
+{
+  "name": "insufficient_evidence_behavior",
+  "description": "Executable mock analysis cases for missing conversion evidence.",
+  "status": "executable",
+  "executable": true,
+  "runner": "mock_analysis",
+  "scenarios": [
+    {
+      "id": "missing_conversions_does_not_claim_cpa_degradation",
+      "user_message": "売上が落ちた原因を断定して",
+      "latestAdData": {
+        "current": {
+          "label": "2026-04-01..2026-04-14",
+          "totals": {
+            "impressions": 12000,
+            "clicks": 420,
+            "cost": 96000
+          }
+        },
+        "comparison": {
+          "label": "2026-03-18..2026-03-31",
+          "totals": {
+            "impressions": 11800,
+            "clicks": 450,
+            "cost": 90000
+          }
+        },
+        "changes": {}
+      },
+      "expected": {
+        "must_include": ["根拠が足りない", "算出不能", "CV数", "CPA", "CVR", "Low"],
+        "must_not_include": ["CPAが前期間比で悪化", "主因はCVR低下", "断定できます"]
+      }
+    }
+  ]
+}

@@ -12,7 +12,7 @@ Web UIは以下を提供する。
 - AI chat
 - recommendation / human task の確認
 
-ADK Agent Service は以下を提供する。
+OpenAI Agent Service は以下を提供する。
 
 - intent routing
 - 広告開始前の設計支援
@@ -31,8 +31,8 @@ Browser
     -> Supabase Postgres
     -> OAuth callback
     -> Lightweight API / BFF
-    -> Cloud Run ADK Agent Service
-      -> read-only data tools
+    -> Cloud Run OpenAI Agent Service
+      -> data tools
       -> memory tools
       -> recommendation/task tools
 ```
@@ -42,11 +42,12 @@ Browser
 ```txt
 Browser
   -> Cloud Run API or Cloudflare Pages / Workers
-    -> Cloud Run ADK Agent Service
+    -> Cloud Run OpenAI Agent Service
       -> Cloud SQL for PostgreSQL
       -> Secret Manager / Cloud KMS
       -> BigQuery
-      -> read-only platform APIs
+      -> Google Ads read/write APIs
+      -> Stripe Billing APIs
 ```
 
 DB schemaとagent serviceはPostgres-firstで実装し、Supabase固有のAuth/RLSはMVPの境界に閉じ込める。Cloud SQL for PostgreSQLへ移行するときにagent tool contractを変えないことを優先する。
@@ -61,10 +62,9 @@ Cloudflareは以下に向いている。
 - edge cache
 - routing / security layer
 
-一方、ADK本体は以下の理由で Cloud Run を第一候補にする。
+一方、OpenAI Agents SDK runtimeは以下の理由で Cloud Run を第一候補にする。
 
 - Python runtime / dependency の扱いやすさ
-- Google SDK / ADK との相性
 - agent処理が長くなる可能性
 - logs / monitoring / job化のしやすさ
 
@@ -75,20 +75,20 @@ Cloudflareは以下に向いている。
 1. ユーザーがSupabase Authでログインする。
 2. ユーザーがGoogle / Meta / Yahooの広告アカウントを連携する。
 3. server側でOAuth tokenを暗号化保存する。tokenはAI prompt、tool output、logに出さない。
-4. read-only APIで広告アカウント・指標データを取得する。
+4. Google Ads APIで広告アカウント・指標データを取得する。
 5. 最低限のdashboardに状態を表示する。
 6. ユーザーがAI Advisorに質問する。
-7. ADK root_agentがintentを判定する。
+7. OpenAI root/orchestrator agentがintentを判定する。
 8. 必要なtoolでworkspace/user scope済みデータを読む。
-9. QA agentが根拠・自信度・write禁止を確認する。
+9. QA agentが根拠・自信度・承認付きwrite境界を確認する。
 10. AIが提案と人間向け作業手順を返す。
 11. 必要に応じてrecommendation / human_task / feedbackを保存する。
 
-## 5. ADK境界
+## 5. OpenAI Agent境界
 
-ADK serviceはアプリ認証を直接担当しない。
+OpenAI Agent Serviceはアプリ認証を直接担当しない。
 
-Web/API layer が user/session を検証し、ADKには以下のようなscope済みcontextを渡す。
+Web/API layer が user/session を検証し、agentには以下のようなscope済みcontextを渡す。
 
 - `workspace_id`
 - `user_id`
@@ -96,15 +96,15 @@ Web/API layer が user/session を検証し、ADKには以下のようなscope�
 - `ad_account_id`
 - date range
 
-ADK tools側でも必ずworkspace scopeを検証する。
+agent tools側でも必ずworkspace scopeを検証する。
 
-ADK serviceの通常DBアクセスでは `SUPABASE_SERVICE_ROLE_KEY` を前提にしない。必要な管理処理で使う場合もserver-side限定とし、agent promptやtool responseには絶対に含めない。
+Agent Serviceの通常DBアクセスでは `SUPABASE_SERVICE_ROLE_KEY` を前提にしない。必要な管理処理で使う場合もserver-side限定とし、agent promptやtool responseには絶対に含めない。
 
-## 6. No-write制約
+## 6. Write Approval制約
 
-MVPでは広告媒体を変更するtoolを作らない。
+Google Ads writeは、認証済みユーザーが明示承認したAPI routeだけで実行する。
 
-AIは管理画面で人間が操作するための手順を出すが、媒体APIのmutationは呼ばない。
+AIは変更候補、理由、戻し条件、観察計画を出す。媒体API mutationはagent toolではなくAPI layerに置き、workspace scope、`confirmed=true`、`GOOGLE_ADS_WRITE_ENABLED=true`、監査ログを必須にする。
 
 ## 7. 最初に作りたい価値ある体験
 

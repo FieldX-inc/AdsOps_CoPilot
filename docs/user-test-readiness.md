@@ -23,7 +23,7 @@
 - AI回答がhuman-in-the-loop前提で、媒体設定の直接変更を促さないか確認する。
 - データ連携が未実装 / 未連携でも、mockデータによる検証状態だと分かるか確認する。
 - 広告運用に詳しくない担当者が、数値の見方と次の人間作業を迷わず理解できるか確認する。
-- secretや実広告データを使わないテストでも、将来のOAuth / read-only方針と矛盾しないか確認する。
+- secretや実広告データを使わないテストでも、将来のOAuth / 承認付きGoogle Ads write方針と矛盾しないか確認する。
 
 ## テスト対象 / 対象外
 
@@ -42,7 +42,7 @@
 - 実広告アカウントの取得
 - 実広告媒体APIのread / write
 - token暗号化保存の実動作
-- Gemini / Vertex AIによる実LLM応答品質
+- OpenAI Agents SDKによる実LLM応答品質
 - production相当の負荷、監視、権限管理
 
 ## Credentialなしで動く範囲
@@ -51,7 +51,7 @@
 
 - Web UI: `http://localhost:5173`
 - API: `http://localhost:8787`
-- ADK Agent Service mock mode: `http://localhost:8000`
+- OpenAI Agent Service mock mode: `http://localhost:8000`
 - mock広告データ
 - deterministic mock AI response
 
@@ -61,7 +61,7 @@
 - Meta Marketing API credential
 - Yahoo Ads credential
 - Supabase project credential
-- Gemini / Vertex AI credential
+- OpenAI API key
 - 実広告アカウント、実OAuth、実媒体API write
 
 ## 参加者と役割
@@ -89,7 +89,8 @@
 ```sh
 WEB_ORIGIN=http://localhost:5173
 VITE_API_BASE_URL=http://localhost:8787
-ADK_AGENT_URL=http://localhost:8000
+AGENT_SERVICE_URL=http://localhost:8000
+USE_AGENT_SERVICE=false
 ```
 
 ## 標準検証
@@ -107,7 +108,7 @@ python3.11 -m pytest
 
 - `npm run typecheck` が web / api のTypeScript typecheckを完了する。
 - `npm run build` が web / api のbuildを完了する。
-- `services/adk-agent` で `python3.11 -m pytest` がADK Agent Serviceのpytest suiteを完了する。
+- `services/adk-agent` で `python3.11 -m pytest` がOpenAI Agent Serviceのpytest suiteを完了する。
 - 実広告credential、実OAuth、実媒体API writeを使わない。
 
 ## 起動手順
@@ -133,8 +134,8 @@ curl http://localhost:8787/health
 
 期待値:
 
-- agent healthに `"service":"adk-agent"` と `"mode":"mock"` が含まれる。
-- API healthに `"service":"adops-api"` と `adkAgentUrl` が含まれる。
+- agent healthに `"service":"openai-agent"` が含まれる。
+- API healthに `"service":"adops-api"` と `agentServiceUrl` が含まれる。
 - `http://localhost:5173` がブラウザで表示できる。
 
 ## 実施前チェックリスト
@@ -148,7 +149,7 @@ curl http://localhost:8787/health
 - [ ] API healthがagent URLを返す。
 - [ ] Web UIをブラウザで開ける。
 - [ ] `.env` や画面に実secretを入れていない。
-- [ ] テスター向け説明はmock / read-only / human-in-the-loopの最小限にとどめている。
+- [ ] テスター向け説明はmock / OAuth / 承認付きwrite / human-in-the-loopの最小限にとどめている。
 - [ ] 記録担当者が、迷い、発話、クリック、AI回答の問題を記録できる状態になっている。
 - [ ] 中止条件とGo / No-Go基準を参加者が把握している。
 
@@ -174,8 +175,8 @@ No-Goになりうる未解消リスク:
 
 - 実Supabase Auth / workspace membershipの検証
 - 実OAuth callbackとtoken暗号化保存
-- 実媒体APIのread-only取得
-- Gemini / Vertex AIでの非deterministicな回答品質
+- 実媒体APIの取得と承認付きwrite
+- OpenAI Agents SDKでの非deterministicな回答品質
 - recommendation / human task / operator feedbackの永続化UI
 
 ## テストシナリオ
@@ -241,10 +242,10 @@ No-Goになりうる未解消リスク:
 
 - Google / Meta / Yahoo の連携が未接続状態として表示される。
 - ユーザーにAPIキー、developer token、client secret、app secretの取得や入力を求めない。
-- `Google Ads と連携` のように、媒体側でログインしてread-only権限を許可するOAuth導線に見える。
+- `Google Ads と連携` のように、媒体側でログインして必要scopeを許可するOAuth導線に見える。
 - credential入力欄やsecret表示がない。
 - 未接続でも、このテストではmockデータで進められることが分かる。
-- read-only連携であり、媒体設定を直接変更しないプロダクト方針と矛盾しない。
+- AIが単独で媒体設定を直接変更せず、Google Adsのcampaign status / budgetだけ承認付きAPIで実行する方針と矛盾しない。
 
 タスク例:
 
@@ -359,7 +360,7 @@ secret確認は、実secretを貼らず、ダミー値だけで行う。
 ## 不具合の優先度
 
 - P0: テスト継続不能、secret露出、媒体write実行 / 実行済み主張、実データ誤認、主要サービス起動不可。
-- P1: 主要シナリオの完了を妨げるUI / API / AI回答の問題、OAuth / read-only方針の誤解を強く生む表示。
+- P1: 主要シナリオの完了を妨げるUI / API / AI回答の問題、OAuth / 承認付きwrite方針の誤解を強く生む表示。
 - P2: 迷いは生むが回避可能な文言、表示崩れ、根拠や自信度の不足、作業手順の粒度不足。
 - P3: 軽微な文言、余白、順序、ラベル改善。
 
@@ -478,7 +479,7 @@ P0 / P1 / P2 / P3:
 
 ## よくある詰まり
 
-- `ADK Agent Serviceに接続できません` が出る場合は `npm run dev:agent` が起動しているか確認する。
+- `OpenAI Agent Serviceに接続できません` が出る場合は `npm run dev:agent` が起動しているか確認する。
 - WebからAPIに接続できない場合は `VITE_API_BASE_URL=http://localhost:8787` を確認する。
-- APIからagentに接続できない場合は `ADK_AGENT_URL=http://localhost:8000` を確認する。
+- APIからagentに接続できない場合は `AGENT_SERVICE_URL=http://localhost:8000` を確認する。本番候補・staging E2E・final smokeでは旧 `ADK_AGENT_URL` は使わない。
 - credential系envは空でよい。テスト中に実secretを貼り付けない。

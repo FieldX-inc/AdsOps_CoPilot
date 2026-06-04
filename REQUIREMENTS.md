@@ -6,7 +6,7 @@ AdOps Advisor は、自社で広告運用を行う中小企業の担当者向け
 
 主役はダッシュボードではない。ダッシュボードはAIが判断するための補助情報であり、プロダクト価値の中心は「広告運用に詳しくない担当者が、AIに相談しながら広告設計・分析・改善判断を進められること」にある。
 
-旧MVPの Google Sheets 手動取り込み前提は廃止する。今後は Google Ads / Meta Ads / Yahoo Ads のAPI連携を前提に再設計する。
+旧MVPの Google Sheets 手動取り込み前提は廃止する。今後は Google Ads から広告API連携を開始し、Meta Ads / Yahoo Ads は後続で拡張する。
 
 ## 2. 対象ユーザー
 
@@ -49,9 +49,11 @@ AdOps Advisor は、広告コンサルタントのように振る舞う。
 - Supabase Auth によるログイン
 - 1 workspace = 1会社
 - 1 workspace に複数広告アカウントを連携可能
-- Google Ads / Meta Ads / Yahoo Ads の read-only API連携
+- Google Ads の read/write API連携
+- Meta Ads / Yahoo Ads の read API連携は後続
 - 最低限のダッシュボード
-- Google Agent Development Kit（ADK）ベースのAIチャット
+- OpenAI Agents SDK ベースのAIチャット
+- Stripe Checkout / Billing Portal / Webhook によるSaaS課金
 - ログインユーザー単位の長期記憶
 - workspace単位の会社・商材・広告アカウント文脈
 - human-in-the-loop の改善提案
@@ -62,8 +64,8 @@ AdOps Advisor は、広告コンサルタントのように振る舞う。
 
 ### 含まない
 
-- 媒体APIによる広告設定の直接変更
-- 予算変更、入札変更、キャンペーン停止、広告作成の自動実行
+- AIによる無承認の広告設定変更
+- 入札変更、広告作成、targeting変更の自動実行
 - 自動最適化
 - 定期実行型の自律エージェント
 - Slack通知
@@ -94,7 +96,9 @@ MVPでは以下の設計にする。
 
 ただし、アプリログインと広告API認可は技術的に別物として扱う。
 
-ユーザーに広告媒体のAPIキー、developer token、client secret、app secret の取得や入力を求めない。ユーザー向けUIは `Google Ads と連携` のようなOAuthボタンを基本にし、各媒体の認可画面でログインしてread-only権限を許可してもらう。媒体アプリのclient secretやdeveloper tokenが必要な場合はAdOps Advisor側のサーバー設定として管理し、ワークスペース利用者には見せない。
+ユーザーに広告媒体のAPIキー、developer token、client secret、app secret の取得や入力を求めない。ユーザー向けUIは `Google Ads と連携` のようなOAuthボタンを基本にし、各媒体の認可画面でログインして必要scopeを許可してもらう。媒体アプリのclient secretやdeveloper tokenが必要な場合はAdOps Advisor側のサーバー設定として管理し、ワークスペース利用者には見せない。
+
+Google Ads writeはhuman-in-the-loopを必須にする。AIは変更候補、理由、戻し条件、観察計画を作るが、実行は認証済みユーザーが対象IDと `confirmed=true` を指定したAPI routeだけに限定する。`GOOGLE_ADS_WRITE_ENABLED=true` が設定されていない環境ではwrite routeは実行しない。
 
 ### 技術方針
 
@@ -113,18 +117,18 @@ MVP初期は **Cloudflare + Cloud Run + Supabase** の組み合わせを第一�
 
 - Web / 軽量API / OAuth callback:
   - Cloudflare Pages / Workers を候補にする
-- ADK Agent Service:
+- OpenAI Agent Service:
   - Google Cloud Run を第一候補にする
 - DB / Auth:
   - Supabase
 
 ### 公開版 / SaaS本番の候補
 
-公開版では、Google Ads API、ADK、分析処理、監査・運用監視をGoogle Cloud側に寄せるため、**Google Cloud中心構成** を第一候補にする。
+公開版では、Google Ads API、OpenAI Agent Service、分析処理、監査・運用監視をGoogle Cloud側に寄せるため、**Google Cloud中心構成** を第一候補にする。
 
 - Web / API:
   - Cloud Run または Cloudflare Pages / Workers + Cloud Run API
-- ADK Agent Service:
+- OpenAI Agent Service:
   - Google Cloud Run
 - DB:
   - Cloud SQL for PostgreSQL
@@ -137,7 +141,7 @@ MVP初期は **Cloudflare + Cloud Run + Supabase** の組み合わせを第一�
 
 ### 理由
 
-Cloudflare はフロント配信、軽量API、OAuth callback、エッジ実行に強い。一方で、ADK本体はPython依存、Google系SDK、長めのagent処理、将来的なジョブ実行・観測性を考えると Cloud Run の方が扱いやすい。
+Cloudflare はフロント配信、軽量API、OAuth callback、エッジ実行に強い。一方で、OpenAI Agents SDK runtimeはPython依存、長めのagent処理、将来的なジョブ実行・観測性を考えると Cloud Run の方が扱いやすい。
 
 したがって、全部をCloudflareに寄せるより、以下の分担がよい。
 
@@ -148,9 +152,9 @@ Cloudflare Pages / Workers
   - OAuth callback
 
 Google Cloud Run
-  - ADK Agent Service
+  - OpenAI Agent Service
   - 重い分析処理
-  - Google系SDKとの連携
+  - Google Ads API / Stripe / OpenAI runtime との連携
 
 Supabase
   - Auth
@@ -163,7 +167,7 @@ Supabase
 ```txt
 Google Cloud Run
   - Web/API backend
-  - ADK Agent Service
+  - OpenAI Agent Service
 
 Cloud SQL for PostgreSQL
   - SaaS core DB
@@ -264,7 +268,7 @@ AI Advisor は、広告に関する広い質問に答えられることを目指
 
 広告データが足りない場合は、推測で断言せず、足りない情報を明示する。商材情報が足りない場合は、必要な質問をする。
 
-## 11. ADK Agent構成
+## 11. OpenAI Agent構成
 
 最初から巨大なmulti-agent構成にしない。まずは小さく始める。
 
@@ -294,7 +298,7 @@ AI Advisor は、広告に関する広い質問に答えられることを目指
   - 根拠確認
   - 自信度調整
   - 危険な断定の抑制
-  - write禁止チェック
+  - 承認付きwrite境界チェック
 
 ### 後で分離するagent候補
 
@@ -316,17 +320,16 @@ AI Advisor は、広告に関する広い質問に答えられることを目指
 - recommendation の作成
 - human task の作成
 - operator feedback の記録
+- Google Ads campaign status / budget write の承認付きAPI実行
 
 ### 禁止するtool
 
-- campaign budget 更新
-- campaign 停止 / 有効化
 - bid / bid strategy 変更
 - ad 作成 / 編集
 - targeting 変更
-- 媒体APIへの mutation
+- AI agentからの無承認 platform mutation
 
-MVPではwrite系toolをコードベースに作らない。存在しないtoolは誤って呼ばれない。
+write系はagent toolではなくAPI layerに置く。Google Ads campaign status / budgetのみ、認証済みユーザー、workspace scope、`confirmed=true`、`GOOGLE_ADS_WRITE_ENABLED=true`、監査ログを満たした場合に実行する。
 
 ## 13. AI回答フォーマット
 
@@ -456,7 +459,7 @@ operator feedback では以下を記録する。
 - `REQUIREMENTS.md` を新方針で書き直す
 - `AGENTS.md` を書き直す
 - DB schema 初稿を追加
-- ADK service skeleton を追加
+- OpenAI Agent Service skeleton を追加
 
 ### Milestone 1: Auth / Workspace基盤
 
@@ -464,9 +467,9 @@ operator feedback では以下を記録する。
 - workspace / member model
 - 基本app shell
 
-### Milestone 2: Platform OAuth / Read-only Data
+### Milestone 2: Platform OAuth / Google Ads Data
 
-- Google Ads / Meta Ads / Yahoo Ads のOAuth連携
+- Google Ads OAuth連携
 - token暗号化保存
 - 広告アカウント一覧取得
 - campaign metrics 取得
@@ -478,7 +481,7 @@ operator feedback では以下を記録する。
 - campaign table
 - trend chart
 
-### Milestone 4: ADK Chat MVP
+### Milestone 4: OpenAI Chat MVP
 
 - root agent
 - setup advisor
@@ -486,6 +489,14 @@ operator feedback では以下を記録する。
 - action plan agent
 - QA guardrail
 - user memory extraction
+
+### Milestone 6: Google Ads Write / Stripe Billing
+
+- Google Ads campaign status / budget の承認付きwrite route
+- Google Ads write audit log
+- Stripe Checkout / Billing Portal
+- Stripe Webhook によるsubscription状態同期
+- production readinessでOpenAI / Google Ads / Stripe / deploymentをGo判定できる状態にする
 
 ### Milestone 5: Human Tasks / Feedback
 
@@ -499,7 +510,7 @@ operator feedback では以下を記録する。
 - Supabase Auth の初期providerを email / Google / 両方 のどれにするか
 - Webフレームワークを何にするか
 - Cloudflare Pages / Workers をどこまで使うか
-- ADK Agent Service を最初から Cloud Run に載せるか、ローカル開発優先にするか
+- OpenAI Agent Service を最初から Cloud Run に載せるか、ローカル開発優先にするか
 - OAuth token の具体的な暗号化方式
 - 3媒体で共通化できる指標と、媒体固有指標の扱い
 - platform APIから都度読むか、DBにどの粒度でcacheするか

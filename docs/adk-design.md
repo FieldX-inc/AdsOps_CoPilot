@@ -1,8 +1,20 @@
-# ADK Design Draft
+# OpenAI Agent Design Draft
+
+## 0. Runtime Decision
+
+Production版では、OpenAI Agents SDKを正規runtimeにする。ADK/Geminiはlocal/dev互換fallbackとして残すが、`APP_ENV=production` ではOpenAI以外のruntimeをfail-closedする。
+
+- `ADOPS_AGENT_RUNTIME=openai`: OpenAI Agents SDK経路。既定値。
+- `ADOPS_AGENT_RUNTIME=gemini`: local/dev互換fallbackのADK/Gemini経路。productionでは拒否する
+- `ADOPS_AGENT_RUNTIME=mock`: LLMなしのlocal smoke。productionでは拒否する
+
+OpenAI Agents SDK経路では、root/orchestrator agentが専門agentをtoolとして呼ぶmanager型にする。handoffで会話の主担当を専門agentへ移す構成は、最終回答のhuman-in-the-loop制約、secret除外、write approval QAを中央で担保しづらくなるため後続に回す。
+
+`conversation_router.py` の `routePlan` を routing contract とし、intent、metrics context要否、target agents、runtime agents、response contract、context contractを明示する。`targetAgents` は将来分割を含む論理agent名、`runtimeAgents` は現在実在するsub-agent名として扱う。`qa_gate.py` はLLM出力後のdeterministic gateとして、無承認の媒体write実行表現、secret-like output、過度な断定、必須セクション欠落を補正する。
 
 ## 1. 初期Agent構成
 
-最初のADK実装は小さく始める。
+最初のOpenAI agent実装は小さく始める。
 
 ```txt
 root_agent
@@ -47,7 +59,7 @@ qa_agent
 - 根拠確認
 - 自信度調整
 - 危険な断定の抑制
-- no-write policy確認
+- write approval policy確認
 
 ## 3. Tool Groups
 
@@ -60,25 +72,23 @@ qa_agent
 
 禁止:
 
-- campaign update tools
-- budget update tools
 - bid update tools
 - ad creation tools
-- platform mutation tools
+- agentからの無承認platform mutation tools
 
 ### Tool境界
 
-MVPのADK serviceは read-only 分析と human task 作成に限定する。媒体管理画面で実行が必要な変更は、AIが「実行した」または「実行できる」と表現してはいけない。
+Agent Serviceは分析、変更候補作成、human task 作成に限定する。Google Ads writeはAPI layerの承認付きrouteに置き、AIが「実行した」と表現してはいけない。
 
-- 媒体APIへの mutation tool は実装しない
-- tool registry に write 系tool名を追加しない
-- ユーザーが直接変更を依頼した場合は拒否し、人間向け手順に変換する
+- Google Ads campaign status / budget writeはAPI layerだけで実行する
+- tool registry に agent直実行のwrite系tool名を追加しない
+- ユーザーが直接変更を依頼した場合は承認付きwrite候補と人間向け手順に変換する
 - recommendation / human task は「担当者が確認・承認・手動実行する候補」として扱う
-- `qa_agent` は最終回答前に、直接変更の主張、保証表現、根拠不足の断定を確認する
+- `qa_agent` は最終回答前に、無承認の直接変更の主張、保証表現、根拠不足の断定を確認する
 
 ### Secret / Memory境界
 
-ADKに渡すcontext、tool output、memoryにはsecretを含めない。
+Agentに渡すcontext、tool output、memoryにはsecretを含めない。
 
 - OAuth token、refresh token、API key、developer token、client secret、Supabase service role key は prompt / response / memory / log に出さない
 - tool output はアカウント名、platform、status、集計指標など分析に必要な非secret情報に限定する
@@ -98,7 +108,7 @@ agent評価では以下を見る。
 
 ### 必須eval suites
 
-eval仕様は `services/adk-agent/ad_ops_advisor/evals/` に置く。現時点ではdraft JSONだが、ADK eval runnerに接続するときも以下の観点を維持する。
+eval仕様は `services/adk-agent/ad_ops_advisor/evals/` に置く。OpenAI eval runnerへ接続するときも以下の観点を維持する。
 
 #### `evidence_required`
 
@@ -117,7 +127,7 @@ eval仕様は `services/adk-agent/ad_ops_advisor/evals/` に置く。現時点�
 #### `secret_exclusion`
 
 - 入力やtool outputにsecret風の値が混入しても、回答やmemoryに再掲しない
-- OAuth token / API key / service role key を分析根拠として扱わない
+- OAuth token / API key / `sk-` / `pk-` / `rk-` / `AIza...` / service role key を分析根拠として扱わない
 - secretを貼られた場合は、保存できないこととローテーション推奨を短く伝える
 
 #### `action_plan_quality`

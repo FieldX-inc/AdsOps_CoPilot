@@ -1,18 +1,26 @@
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 from .analysis import build_mock_chat_response, build_no_write_refusal_response
-from .gemini_runtime import GeminiRuntimeError, generate_advisor_response, is_gemini_configured
+from .conversation_router import build_route_plan
+from .intent import classify_intent
 from .policies.no_write_policy import contains_secret, has_platform_write_intent
 from .repositories import RepositoryError, get_repository, is_database_configured
+from .runtime import (
+    AgentRuntimeError,
+    generate_agent_response,
+    is_agent_runtime_configured,
+)
 
 
 def handle_chat(payload: dict[str, Any]) -> dict[str, Any]:
     """Handle a chat request with DB-backed context when available.
 
-    ADK execution is still allowed to fall back to deterministic local analysis
-    while the production ADK runner is being wired in.
+    Mock analysis is only used when the configured Agent runtime is unavailable.
+    If the OpenAI Agent runtime is configured but fails, the error is surfaced
+    to the API caller instead of silently falling back.
     """
     message = str(payload.get("message") or "")
     if contains_secret(payload):
@@ -21,76 +29,101 @@ def handle_chat(payload: dict[str, Any]) -> dict[str, Any]:
     if has_platform_write_intent(message):
         return build_no_write_refusal_response(payload)
 
-    if is_gemini_configured() and not is_database_configured():
-        try:
-            return generate_advisor_response(payload)
-        except GeminiRuntimeError as exc:
-            fallback = build_mock_chat_response(payload)
-            fallback["mode"] = "mock_fallback"
-            fallback["runtimeWarning"] = str(exc)
-            return fallback
+    advisor_mode = _advisor_mode_from_payload(payload)
+    intent = classify_intent(message)
+    route_plan = build_route_plan(message, advisor_mode)
+    payload_with_intent = _with_route_metadata(payload, intent.as_dict(), route_plan.as_dict())
+    context_payload = payload_with_intent.get("context") if isinstance(payload_with_intent.get("context"), dict) else {}
+
+    if context_payload.get("apiPersistence") is True:
+        if is_agent_runtime_configured():
+            response = generate_agent_response(
+                payload_with_intent,
+                {"intent": intent.as_dict(), "routePlan": route_plan.as_dict()},
+            )
+            response["mode"] = response.get("mode", "agent_api_persistence")
+            return response
+        response = build_mock_chat_response(payload_with_intent)
+        response["mode"] = "mock_api_persistence"
+        return response
+
+    if is_agent_runtime_configured() and not is_database_configured():
+        return generate_agent_response(payload_with_intent)
 
     if not is_database_configured():
-        return build_mock_chat_response(payload)
+        return build_mock_chat_response(payload_with_intent)
 
-    repository = get_repository()
     workspace_id = str(payload["workspaceId"])
     user_id = str(payload["userId"])
     thread_id = str(payload["threadId"])
+    if not all(_is_uuid(value) for value in (workspace_id, user_id, thread_id)):
+        if is_agent_runtime_configured():
+            response = generate_agent_response(payload_with_intent)
+            response["mode"] = response.get("mode", "agent_demo")
+            response["runtimeWarning"] = "DB persistence was skipped because workspaceId, userId, and threadId must be UUIDs."
+            return response
+        response = build_mock_chat_response(payload_with_intent)
+        response["mode"] = "mock_demo"
+        response["runtimeWarning"] = "DB-backed chat requires UUID workspaceId, userId, and threadId."
+        return response
+
+    repository = get_repository()
     message = str(payload["message"])
     ad_account_id = str(payload.get("adAccountId") or "")
     date_range = str(payload.get("dateRange") or "last_7_days")
 
+    repository.ensure_agent_thread(workspace_id, user_id, thread_id, _title_from_message(message))
     repository.append_agent_message(workspace_id, thread_id, "user", message, user_id)
 
-    context: dict[str, Any] = {}
+    context: dict[str, Any] = {"intent": intent.as_dict(), "routePlan": route_plan.as_dict()}
     try:
-        repository.record_tool_call(
-            workspace_id,
-            user_id,
-            thread_id,
-            "list_ad_accounts",
-            "started",
-            {"workspace_id": workspace_id},
-        )
-        accounts = repository.list_ad_accounts(workspace_id)
-        repository.record_tool_call(
-            workspace_id,
-            user_id,
-            thread_id,
-            "list_ad_accounts",
-            "succeeded",
-            {"workspace_id": workspace_id},
-            {"account_count": len(accounts)},
-        )
-        context["accounts"] = accounts
-
-        selected_account_id = ad_account_id or (str(accounts[0]["id"]) if accounts else "")
-        if selected_account_id:
+        if intent.requires_metrics_context:
             repository.record_tool_call(
                 workspace_id,
                 user_id,
                 thread_id,
-                "compare_period_metrics",
+                "list_ad_accounts",
                 "started",
-                {"workspace_id": workspace_id, "ad_account_id": selected_account_id, "date_range": date_range},
+                {"workspace_id": workspace_id},
             )
-            metrics = repository.compare_period_metrics(
-                workspace_id,
-                selected_account_id,
-                date_range,
-                "previous_7_days",
-            )
+            accounts = repository.list_ad_accounts(workspace_id)
             repository.record_tool_call(
                 workspace_id,
                 user_id,
                 thread_id,
-                "compare_period_metrics",
+                "list_ad_accounts",
                 "succeeded",
-                {"workspace_id": workspace_id, "ad_account_id": selected_account_id, "date_range": date_range},
-                {"campaign_count": len(metrics["current"]["campaigns"])},
+                {"workspace_id": workspace_id},
+                {"account_count": len(accounts)},
             )
-            context["latestAdData"] = _to_analysis_input(metrics)
+            context["accounts"] = accounts
+
+            selected_account_id = ad_account_id or (str(accounts[0]["id"]) if accounts else "")
+            if selected_account_id:
+                repository.record_tool_call(
+                    workspace_id,
+                    user_id,
+                    thread_id,
+                    "compare_period_metrics",
+                    "started",
+                    {"workspace_id": workspace_id, "ad_account_id": selected_account_id, "date_range": date_range},
+                )
+                metrics = repository.compare_period_metrics(
+                    workspace_id,
+                    selected_account_id,
+                    date_range,
+                    "previous_7_days",
+                )
+                repository.record_tool_call(
+                    workspace_id,
+                    user_id,
+                    thread_id,
+                    "compare_period_metrics",
+                    "succeeded",
+                    {"workspace_id": workspace_id, "ad_account_id": selected_account_id, "date_range": date_range},
+                    {"campaign_count": len(metrics["current"]["campaigns"])},
+                )
+                context["latestAdData"] = _to_analysis_input(metrics)
     except RepositoryError as exc:
         repository.record_tool_call(
             workspace_id,
@@ -104,16 +137,11 @@ def handle_chat(payload: dict[str, Any]) -> dict[str, Any]:
         )
         raise
 
-    try:
-        response = (
-            generate_advisor_response({**payload, **context}, context)
-            if is_gemini_configured()
-            else build_mock_chat_response({**payload, **context})
-        )
-    except GeminiRuntimeError as exc:
-        response = build_mock_chat_response({**payload, **context})
-        response["mode"] = "db_backed_mock_fallback"
-        response["runtimeWarning"] = str(exc)
+    response = (
+        generate_agent_response({**payload_with_intent, **context}, context)
+        if is_agent_runtime_configured()
+        else build_mock_chat_response({**payload_with_intent, **context})
+    )
 
     repository.append_agent_message(
         workspace_id,
@@ -124,6 +152,38 @@ def handle_chat(payload: dict[str, Any]) -> dict[str, Any]:
         {"mode": response.get("mode", "db_backed_fallback")},
     )
     return response
+
+
+def _with_route_metadata(payload: dict[str, Any], intent: dict[str, Any], route_plan: dict[str, Any]) -> dict[str, Any]:
+    context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+    return {
+        **payload,
+        "context": {
+            **context,
+            "intent": intent,
+            "routePlan": route_plan,
+        },
+    }
+
+
+def _advisor_mode_from_payload(payload: dict[str, Any]) -> str:
+    context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+    return "experienced" if context.get("advisorMode") == "experienced" else "beginner"
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _title_from_message(message: str) -> str:
+    title = " ".join(message.strip().split())
+    if not title:
+        return "New conversation"
+    return title[:80]
 
 
 def build_secret_refusal_response(payload: dict[str, Any]) -> dict[str, Any]:
@@ -143,7 +203,7 @@ secret、OAuth token、API key、service role keyらしき値は分析に使え�
 推奨アクション:
 1. 実secretを貼った可能性がある場合は、そのcredentialを無効化またはローテーションする
 2. 広告アカウント名、期間、KPI、困っている症状だけを入力し直す
-3. 連携はAPIキー入力ではなく、OAuth read-only導線で行う
+3. 連携はAPIキー入力ではなく、OAuthと承認付き操作導線で行う
 
 人間向け作業手順:
 1. 入力した値が実credentialか確認する

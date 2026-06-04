@@ -1,4 +1,4 @@
-import { StrictMode, useEffect, useMemo, useState } from "react";
+import { StrictMode, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createClient, type Session } from "@supabase/supabase-js";
 import {
@@ -18,9 +18,14 @@ import {
 } from "recharts";
 import "./styles.css";
 
-type View = "dashboard" | "bi" | "columns" | "connections";
+type View = "dashboard" | "setup" | "bi" | "columns" | "connections";
+type IconName = "dashboard" | "setup" | "chart" | "book" | "plug" | "ai" | "lock" | "check" | "arrow";
 type PlatformFilter = "all" | "google" | "meta" | "yahoo";
 type Confidence = "high" | "medium" | "low";
+type AdvisorMode = "beginner" | "experienced";
+type AdvisorEntry = "setup_advisor_beginner" | "performance_analyst_experienced";
+type GoogleWriteOperation = "status" | "budget";
+type GoogleCampaignStatus = "ENABLED" | "PAUSED";
 
 type ChatMessage = {
   id?: string;
@@ -63,8 +68,25 @@ type ChatThreadResponse = {
   messages: ChatMessage[];
 };
 
+type StoredRecommendation = {
+  id: string;
+  title: string;
+  confidence: Confidence;
+  status: "draft" | "suggested" | "accepted" | "rejected" | "archived";
+  operator_steps?: string[];
+  created_at: string;
+};
+
+type StoredTask = {
+  id: string;
+  title: string;
+  priority: "high" | "medium" | "low";
+  status: "draft" | "suggested" | "accepted" | "doing" | "done" | "rejected" | "ignored";
+  created_at: string;
+};
+
 type ReadinessResponse = {
-  mode: "mock" | "adk-proxy";
+  mode: "mock" | "agent-proxy";
   status: string;
   scopes?: {
     mock: ReadinessScope;
@@ -100,6 +122,59 @@ type TodoItem = {
   id: string;
   text: string;
   done: boolean;
+};
+
+type SetupWizardState = {
+  goal: string;
+  product: string;
+  audience: string;
+  budget: string;
+  targetCpa: string;
+  platforms: Array<Exclude<PlatformFilter, "all">>;
+  measurement: string;
+  planNotes: string;
+};
+
+type SetupIntakeMessage = {
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  createdAt: string;
+};
+
+type SetupStep = {
+  id: string;
+  title: string;
+  steps: string[];
+};
+
+type SetupIntakeSummary = {
+  id: string;
+  title: string;
+  status: "in_progress" | "ready" | "archived";
+  score: number;
+  readyForSetupSteps: boolean;
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type SetupIntakeResponse = {
+  intake: {
+    id: string;
+    title: string;
+    status: "in_progress" | "ready" | "archived";
+    score: number;
+    dimensionScores: Record<"goal" | "product" | "audience" | "budget" | "platforms" | "measurement", number>;
+    facts: Record<string, unknown>;
+    missingFields: string[];
+    readyForSetupSteps: boolean;
+    setupSteps: SetupStep[];
+    archivedAt: string | null;
+    createdAt: string;
+    updatedAt: string;
+  };
+  messages: SetupIntakeMessage[];
 };
 
 type MetricTotals = {
@@ -154,8 +229,8 @@ type ConnectionStatusResponse = {
   workspaceId: string;
   mode: "mock" | "production";
   policy: {
-    access: "read-only";
-    mediaWriteEnabled: false;
+    access: "read-only" | "read-write-after-human-approval";
+    mediaWriteEnabled: boolean;
     note: string;
   };
   accounts: DashboardResponse["adAccounts"];
@@ -174,6 +249,13 @@ type ConnectionStatusResponse = {
   }>;
 };
 
+type AuditLogEntry = {
+  id?: string;
+  event_type: string;
+  created_at?: string;
+  payload?: Record<string, unknown>;
+};
+
 type HelpArticle = {
   id: string;
   title: string;
@@ -187,16 +269,47 @@ type ColumnDetail = {
   related: HelpArticle[];
 };
 
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8787";
+const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8787";
+const appEnv = String(import.meta.env.VITE_APP_ENV ?? import.meta.env.MODE ?? "local").toLowerCase();
+const allowBillingDemoBypass = appEnv !== "production";
+const apiBaseUrl =
+  /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?/.test(configuredApiBaseUrl) &&
+  !["localhost", "127.0.0.1"].includes(window.location.hostname)
+    ? ""
+    : configuredApiBaseUrl;
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-const supabase = supabaseUrl && supabaseAnonKey ? createClient(supabaseUrl, supabaseAnonKey) : null;
+const authRedirectPath = import.meta.env.VITE_AUTH_REDIRECT_PATH ?? "/auth/callback";
+const authRedirectUrl =
+  import.meta.env.VITE_AUTH_REDIRECT_URL ??
+  `${window.location.origin}${authRedirectPath.startsWith("/") ? authRedirectPath : `/${authRedirectPath}`}`;
+const supabase = supabaseUrl && supabaseAnonKey
+  ? createClient(supabaseUrl, supabaseAnonKey, {
+      auth: {
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+        flowType: "pkce",
+        persistSession: true,
+      },
+    })
+  : null;
 const columnBookmarkStorageKey = "adops-advisor:column-bookmarks";
+const mascotWaitingSrc = "/mascot/inhouse-bot-waiting.gif";
+const mascotReviewSrc = "/mascot/inhouse-bot-review.gif";
+const mascotStaticSrc = "/mascot/inhouse-bot-static.png";
 const demoPayload = {
   workspaceId: "demo-workspace",
   userId: "demo-user",
   threadId: "demo-thread",
 };
+
+function createThreadId() {
+  return crypto.randomUUID();
+}
+
+function isUuid(value: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
 
 type WorkspaceSession = {
   workspaceId: string;
@@ -206,6 +319,20 @@ type WorkspaceSession = {
   userEmail: string;
 };
 
+type BillingStatus = {
+  workspaceId: string;
+  configured: boolean;
+  access: "active" | "billing_required";
+  customer: { id: string; stripeCustomerId: string } | null;
+  subscription: {
+    id: string;
+    stripeSubscriptionId?: string | null;
+    status: string;
+    currentPeriodEnd?: string | null;
+    cancelAtPeriodEnd: boolean;
+  } | null;
+};
+
 const welcomeMessage: ChatMessage = {
   id: "local-welcome",
   role: "assistant",
@@ -213,12 +340,56 @@ const welcomeMessage: ChatMessage = {
     "こんにちは。最新広告データ、保存済みナレッジ、必要に応じた外部検索を分けて扱いながら、原因分析と人間向け作業手順まで整理します。",
 };
 
-const navItems: Array<{ key: View; label: string }> = [
-  { key: "dashboard", label: "ダッシュボード" },
-  { key: "bi", label: "BI分析" },
-  { key: "columns", label: "Adコラム" },
-  { key: "connections", label: "データ連携" },
+const brandChartColors = {
+  green: "#2d6a4f",
+  greenSoft: "#78a684",
+  yellow: "#d6a419",
+  yellowDeep: "#8a6810",
+  grid: "#d8e2d8",
+};
+
+const navItems: Array<{ key: View; label: string; icon: IconName }> = [
+  { key: "dashboard", label: "ダッシュボード", icon: "dashboard" },
+  { key: "setup", label: "広告準備", icon: "setup" },
+  { key: "bi", label: "BI分析", icon: "chart" },
+  { key: "columns", label: "Adコラム", icon: "book" },
+  { key: "connections", label: "データ連携", icon: "plug" },
 ];
+
+const confidenceLabels: Record<Confidence, string> = {
+  high: "高",
+  medium: "中",
+  low: "低",
+};
+
+const recommendationStatusLabels: Record<StoredRecommendation["status"], string> = {
+  draft: "下書き",
+  suggested: "提案中",
+  accepted: "採用",
+  rejected: "却下",
+  archived: "アーカイブ済み",
+};
+
+const taskStatusLabels: Record<StoredTask["status"], string> = {
+  draft: "下書き",
+  suggested: "提案中",
+  accepted: "採用",
+  doing: "対応中",
+  done: "完了",
+  rejected: "却下",
+  ignored: "保留",
+};
+
+const taskPriorityLabels: Record<StoredTask["priority"], string> = {
+  high: "高",
+  medium: "中",
+  low: "低",
+};
+
+const advisorEntryByMode: Record<AdvisorMode, AdvisorEntry> = {
+  beginner: "setup_advisor_beginner",
+  experienced: "performance_analyst_experienced",
+};
 
 const demoDashboardData: DashboardResponse = {
   workspaceId: "demo-workspace",
@@ -521,12 +692,12 @@ const demoArticles: HelpArticle[] = [
       "広告媒体APIのデータは当日分が遅れて反映されることがあります。午前中のCVが少ないからといって、すぐに広告の問題と決めつけないようにします。ダッシュボードでは最終取得時刻、媒体別の遅延、前日までの確定傾向を合わせて確認します。",
   },
   {
-    id: "oauth-read-only",
-    title: "OAuth連携はread-only権限から始める",
+    id: "oauth-approval-write",
+    title: "OAuth連携と承認付きwriteを分ける",
     difficulty: "初級",
-    tags: ["oauth", "read-only", "security"],
+    tags: ["oauth", "approval", "security"],
     body:
-      "広告データ連携では、まずread-only権限で費用、クリック、CV、キャンペーン情報を取得できる状態を作ります。MVPでは予算変更や停止などの媒体変更はAPIから実行せず、AIは分析と人間向け手順の作成に絞ります。権限範囲を小さく保つことで、導入時の心理的安全性も高まります。",
+      "広告データ連携では、OAuthで費用、クリック、CV、キャンペーン情報を取得します。Google Adsの予算変更や停止は、AIが勝手に実行せず、対象ID、理由、戻し条件を確認したうえで承認付きAPIだけが実行します。権限と承認を分けることで、導入時の安全性を保ちます。",
   },
   {
     id: "token-secret-handling",
@@ -601,12 +772,12 @@ const demoArticles: HelpArticle[] = [
       "AIが提案した作業を人間が実施したら、日付、対象、変更内容、理由、期待する変化を記録します。翌日以降のCPA、CVR、CPC、CV数を見るときに、どの変更が効いたのかを追いやすくなります。記録がないと、成功も失敗も再現しにくくなります。",
   },
   {
-    id: "read-only-action-plan",
-    title: "read-only運用でのAI提案の使い方",
+    id: "approval-gated-action-plan",
+    title: "承認付きwrite運用でのAI提案の使い方",
     difficulty: "初級",
-    tags: ["read-only", "human-review", "action-plan"],
+    tags: ["approval", "human-review", "action-plan"],
     body:
-      "read-only運用では、AIは媒体を直接変更せず、原因仮説と作業手順を整理します。担当者は管理画面で対象を確認し、必要なら除外、予算調整、広告差し替えを人間の判断で実施します。AIの価値は自動実行ではなく、見る順番と判断材料を短時間で揃えることにあります。",
+      "承認付きwrite運用では、AIは原因仮説、変更候補、戻し条件、観察計画を整理します。担当者は対象を確認し、必要ならGoogle Adsの予算変更や停止を承認付きAPIまたは管理画面で実施します。AIの価値は自動実行ではなく、見る順番と判断材料を短時間で揃えることにあります。",
   },
   {
     id: "recommendation-confidence",
@@ -639,22 +810,31 @@ function App() {
   const [usingDemoData, setUsingDemoData] = useState(false);
   const [readiness, setReadiness] = useState<ReadinessResponse | null>(null);
   const [aiOpen, setAiOpen] = useState(false);
+  const [advisorMode, setAdvisorMode] = useState<AdvisorMode>("beginner");
+  const [pendingAdvisorMode, setPendingAdvisorMode] = useState<AdvisorMode | null>(null);
   const [input, setInput] = useState("");
   const [threadId, setThreadId] = useState(demoPayload.threadId);
   const [threads, setThreads] = useState<ChatThreadSummary[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([welcomeMessage]);
   const [threadTodos, setThreadTodos] = useState<Record<string, TodoItem[]>>({});
   const [latestRecommendation, setLatestRecommendation] = useState<ChatResponse["recommendation"] | null>(null);
+  const [storedRecommendations, setStoredRecommendations] = useState<StoredRecommendation[]>([]);
+  const [storedTasks, setStoredTasks] = useState<StoredTask[]>([]);
   const [loading, setLoading] = useState(false);
   const [thinkingStatus, setThinkingStatus] = useState("root_agent が会話内容を確認しています。");
   const [threadLoading, setThreadLoading] = useState(false);
   const [error, setError] = useState("");
   const [session, setSession] = useState<Session | null>(null);
   const [workspaceSession, setWorkspaceSession] = useState<WorkspaceSession | null>(null);
+  const [billingStatus, setBillingStatus] = useState<BillingStatus | null>(null);
+  const [billingLoading, setBillingLoading] = useState(true);
+  const [billingActionLoading, setBillingActionLoading] = useState<"checkout" | "portal" | "">("");
+  const [billingError, setBillingError] = useState("");
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState("");
 
   const activePayload = workspaceSession ?? demoPayload;
+  const billingActive = Boolean(workspaceSession && billingStatus?.access === "active");
 
   function authHeaders(extra?: HeadersInit): HeadersInit {
     return {
@@ -670,21 +850,46 @@ function App() {
       return;
     }
 
+    const authErrorDescription = readAuthErrorFromUrl();
+    if (authErrorDescription) {
+      setAuthError(authErrorDescription);
+      window.history.replaceState({}, document.title, window.location.origin);
+    }
+
     let mounted = true;
+    let settled = false;
+    const timeout = window.setTimeout(() => {
+      if (!mounted || settled) return;
+      settled = true;
+      setSession(null);
+      setAuthLoading(false);
+      setAuthError("保存済みセッションを復元できませんでした。もう一度ログインしてください。");
+    }, 6000);
     supabase.auth.getSession().then(({ data }) => {
-      if (!mounted) return;
+      if (!mounted || settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
       setSession(data.session);
       setAuthLoading(false);
+    }).catch(() => {
+      if (!mounted || settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      setSession(null);
+      setAuthLoading(false);
+      setAuthError("保存済みセッションを復元できませんでした。もう一度ログインしてください。");
     });
     const { data: subscription } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession);
       if (!nextSession) {
         setWorkspaceSession(null);
+        setBillingStatus(null);
         setMessages([welcomeMessage]);
       }
     });
     return () => {
       mounted = false;
+      window.clearTimeout(timeout);
       subscription.subscription.unsubscribe();
     };
   }, []);
@@ -709,6 +914,9 @@ function App() {
         };
         setWorkspaceSession(nextWorkspaceSession);
         setThreadId(nextWorkspaceSession.threadId);
+        if (window.location.pathname === authRedirectPath) {
+          window.history.replaceState({}, document.title, window.location.origin);
+        }
       })
       .catch((caught) => {
         if (caught instanceof DOMException && caught.name === "AbortError") return;
@@ -723,6 +931,44 @@ function App() {
 
   useEffect(() => {
     if (!workspaceSession) return;
+    const controller = new AbortController();
+    setBillingLoading(true);
+    setBillingError("");
+    fetch(`${apiBaseUrl}/billing/status`, { headers: authHeaders(), signal: controller.signal })
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.error ?? "課金状態の取得に失敗しました。");
+        setBillingStatus(data as BillingStatus);
+      })
+      .catch((caught) => {
+        if (caught instanceof DOMException && caught.name === "AbortError") return;
+        setBillingStatus(null);
+        setBillingError(caught instanceof Error ? caught.message : "課金状態の取得に失敗しました。");
+      })
+      .finally(() => setBillingLoading(false));
+    return () => controller.abort();
+  }, [workspaceSession?.workspaceId, session?.access_token]);
+
+  async function openBillingSession(kind: "checkout" | "portal") {
+    setBillingError("");
+    setBillingActionLoading(kind);
+    const path = kind === "checkout" ? "/billing/checkout-session" : "/billing/portal-session";
+    const res = await fetch(`${apiBaseUrl}${path}`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ workspaceId: workspaceSession?.workspaceId }),
+    });
+    const data = await res.json();
+    setBillingActionLoading("");
+    if (!res.ok || !data.url) {
+      setBillingError(data?.error ?? "Stripe sessionを作成できませんでした。");
+      return;
+    }
+    window.location.href = data.url;
+  }
+
+  useEffect(() => {
+    if (!billingActive) return;
     const controller = new AbortController();
     setDashboardLoading(true);
     setDashboardError("");
@@ -744,10 +990,10 @@ function App() {
       })
       .finally(() => setDashboardLoading(false));
     return () => controller.abort();
-  }, [range, platform, workspaceSession?.workspaceId, session?.access_token]);
+  }, [range, platform, billingActive, workspaceSession?.workspaceId, session?.access_token]);
 
   useEffect(() => {
-    if (!workspaceSession) return;
+    if (!billingActive) return;
     const controller = new AbortController();
     fetch(`${apiBaseUrl}/readiness?workspaceId=${activePayload.workspaceId}`, { headers: authHeaders(), signal: controller.signal })
       .then(async (res) => {
@@ -760,10 +1006,10 @@ function App() {
         setReadiness(createDemoReadiness());
       });
     return () => controller.abort();
-  }, [workspaceSession?.workspaceId, session?.access_token]);
+  }, [billingActive, workspaceSession?.workspaceId, session?.access_token]);
 
   useEffect(() => {
-    if (!workspaceSession) return;
+    if (!billingActive) return;
     const controller = new AbortController();
     fetch(`${apiBaseUrl}/agent/threads?workspaceId=${activePayload.workspaceId}`, { headers: authHeaders(), signal: controller.signal })
       .then(async (res) => {
@@ -783,10 +1029,10 @@ function App() {
         ]);
       });
     return () => controller.abort();
-  }, [workspaceSession?.workspaceId, session?.access_token]);
+  }, [billingActive, workspaceSession?.workspaceId, session?.access_token]);
 
   useEffect(() => {
-    if (!workspaceSession) return;
+    if (!billingActive) return;
     const controller = new AbortController();
     setThreadLoading(true);
     fetch(`${apiBaseUrl}/agent/threads/${threadId}?workspaceId=${activePayload.workspaceId}`, { headers: authHeaders(), signal: controller.signal })
@@ -800,17 +1046,36 @@ function App() {
       })
       .finally(() => setThreadLoading(false));
     return () => controller.abort();
-  }, [threadId, workspaceSession?.workspaceId, session?.access_token]);
+  }, [threadId, billingActive, workspaceSession?.workspaceId, session?.access_token]);
 
   function refreshThreads() {
+    if (!billingActive) return;
     fetch(`${apiBaseUrl}/agent/threads?workspaceId=${activePayload.workspaceId}`, { headers: authHeaders() })
       .then((res) => res.json())
       .then((data) => setThreads((data.threads as ChatThreadSummary[]) ?? []))
       .catch(() => undefined);
   }
 
+  function refreshWorkItems() {
+    if (!workspaceSession || !billingActive) return;
+    Promise.all([
+      fetch(`${apiBaseUrl}/recommendations?workspaceId=${workspaceSession.workspaceId}`, { headers: authHeaders() }).then((res) => res.json()),
+      fetch(`${apiBaseUrl}/tasks?workspaceId=${workspaceSession.workspaceId}`, { headers: authHeaders() }).then((res) => res.json()),
+    ])
+      .then(([recommendationData, taskData]) => {
+        setStoredRecommendations((recommendationData.recommendations as StoredRecommendation[]) ?? []);
+        setStoredTasks((taskData.tasks as StoredTask[]) ?? []);
+      })
+      .catch(() => undefined);
+  }
+
+  useEffect(() => {
+    if (!billingActive) return;
+    refreshWorkItems();
+  }, [billingActive, workspaceSession?.workspaceId, session?.access_token]);
+
   function startNewThread() {
-    const nextThreadId = `thread-${Date.now()}`;
+    const nextThreadId = createThreadId();
     setThreadId(nextThreadId);
     setMessages([welcomeMessage]);
     setThreads((prev) => [
@@ -825,6 +1090,26 @@ function App() {
     ]);
   }
 
+  function hasActiveChatConversation() {
+    return messages.some((message) => message.role === "user");
+  }
+
+  function requestAdvisorModeChange(nextMode: AdvisorMode) {
+    if (nextMode === advisorMode || loading) return;
+    if (hasActiveChatConversation()) {
+      setPendingAdvisorMode(nextMode);
+      return;
+    }
+    setAdvisorMode(nextMode);
+  }
+
+  function confirmAdvisorModeChange() {
+    if (!pendingAdvisorMode) return;
+    setAdvisorMode(pendingAdvisorMode);
+    setPendingAdvisorMode(null);
+    startNewThread();
+  }
+
   function toggleArticleBookmark(articleId: string) {
     setBookmarkedArticleIds((current) =>
       current.includes(articleId)
@@ -836,12 +1121,20 @@ function App() {
   async function sendMessage() {
     const text = input.trim();
     if (!text || loading) return;
+    if (!billingActive) {
+      setError("課金状態がactiveになるまでAI相談は利用できません。");
+      return;
+    }
 
     setInput("");
     setError("");
     setLoading(true);
     setThinkingStatus("root_agent が会話内容を確認しています。");
     setMessages((prev) => [...prev, { role: "user", content: text }]);
+    const activeThreadId = isUuid(threadId) ? threadId : createThreadId();
+    if (activeThreadId !== threadId) {
+      setThreadId(activeThreadId);
+    }
 
     try {
       const res = await fetch(`${apiBaseUrl}/agent/chat/stream`, {
@@ -849,13 +1142,15 @@ function App() {
         headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           ...activePayload,
-          threadId,
+          threadId: activeThreadId,
           message: text,
           context: {
             range,
             platform,
             dateRange: `last_${range}_days`,
             comparisonRange: `previous_${range}_days`,
+            advisorMode,
+            agentEntry: advisorEntryByMode[advisorMode],
           },
         }),
       });
@@ -866,11 +1161,9 @@ function App() {
       setMessages(chat.thread?.messages ?? ((prev) => [...prev, chat.message]));
       setLatestRecommendation(chat.recommendation);
       refreshThreads();
+      refreshWorkItems();
     } catch (caught) {
-      const chat = createDemoChatResponse(text, dashboardData);
-      setMessages((prev) => [...prev, chat.message]);
-      setLatestRecommendation(chat.recommendation);
-      setError(caught instanceof Error ? `デモ応答を表示中: ${caught.message}` : "デモ応答を表示中です。");
+      setError(caught instanceof Error ? caught.message : "AI応答の取得に失敗しました。");
     } finally {
       setLoading(false);
     }
@@ -893,10 +1186,25 @@ function App() {
           setAuthError("");
           const { error: signInError } = await supabase.auth.signInWithOtp({
             email,
-            options: { emailRedirectTo: window.location.origin },
+            options: { emailRedirectTo: authRedirectUrl },
           });
           if (signInError) setAuthError(signInError.message);
           else setAuthError("確認メールを送信しました。メール内リンクからログインしてください。");
+        }}
+        onGoogleLogin={async () => {
+          if (!supabase) {
+            setAuthError("Supabase Auth clientが未設定です。");
+            return;
+          }
+          setAuthError("");
+          const { error: signInError } = await supabase.auth.signInWithOAuth({
+            provider: "google",
+            options: {
+              redirectTo: authRedirectUrl,
+              queryParams: { prompt: "select_account" },
+            },
+          });
+          if (signInError) setAuthError(signInError.message);
         }}
         onPasswordLogin={async (email, password) => {
           if (!supabase) {
@@ -916,7 +1224,7 @@ function App() {
           const { error: signUpError } = await supabase.auth.signUp({
             email,
             password,
-            options: { emailRedirectTo: window.location.origin },
+            options: { emailRedirectTo: authRedirectUrl },
           });
           if (signUpError) setAuthError(signUpError.message);
           else setAuthError("ユーザーを作成しました。確認メールが必要な設定の場合はメール内リンクを開いてください。");
@@ -924,6 +1232,36 @@ function App() {
         onLogout={async () => {
           await supabase?.auth.signOut();
         }}
+      />
+    );
+  }
+
+  if (billingLoading) {
+    return <LoadingScreen message="課金状態を確認しています。" />;
+  }
+
+  if (!billingStatus || billingStatus.access !== "active") {
+    return (
+      <BillingGate
+        workspace={workspaceSession}
+        status={billingStatus}
+        error={billingError}
+        loading={billingActionLoading}
+        onCheckout={() => void openBillingSession("checkout")}
+        onPortal={() => void openBillingSession("portal")}
+        onContinueDemo={
+          allowBillingDemoBypass && (billingStatus?.configured === false || !billingStatus)
+            ? () =>
+                setBillingStatus({
+                  workspaceId: workspaceSession.workspaceId,
+                  configured: false,
+                  access: "active",
+                  customer: null,
+                  subscription: null,
+                })
+            : undefined
+        }
+        onLogout={() => supabase?.auth.signOut()}
       />
     );
   }
@@ -941,16 +1279,20 @@ function App() {
             platform={platform}
             latestRecommendation={latestRecommendation}
             usingDemoData={isMockDataExperience(usingDemoData, readiness)}
-            readiness={readiness}
             onRangeChange={setRange}
             onPlatformChange={setPlatform}
             onOpenAi={() => setAiOpen(true)}
-            onOpenConnections={() => setView("connections")}
             onOpenColumns={(tags) => {
               setColumnTags(tags);
               setSelectedArticleId(null);
               setView("columns");
             }}
+          />
+        )}
+        {view === "setup" && (
+          <SetupWizardPage
+            onOpenConnections={() => setView("connections")}
+            authHeaders={authHeaders}
           />
         )}
         {view === "bi" && (
@@ -984,8 +1326,24 @@ function App() {
         )}
       </main>
 
-      <button type="button" className="ai-launcher" onClick={() => setAiOpen(true)}>
-        AI分析を開く
+      <button
+        type="button"
+        className={`ai-launcher${aiOpen ? " is-open" : ""}${loading ? " is-thinking" : ""}`}
+        onClick={() => setAiOpen(true)}
+        aria-controls="ai-sidebar"
+        aria-expanded={aiOpen}
+        aria-label={aiOpen ? "AIチャットパネルを表示中" : "AIチャットパネルを開く"}
+      >
+        <span className="ai-launcher-mascot" aria-hidden="true">
+          <picture>
+            <source srcSet={mascotStaticSrc} media="(prefers-reduced-motion: reduce)" />
+            <img src={loading ? mascotReviewSrc : mascotWaitingSrc} alt="" width={72} height={78} />
+          </picture>
+        </span>
+        <span className="ai-launcher-copy">
+          <span>{loading ? "考え中" : "AI相談"}</span>
+          <strong>{aiOpen ? "開いています" : "相談する"}</strong>
+        </span>
       </button>
 
       {aiOpen && (
@@ -994,6 +1352,11 @@ function App() {
           setInput={setInput}
           threadId={threadId}
           threads={threads}
+          advisorMode={advisorMode}
+          onAdvisorModeChange={requestAdvisorModeChange}
+          pendingAdvisorMode={pendingAdvisorMode}
+          onCancelAdvisorModeChange={() => setPendingAdvisorMode(null)}
+          onConfirmAdvisorModeChange={confirmAdvisorModeChange}
             threadLoading={threadLoading}
             messages={messages}
             todos={threadTodos[threadId] ?? []}
@@ -1044,8 +1407,18 @@ function Sidebar({
   return (
     <aside className="sidebar">
       <div className="brand-card">
+        <img
+          src="/brand/chokotto-symbol.png"
+          alt=""
+          width={32}
+          height={32}
+          aria-hidden="true"
+          onError={(event) => {
+            event.currentTarget.style.display = "none";
+          }}
+        />
         <p>{workspace.workspaceName}</p>
-        <strong>AdOps Advisor</strong>
+        <strong>ちょこっとインハウス</strong>
         <span>{workspace.userEmail}</span>
       </div>
       <nav aria-label="メインナビゲーション" className="nav">
@@ -1055,6 +1428,7 @@ function Sidebar({
             className={active === item.key ? "active" : ""}
             onClick={() => onNavigate(item.key)}
           >
+            <InlineIcon name={item.icon} />
             {item.label}
           </button>
         ))}
@@ -1072,6 +1446,118 @@ function normalizeLoginId(value: string) {
   return trimmed;
 }
 
+function InlineIcon({ name }: { name: IconName }) {
+  const common = {
+    width: 16,
+    height: 16,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 2,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    "aria-hidden": true,
+    focusable: false,
+  };
+
+  if (name === "dashboard") {
+    return (
+      <svg {...common}>
+        <rect x="3" y="3" width="7" height="7" />
+        <rect x="14" y="3" width="7" height="7" />
+        <rect x="3" y="14" width="7" height="7" />
+        <path d="M14 17h7M14 21h7" />
+      </svg>
+    );
+  }
+
+  if (name === "chart") {
+    return (
+      <svg {...common}>
+        <path d="M4 19V5" />
+        <path d="M4 19h16" />
+        <path d="m7 15 4-4 3 3 5-7" />
+      </svg>
+    );
+  }
+
+  if (name === "setup") {
+    return (
+      <svg {...common}>
+        <path d="M12 3v4" />
+        <path d="M12 17v4" />
+        <path d="M3 12h4" />
+        <path d="M17 12h4" />
+        <path d="M7.8 7.8 5.4 5.4" />
+        <path d="m18.6 18.6-2.4-2.4" />
+        <path d="m16.2 7.8 2.4-2.4" />
+        <path d="m5.4 18.6 2.4-2.4" />
+        <circle cx="12" cy="12" r="4" />
+      </svg>
+    );
+  }
+
+  if (name === "book") {
+    return (
+      <svg {...common}>
+        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+        <path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5z" />
+      </svg>
+    );
+  }
+
+  if (name === "plug") {
+    return (
+      <svg {...common}>
+        <path d="M9 7V2" />
+        <path d="M15 7V2" />
+        <path d="M6 13V8h12v5a6 6 0 0 1-12 0z" />
+        <path d="M12 19v3" />
+      </svg>
+    );
+  }
+
+  if (name === "ai") {
+    return (
+      <svg {...common}>
+        <path d="M12 3v3" />
+        <path d="M12 18v3" />
+        <path d="M3 12h3" />
+        <path d="M18 12h3" />
+        <path d="m5.6 5.6 2.1 2.1" />
+        <path d="m16.3 16.3 2.1 2.1" />
+        <path d="m18.4 5.6-2.1 2.1" />
+        <path d="m7.7 16.3-2.1 2.1" />
+        <circle cx="12" cy="12" r="3" />
+      </svg>
+    );
+  }
+
+  if (name === "lock") {
+    return (
+      <svg {...common}>
+        <rect x="4" y="11" width="16" height="10" rx="2" />
+        <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+      </svg>
+    );
+  }
+
+  if (name === "check") {
+    return (
+      <svg {...common}>
+        <path d="m20 6-11 11-5-5" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg {...common}>
+      <path d="M5 12h14" />
+      <path d="m13 6 6 6-6 6" />
+    </svg>
+  );
+}
+
 function AuthShell({ title, message }: { title: string; message: string }) {
   return (
     <div className="auth-shell">
@@ -1084,9 +1570,85 @@ function AuthShell({ title, message }: { title: string; message: string }) {
   );
 }
 
+function LoadingScreen({ message }: { message: string }) {
+  return (
+    <div className="auth-shell">
+      <section className="auth-panel">
+        <p className="eyebrow">ちょこっとインハウス</p>
+        <h1>確認中</h1>
+        <p>{message}</p>
+      </section>
+    </div>
+  );
+}
+
+function BillingGate({
+  workspace,
+  status,
+  error,
+  loading,
+  onCheckout,
+  onPortal,
+  onContinueDemo,
+  onLogout,
+}: {
+  workspace: WorkspaceSession;
+  status: BillingStatus | null;
+  error: string;
+  loading: "checkout" | "portal" | "";
+  onCheckout: () => void;
+  onPortal: () => void;
+  onContinueDemo?: () => void;
+  onLogout: () => void;
+}) {
+  const subscriptionStatus = status?.subscription?.status ?? "未開始";
+  return (
+    <div className="auth-shell">
+      <section className="auth-panel billing-gate">
+        <p className="eyebrow">Stripe billing</p>
+        <h1>利用開始には課金設定が必要です</h1>
+        <p>
+          {workspace.workspaceName} の課金状態を確認しました。ログイン後にStripe Checkoutでsubscriptionを開始すると、
+          ダッシュボード、AI Advisor、Google Ads連携を利用できます。
+        </p>
+        <dl className="billing-status-list">
+          <div>
+            <dt>workspace</dt>
+            <dd>{workspace.workspaceName}</dd>
+          </div>
+          <div>
+            <dt>subscription</dt>
+            <dd>{subscriptionStatus}</dd>
+          </div>
+        </dl>
+        {error && <p className="form-message">{error}</p>}
+        <div className="auth-actions">
+          <button type="button" disabled={loading !== ""} onClick={onCheckout}>
+            {loading === "checkout" ? "作成中" : "Stripe Checkoutへ進む"}
+          </button>
+          {status?.customer && (
+            <button type="button" className="secondary-button" disabled={loading !== ""} onClick={onPortal}>
+              {loading === "portal" ? "作成中" : "Billing Portalを開く"}
+            </button>
+          )}
+          {onContinueDemo && (
+            <button type="button" className="text-button" onClick={onContinueDemo}>
+              Stripe未設定のためデモで続ける
+            </button>
+          )}
+          <button type="button" className="text-button" onClick={onLogout}>
+            ログアウト
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function AuthPage({
   error,
   session,
+  onGoogleLogin,
   onMagicLink,
   onPasswordLogin,
   onPasswordSignup,
@@ -1094,6 +1656,7 @@ function AuthPage({
 }: {
   error: string;
   session: Session | null;
+  onGoogleLogin: () => Promise<void>;
   onMagicLink: (email: string) => Promise<void>;
   onPasswordLogin: (email: string, password: string) => Promise<void>;
   onPasswordSignup: (email: string, password: string) => Promise<void>;
@@ -1106,43 +1669,48 @@ function AuthPage({
   return (
     <div className="auth-shell">
       <section className="auth-panel">
-        <p className="eyebrow">AdOps Advisor</p>
+        <p className="eyebrow">ちょこっとインハウス</p>
         <h1>ログイン</h1>
-        <p>社内テスト用IDで入れます。ID: dev / PASS: dev1234</p>
+        <p>社内テスト用のGoogleログインで入れます。Supabase AuthのGoogle providerを有効にしてください。</p>
         {!session ? (
           <div>
-            <form
-              className="auth-form"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void onPasswordLogin(normalizeLoginId(email), password);
-              }}
-            >
-              <label>
-                メールアドレス または ID
-                <input value={email} onChange={(event) => setEmail(event.target.value)} type="text" autoComplete="username" required />
-              </label>
-              <label>
-                パスワード
-                <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="current-password" minLength={6} required />
-              </label>
-              <div className="auth-actions">
-                <button type="submit">ログイン</button>
-                <button type="button" className="secondary-button" onClick={() => void onPasswordSignup(normalizeLoginId(email), password)}>
-                  アカウント作成
-                </button>
-              </div>
-            </form>
+            <button type="button" className="google-login-button" onClick={() => void onGoogleLogin()}>
+              Googleでログイン
+            </button>
             <button type="button" className="text-button auth-help" onClick={() => setShowMagicLink((current) => !current)}>
-              メールリンクでログインする
+              メール/パスワードの開発用ログインを表示
             </button>
             {showMagicLink && (
+              <>
+                <form
+                  className="auth-form"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void onPasswordLogin(normalizeLoginId(email), password);
+                  }}
+                >
+                  <label>
+                    メールアドレス または ID
+                    <input value={email} onChange={(event) => setEmail(event.target.value)} type="text" autoComplete="username" required />
+                  </label>
+                  <label>
+                    パスワード
+                    <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="current-password" minLength={6} required />
+                  </label>
+                  <div className="auth-actions">
+                    <button type="submit">ログイン</button>
+                    <button type="button" className="secondary-button" onClick={() => void onPasswordSignup(normalizeLoginId(email), password)}>
+                      アカウント作成
+                    </button>
+                  </div>
+                </form>
               <div className="magic-link-box">
                 <p>メール送信制限に当たる場合があります。通常は上のパスワードログインを使ってください。</p>
                 <button type="button" className="secondary-button" onClick={() => void onMagicLink(normalizeLoginId(email))}>
                   Magic Linkを送る
                 </button>
               </div>
+              </>
             )}
           </div>
         ) : (
@@ -1157,83 +1725,606 @@ function AuthPage({
   );
 }
 
-function OnboardingPanel({
-  data,
-  usingDemoData,
-  readiness,
-  onOpenAi,
+const setupWizardSteps = [
+  { key: "goal", label: "目的" },
+  { key: "product", label: "商材" },
+  { key: "audience", label: "ターゲット" },
+  { key: "budget", label: "予算" },
+  { key: "platforms", label: "媒体" },
+  { key: "measurement", label: "計測" },
+  { key: "plan", label: "出稿プラン" },
+];
+
+const setupPlatformOptions: Array<{ value: Exclude<PlatformFilter, "all">; label: string; role: string }> = [
+  { value: "google", label: "Google", role: "検索意図が強い顕在層を取りに行く" },
+  { value: "meta", label: "Meta", role: "認知と比較検討の母数を作る" },
+  { value: "yahoo", label: "Yahoo", role: "検索とリターゲティングを補完する" },
+];
+
+const setupScoreDimensions: Array<{ key: keyof SetupIntakeResponse["intake"]["dimensionScores"]; label: string; max: number }> = [
+  { key: "goal", label: "目的", max: 15 },
+  { key: "product", label: "商材", max: 20 },
+  { key: "audience", label: "ターゲット", max: 20 },
+  { key: "budget", label: "予算", max: 15 },
+  { key: "platforms", label: "媒体", max: 10 },
+  { key: "measurement", label: "計測", max: 20 },
+];
+
+function setupDimensionLabel(field: string) {
+  return setupScoreDimensions.find((dimension) => dimension.key === field)?.label ?? field;
+}
+
+function formatSetupFact(facts: Record<string, unknown>, key: keyof SetupIntakeResponse["intake"]["dimensionScores"]) {
+  const value = facts[key];
+  if (Array.isArray(value)) return value.join(" / ") || "未入力";
+  const text = String(value ?? "").trim();
+  return text ? (text.length > 64 ? `${text.slice(0, 64)}...` : text) : "未入力";
+}
+
+function setupPlatformSummary(facts: Record<string, unknown>) {
+  const value = facts.platforms;
+  const platforms = Array.isArray(value) && value.length ? value.map(String) : ["google"];
+  return platforms
+    .map((platform) => setupPlatformOptions.find((option) => option.value === platform)?.label ?? platform)
+    .join(" / ");
+}
+
+function setupTodoKey(stepId: string, index: number) {
+  return `${stepId}:${index}`;
+}
+
+function SetupWizardPage({
   onOpenConnections,
+  authHeaders,
 }: {
-  data: DashboardResponse | null;
-  usingDemoData: boolean;
-  readiness: ReadinessResponse | null;
-  onOpenAi: () => void;
   onOpenConnections: () => void;
+  authHeaders: (extra?: HeadersInit) => HeadersInit;
 }) {
-  const connected = usingDemoData ? 0 : data?.adAccounts.filter((account) => account.status === "connected").length ?? 0;
-  const total = data?.adAccounts.length ?? 3;
-  const mockScope = readiness?.scopes?.mock;
-  const productionScope = readiness?.scopes?.production;
-  const steps = [
-    { label: "広告アカウントをread-only連携", done: connected > 0 },
-    { label: "KPIと異常を確認", done: Boolean(data) },
-    { label: "AIに原因と作業手順を相談", done: false },
-  ];
+  const [data, setData] = useState<SetupIntakeResponse | null>(null);
+  const [message, setMessage] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
+  const [sessionBusy, setSessionBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [showSteps, setShowSteps] = useState(false);
+  const [editableSteps, setEditableSteps] = useState<SetupStep[]>([]);
+  const [activeSetupStep, setActiveSetupStep] = useState(0);
+  const [completedSetupTodos, setCompletedSetupTodos] = useState<Record<string, boolean>>({});
+  const [setupSessions, setSetupSessions] = useState<SetupIntakeSummary[]>([]);
+  const messagesRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    setLoading(true);
+    fetch(`${apiBaseUrl}/setup/intake`, { headers: authHeaders() })
+      .then((res) => res.ok ? res.json() : Promise.reject(new Error("広告準備ヒアリングを取得できませんでした。")))
+      .then((nextData: SetupIntakeResponse) => {
+        if (!mounted) return;
+        applySetupData(nextData);
+        return refreshSetupSessions();
+      })
+      .catch((caught) => {
+        if (!mounted) return;
+        setError(caught instanceof Error ? caught.message : "広告準備ヒアリングを取得できませんでした。");
+      })
+      .finally(() => {
+        if (mounted) setLoading(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  function applySetupData(nextData: SetupIntakeResponse) {
+    setData(nextData);
+    setEditableSteps(nextData.intake.setupSteps);
+    setShowSteps(nextData.intake.readyForSetupSteps);
+  }
+
+  async function refreshSetupSessions() {
+    const res = await fetch(`${apiBaseUrl}/setup/intakes`, { headers: authHeaders() });
+    if (!res.ok) return;
+    const body = await res.json() as { intakes?: SetupIntakeSummary[] };
+    setSetupSessions(body.intakes ?? []);
+  }
+
+  async function loadSetupSession(intakeId: string) {
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch(`${apiBaseUrl}/setup/intake?intakeId=${encodeURIComponent(intakeId)}`, { headers: authHeaders() });
+      const nextData = await res.json();
+      if (!res.ok) throw new Error(nextData?.error ?? "広告準備ヒアリングを取得できませんでした。");
+      applySetupData(nextData);
+      await refreshSetupSessions();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "広告準備ヒアリングを取得できませんでした。");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function createSetupSession(title?: string) {
+    setSessionBusy(true);
+    setError("");
+    try {
+      const res = await fetch(`${apiBaseUrl}/setup/intake`, {
+        method: "POST",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ title }),
+      });
+      const nextData = await res.json();
+      if (!res.ok) throw new Error(nextData?.error ?? "新しい広告準備を作成できませんでした。");
+      applySetupData(nextData);
+      setMessage("");
+      await refreshSetupSessions();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "新しい広告準備を作成できませんでした。");
+    } finally {
+      setSessionBusy(false);
+    }
+  }
+
+  async function renameSetupSession(title: string) {
+    if (!data || title.trim() === data.intake.title) return;
+    setSessionBusy(true);
+    setError("");
+    try {
+      const res = await fetch(`${apiBaseUrl}/setup/intake`, {
+        method: "PATCH",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ intakeId: data.intake.id, title }),
+      });
+      const nextData = await res.json();
+      if (!res.ok) throw new Error(nextData?.error ?? "タイトルを保存できませんでした。");
+      applySetupData(nextData);
+      setSetupSessions(nextData.intakes ?? setupSessions);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "タイトルを保存できませんでした。");
+    } finally {
+      setSessionBusy(false);
+    }
+  }
+
+  async function resetSetupSession() {
+    if (!data) return;
+    if (!window.confirm("現在のヒアリングをアーカイブして、新しい広告準備を始めます。よろしいですか？")) return;
+    setSessionBusy(true);
+    setError("");
+    try {
+      const res = await fetch(`${apiBaseUrl}/setup/intake`, {
+        method: "PATCH",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ intakeId: data.intake.id, archive: true }),
+      });
+      if (!res.ok) {
+        const body = await res.json();
+        throw new Error(body?.error ?? "ヒアリングをやり直せませんでした。");
+      }
+      await createSetupSession();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "ヒアリングをやり直せませんでした。");
+    } finally {
+      setSessionBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    const messagesElement = messagesRef.current;
+    if (!messagesElement) return;
+    window.requestAnimationFrame(() => {
+      messagesElement.scrollTo({
+        top: messagesElement.scrollHeight,
+        behavior: "smooth",
+      });
+    });
+  }, [data?.messages.length, sending]);
+
+  async function sendSetupMessage() {
+    const text = message.trim();
+    if (!text || sending || !data) return;
+    setMessage("");
+    setSending(true);
+    setError("");
+    try {
+      const res = await fetch(`${apiBaseUrl}/setup/intake/message`, {
+        method: "POST",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ intakeId: data?.intake.id, message: text }),
+      });
+      const nextData = await res.json();
+      if (!res.ok) throw new Error(nextData?.error ?? "広告準備ヒアリングに失敗しました。");
+      applySetupData(nextData);
+      void refreshSetupSessions();
+      if (nextData.intake.readyForSetupSteps) setShowSteps(true);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "広告準備ヒアリングに失敗しました。");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function saveSetupSteps() {
+    if (!data) return;
+    const res = await fetch(`${apiBaseUrl}/setup/intake/steps`, {
+      method: "PATCH",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ intakeId: data.intake.id, setupSteps: editableSteps }),
+    });
+    const nextData = await res.json();
+    if (res.ok) {
+      setData(nextData);
+      setEditableSteps(nextData.intake.setupSteps);
+    } else {
+      setError(nextData?.error ?? "出稿ステップの保存に失敗しました。");
+    }
+  }
+
+  const intake = data?.intake;
+  const facts = intake?.facts ?? {};
+  const activeStep = editableSteps[Math.min(activeSetupStep, Math.max(editableSteps.length - 1, 0))];
+  const activeStepIndex = editableSteps.findIndex((step) => step.id === activeStep?.id);
+  const activeTodosDone = activeStep ? activeStep.steps.every((_, index) => completedSetupTodos[setupTodoKey(activeStep.id, index)]) : false;
+  const completedStepCount = editableSteps.filter((step) => step.steps.length > 0 && step.steps.every((_, index) => completedSetupTodos[setupTodoKey(step.id, index)])).length;
+
+  function toggleSetupTodo(stepId: string, index: number) {
+    const key = setupTodoKey(stepId, index);
+    setCompletedSetupTodos((current) => ({ ...current, [key]: !current[key] }));
+  }
+
+  function goNextSetupStep() {
+    setActiveSetupStep((current) => Math.min(current + 1, editableSteps.length - 1));
+  }
 
   return (
-    <section className="card onboarding-panel" aria-label="初回セットアップ">
-      <div>
-        <p className="eyebrow">オンボーディング</p>
-        <h2>まずは連携状態を確認し、AIに次の一手を相談できます。</h2>
-        <p>
-          {usingDemoData
-            ? "API未接続でもユーザーテストできるよう、デモデータで一連の画面を表示しています。"
-            : `${connected}/${total}件の広告アカウントを読み込みました。`}
-        </p>
-      </div>
-      <ol className="setup-list">
-        {steps.map((step) => (
-          <li key={step.label} className={step.done ? "done" : ""}>
-            <span aria-hidden="true">{step.done ? "✓" : "•"}</span>
-            {step.label}
-          </li>
-        ))}
-      </ol>
-      <div className="onboarding-actions">
-        <button type="button" onClick={onOpenConnections}>連携状態を見る</button>
-        <button type="button" className="secondary-button" onClick={onOpenAi}>AIに相談する</button>
-      </div>
-      {readiness && (
-        <div className="readiness-summary">
-          <ReadinessScopeCard scope={mockScope ?? createLegacyMockScope(readiness)} tone="go" />
-          <ReadinessScopeCard scope={productionScope ?? createLegacyProductionScope(readiness)} tone="blocked" />
+    <div className="setup-page md3-expressive-page md3-setup-page">
+      <PageHeader title="広告準備" description="専用エージェントが深掘りし、準備スコアが80点を超えたら出稿ステップを確認できます。">
+        <div className="setup-header-actions md3-expressive-actions">
+          <button type="button" className="secondary-button md3-tonal-button" onClick={onOpenConnections}>
+            データ連携を見る
+          </button>
+        </div>
+      </PageHeader>
+
+      {error && <p className="error">{error}</p>}
+      <section className="setup-intake-layout">
+        <article className="card setup-intake-chat">
+          <div className="section-header setup-chat-header">
+            <div className="setup-chat-heading">
+              <p className="eyebrow">Setup intake agent</p>
+              <h2>デプスヒアリング</h2>
+            </div>
+            <div className="setup-session-controls">
+              <label className="setup-session-select">
+                <span>{intake?.title ?? "準備セッション"} / {intake?.score ?? 0}/100</span>
+                <select
+                  aria-label="準備セッション"
+                  value={intake?.id ?? ""}
+                  onChange={(event) => void loadSetupSession(event.target.value)}
+                  disabled={loading || sessionBusy || sending}
+                >
+                  {setupSessions.map((session) => (
+                    <option key={session.id} value={session.id}>
+                      {session.title} / {session.score}/100
+                    </option>
+                  ))}
+                  {!setupSessions.length && intake && (
+                    <option value={intake.id}>{intake.title} / {intake.score}/100</option>
+                  )}
+                </select>
+              </label>
+              <div className="setup-session-buttons">
+                <button type="button" className="setup-session-icon" onClick={() => void createSetupSession()} disabled={sessionBusy} aria-label="新しい準備">
+                  +
+                </button>
+                <button type="button" className="setup-session-text-action" onClick={() => {
+                  const title = window.prompt("準備セッション名", intake?.title ?? "");
+                  if (title !== null) void renameSetupSession(title);
+                }} disabled={!data || sessionBusy}>
+                  名前変更
+                </button>
+                <button type="button" className="setup-session-text-action" onClick={() => void resetSetupSession()} disabled={!data || sessionBusy}>
+                  リセット
+                </button>
+              </div>
+            </div>
+          </div>
+          <div className="setup-intake-messages" ref={messagesRef} aria-live="polite">
+            {loading && <ThinkingMessage text="広告準備ヒアリングを読み込んでいます。" />}
+            {data?.messages.map((item) => (
+              <article key={item.id} className={`message ${item.role === "user" ? "user" : "assistant"}`}>
+                <MarkdownContent content={item.content} />
+              </article>
+            ))}
+            {sending && <ThinkingMessage text="setup_intake_agent が準備度を採点しています。" />}
+            {intake?.readyForSetupSteps && (
+              <article className="setup-chat-steps-card" aria-label="出稿手順の確認">
+                <div>
+                  <p className="eyebrow">Setup steps ready</p>
+                  <strong>出稿前の操作手順を確認できます</strong>
+                  <span>{setupPlatformSummary(facts)} の広告マネージャーで人間が確認・手動実行するための手順です。</span>
+                </div>
+                <button type="button" className="md3-filled-button" onClick={() => setShowSteps(true)}>
+                  出稿手順を確認する
+                </button>
+              </article>
+            )}
+          </div>
+          <div className="composer md3-chat-field setup-intake-composer">
+            <label className="composer-label" htmlFor="setup-intake-input">広告準備について回答</label>
+            <textarea
+              id="setup-intake-input"
+              value={message}
+              onChange={(event) => setMessage(event.target.value)}
+              placeholder="例: 月10件の問い合わせを増やしたい。商材は月額の広告運用支援で、予算は初月10万円くらいです。"
+              rows={3}
+            />
+            <div className="composer-supporting-row">
+              <span className="composer-supporting-text">目的・商材・ターゲット・予算・媒体・計測を深掘りします</span>
+              <div className="composer-actions">
+                <button type="button" onClick={() => void sendSetupMessage()} disabled={sending || !data || !message.trim()} aria-label="送信">
+                  {sending ? "…" : "↑"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <aside className="card setup-readiness-panel">
+          <p className="eyebrow">Readiness score</p>
+          <div className="setup-score">
+            <strong>{intake?.score ?? 0}</strong>
+            <span>/100</span>
+          </div>
+          <div className="setup-score-bars">
+            {setupScoreDimensions.map((dimension) => (
+              <div key={dimension.key} className="setup-score-row">
+                <span>{dimension.label}</span>
+                <progress value={intake?.dimensionScores[dimension.key] ?? 0} max={dimension.max} />
+                <strong>{intake?.dimensionScores[dimension.key] ?? 0}/{dimension.max}</strong>
+              </div>
+            ))}
+          </div>
+          <div className="setup-facts-panel">
+            <h3>保存済みfacts</h3>
+            {setupScoreDimensions.map((dimension) => (
+              <p key={dimension.key}>
+                <span>{dimension.label}</span>
+                <strong>{formatSetupFact(facts, dimension.key)}</strong>
+              </p>
+            ))}
+          </div>
+          {intake?.missingFields.length ? (
+            <div className="setup-missing-panel">
+              <h3>足りない深掘り</h3>
+              <div className="tag-list">
+                {intake.missingFields.map((field) => <span key={field} className="tag">{setupDimensionLabel(field)}</span>)}
+              </div>
+            </div>
+          ) : null}
+        </aside>
+      </section>
+
+      {showSteps && intake?.readyForSetupSteps && (
+        <div className="setup-steps-modal-backdrop" role="presentation" onMouseDown={() => setShowSteps(false)}>
+          <section className="setup-steps-modal" role="dialog" aria-modal="true" aria-labelledby="setup-steps-title" onMouseDown={(event) => event.stopPropagation()}>
+          <div className="section-header setup-steps-modal-header">
+            <div>
+              <p className="eyebrow">Ad manager checklist</p>
+              <h2 id="setup-steps-title">広告マネージャー操作手順</h2>
+            </div>
+            <button type="button" className="setup-modal-close" onClick={() => setShowSteps(false)} aria-label="閉じる">×</button>
+          </div>
+          <div className="setup-steps-modal-body">
+            <nav className="setup-step-rail" aria-label="出稿手順ステップ">
+              {editableSteps.map((step, index) => {
+                const done = step.steps.length > 0 && step.steps.every((_, itemIndex) => completedSetupTodos[setupTodoKey(step.id, itemIndex)]);
+                return (
+                  <button
+                    key={step.id}
+                    type="button"
+                    className={index === activeStepIndex ? "active" : done ? "done" : ""}
+                    onClick={() => setActiveSetupStep(index)}
+                  >
+                    <span>{done ? "✓" : index + 1}</span>
+                    {step.title}
+                  </button>
+                );
+              })}
+            </nav>
+            {activeStep && (
+              <article className="setup-step-workspace">
+                <div className="setup-step-progress">
+                  <span>{completedStepCount}/{editableSteps.length} steps</span>
+                  <progress value={completedStepCount} max={Math.max(editableSteps.length, 1)} />
+                </div>
+                <input
+                  aria-label={`${activeStep.title} の見出し`}
+                  value={activeStep.title}
+                  onChange={(event) => setEditableSteps((current) => current.map((item, index) => index === activeStepIndex ? { ...item, title: event.target.value } : item))}
+                />
+                <div className="setup-manager-todos">
+                  {activeStep.steps.map((stepText, itemIndex) => (
+                    <label key={`${activeStep.id}-${itemIndex}`} className="setup-manager-todo">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(completedSetupTodos[setupTodoKey(activeStep.id, itemIndex)])}
+                        onChange={() => toggleSetupTodo(activeStep.id, itemIndex)}
+                      />
+                      <textarea
+                        aria-label={`${activeStep.title} Todo ${itemIndex + 1}`}
+                        value={stepText}
+                        onChange={(event) => setEditableSteps((current) => current.map((item, index) => index === activeStepIndex ? { ...item, steps: item.steps.map((text, textIndex) => textIndex === itemIndex ? event.target.value : text) } : item))}
+                        rows={2}
+                      />
+                    </label>
+                  ))}
+                </div>
+              </article>
+            )}
+          </div>
+          <div className="setup-steps-modal-actions">
+            <button type="button" className="secondary-button" onClick={() => setShowSteps(false)}>閉じる</button>
+            <button type="button" className="secondary-button" onClick={goNextSetupStep} disabled={!activeTodosDone || activeStepIndex >= editableSteps.length - 1}>
+              Next
+            </button>
+            <button type="button" className="md3-filled-button" onClick={() => void saveSetupSteps()}>
+              編集内容を保存
+            </button>
+          </div>
+          </section>
         </div>
       )}
+    </div>
+  );
+}
+
+function SetupTextArea({
+  id,
+  eyebrow,
+  title,
+  description,
+  value,
+  onChange,
+  placeholder,
+}: {
+  id: string;
+  eyebrow: string;
+  title: string;
+  description: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+}) {
+  return (
+    <section className="card setup-form-card md3-card md3-textarea-card">
+      <p className="eyebrow md3-section-label">{eyebrow}</p>
+      <h2>{title}</h2>
+      <p className="setup-supporting-text md3-supporting-text">{description}</p>
+      <label className="setup-field md3-text-field" htmlFor={id}>
+        入力内容
+        <textarea id={id} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} rows={7} />
+      </label>
     </section>
   );
 }
 
-function ReadinessScopeCard({ scope, tone }: { scope: ReadinessScope; tone: "go" | "blocked" }) {
-  const passed = scope.checks.filter((check) => check.status === "pass").length;
-  const remaining = scope.checks.filter((check) => check.status !== "pass");
+function SetupPlanPreview({ form }: { form: SetupWizardState }) {
+  const selectedPlatforms = form.platforms.length
+    ? form.platforms.map((platform) => setupPlatformOptions.find((option) => option.value === platform)?.label ?? platform).join(" / ")
+    : "未選択";
+  const instructionSections = buildSetupInstructionSections(form);
+  const previewItems = [
+    { label: "目的", value: form.goal || "未入力" },
+    { label: "商材", value: form.product || "未入力" },
+    { label: "ターゲット", value: form.audience || "未入力" },
+    { label: "予算", value: [form.budget, form.targetCpa && `目標 ${form.targetCpa}`].filter(Boolean).join(" / ") || "未入力" },
+    { label: "媒体", value: selectedPlatforms },
+    { label: "計測", value: form.measurement || "未入力" },
+    { label: "補足", value: form.planNotes || "未入力" },
+  ];
 
   return (
-    <article className={`readiness-scope ${tone}`}>
-      <div>
-        <p className="eyebrow">{scope.label}</p>
-        <strong>{scope.decision}</strong>
-        <span>{passed}/{scope.checks.length} checks OK - {scope.note}</span>
+    <div className="setup-plan-preview md3-preview-surface md3-expressive-preview">
+      <div className="section-header md3-preview-header">
+        <h3>出稿準備プレビュー</h3>
       </div>
-      <ul>
-        {(remaining.length ? remaining : scope.checks.slice(0, 2)).slice(0, 3).map((check) => (
-          <li key={check.id}>
-            <span>{check.status === "pass" ? "OK" : check.status === "risk" ? "要確認" : "未完了"}</span>
-            {check.label}
-          </li>
+      <dl className="setup-preview-list md3-preview-list">
+        {previewItems.map((item) => (
+          <div key={item.label} className="setup-preview-item md3-preview-item">
+            <dt>{item.label}</dt>
+            <dd>{item.value}</dd>
+          </div>
         ))}
-      </ul>
-    </article>
+      </dl>
+      <section className="setup-instruction-board" aria-label="セットアップ設定指示">
+        <div className="section-header">
+          <div>
+            <p className="eyebrow">Setup guide</p>
+            <h3>この内容で進める設定指示</h3>
+          </div>
+        </div>
+        <div className="setup-instruction-grid">
+          {instructionSections.map((section) => (
+            <article key={section.title} className="setup-instruction-card">
+              <span>{section.label}</span>
+              <h4>{section.title}</h4>
+              <ol>
+                {section.steps.map((step) => (
+                  <li key={step}>{step}</li>
+                ))}
+              </ol>
+            </article>
+          ))}
+        </div>
+      </section>
+      <div className="setup-review-note md3-assist-card">
+        <strong>実施前チェック</strong>
+        <p>このプランは媒体を直接変更しません。上の設定指示をもとに、担当者が各広告管理画面で確認・承認・手動実行してください。</p>
+      </div>
+    </div>
   );
+}
+
+function buildSetupInstructionSections(form: SetupWizardState) {
+  const platforms = form.platforms.length ? form.platforms : ["google" as const];
+  const platformSteps = platforms.flatMap((platform) => setupPlatformInstructionSteps(platform));
+  return [
+    {
+      label: "01",
+      title: "計測を先に固定する",
+      steps: [
+        form.measurement || "成果地点を1つ決める。例: 問い合わせ完了、購入完了、電話タップ。",
+        "Thanksページ、GTM/GA4、媒体タグ、CRM突合のどれでCVを確認するか決める。",
+        "出稿前にテストCVを1回発火させ、媒体管理画面とGA4の両方で記録を確認する。",
+      ],
+    },
+    {
+      label: "02",
+      title: "初期キャンペーンの前提を置く",
+      steps: [
+        form.goal || "今回の広告目的を1つに絞る。",
+        form.audience || "最初に狙うターゲットと、今回追わない層を分ける。",
+        form.budget ? `初月予算は ${form.budget} を上限にし、日予算へ分解して設定する。` : "初月予算と日予算の上限を決める。",
+      ],
+    },
+    {
+      label: "03",
+      title: "媒体管理画面で設定する",
+      steps: platformSteps,
+    },
+    {
+      label: "04",
+      title: "初回7日間の観察ルール",
+      steps: [
+        "開始直後は毎日、費用・クリック・CV・CPA/CPL・CV計測漏れを確認する。",
+        form.targetCpa ? `目標 ${form.targetCpa} から大きく外れる場合は、配信面・検索語句・クリエイティブをレビューする。` : "目標CPA/CPLを決め、そこから大きく外れる場合の確認順を決める。",
+        "媒体設定の停止・予算変更・除外は、担当者が根拠を確認してから手動で反映する。",
+      ],
+    },
+  ];
+}
+
+function setupPlatformInstructionSteps(platform: Exclude<PlatformFilter, "all">) {
+  if (platform === "meta") {
+    return [
+      "Meta: キャンペーン目的をCVまたはリードに合わせ、最初は訴求を2-3案に絞る。",
+      "Meta: 画像/動画、見出し、本文、CTAを組み合わせ、反応差が見える単位で広告セットを作る。",
+      "Meta: Pixel/CAPIまたはGA4でCV確認できる状態にしてから配信開始する。",
+    ];
+  }
+  if (platform === "yahoo") {
+    return [
+      "Yahoo: Google検索で使う構成を参考に、指名/一般/リターゲティングを分けて検討する。",
+      "Yahoo: 検索広告とディスプレイで目的を混ぜず、初期予算を分けて管理する。",
+      "Yahoo: CVタグと管理画面の成果計測を開始前に確認する。",
+    ];
+  }
+  return [
+    "Google: 指名検索と一般検索を分け、検索意図が強いキーワードから開始する。",
+    "Google: 完全一致/フレーズ一致を中心にし、除外キーワード候補を事前に用意する。",
+    "Google: CVアクション、入札戦略、日予算、地域、配信スケジュールを出稿前に確認する。",
+  ];
 }
 
 function DashboardPage({
@@ -1244,11 +2335,9 @@ function DashboardPage({
   platform,
   latestRecommendation,
   usingDemoData,
-  readiness,
   onRangeChange,
   onPlatformChange,
   onOpenAi,
-  onOpenConnections,
   onOpenColumns,
 }: {
   data: DashboardResponse | null;
@@ -1258,26 +2347,17 @@ function DashboardPage({
   platform: PlatformFilter;
   latestRecommendation: ChatResponse["recommendation"] | null;
   usingDemoData: boolean;
-  readiness: ReadinessResponse | null;
   onRangeChange: (range: number) => void;
   onPlatformChange: (platform: PlatformFilter) => void;
   onOpenAi: () => void;
-  onOpenConnections: () => void;
   onOpenColumns: (tags: string[]) => void;
 }) {
   return (
     <div>
-      <PageHeader title="ダッシュボード" description="APIが持つ最新広告データからKPI、異常、優先対応キャンペーンを表示します。">
+      <PageHeader title="ダッシュボード" description="AIに相談する前に、いま見るべきKPI、異常、優先キャンペーンを確認します。">
         <FilterControls range={range} platform={platform} onRangeChange={onRangeChange} onPlatformChange={onPlatformChange} />
       </PageHeader>
       {usingDemoData && <MockDataBanner location="Dashboard" />}
-      <OnboardingPanel
-        data={data}
-        usingDemoData={usingDemoData}
-        readiness={readiness}
-        onOpenAi={onOpenAi}
-        onOpenConnections={onOpenConnections}
-      />
       <StatusLine loading={loading} error={error} />
       {data ? (
         <>
@@ -1288,13 +2368,13 @@ function DashboardPage({
               <h2>費用と売上トレンド</h2>
               <ResponsiveContainer width="100%" height={288}>
                 <LineChart data={data.series} margin={{ top: 12, right: 16, left: 0, bottom: 4 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <CartesianGrid strokeDasharray="3 3" stroke={brandChartColors.grid} />
                   <XAxis dataKey="date" tickLine={false} axisLine={false} />
                   <YAxis tickLine={false} axisLine={false} width={72} tickFormatter={(value) => `¥${Math.round(Number(value) / 1000)}k`} />
                   <Tooltip formatter={(value, name) => [name === "conversions" ? numericValue(value) : formatMoney(numericValue(value)), name]} />
                   <Legend />
-                  <Line type="monotone" dataKey="cost" stroke="#0b5fff" strokeWidth={2} name="費用" dot={false} />
-                  <Line type="monotone" dataKey="revenue" stroke="#0f9d58" strokeWidth={2} name="売上" dot={false} />
+                  <Line type="monotone" dataKey="cost" stroke={brandChartColors.yellowDeep} strokeWidth={2} name="費用" dot={false} />
+                  <Line type="monotone" dataKey="revenue" stroke={brandChartColors.green} strokeWidth={2} name="売上" dot={false} />
                 </LineChart>
               </ResponsiveContainer>
             </article>
@@ -1303,7 +2383,7 @@ function DashboardPage({
               <h2>異常重要度サマリー</h2>
               <ResponsiveContainer width="100%" height={288}>
                 <BarChart data={severityChartData(data)} margin={{ top: 12, right: 10, left: 0, bottom: 4 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <CartesianGrid strokeDasharray="3 3" stroke={brandChartColors.grid} />
                   <XAxis dataKey="severity" tickLine={false} axisLine={false} />
                   <YAxis allowDecimals={false} tickLine={false} axisLine={false} width={32} />
                   <Tooltip />
@@ -1327,14 +2407,17 @@ function DashboardPage({
               {latestRecommendation ? (
                 <>
                   <p>{latestRecommendation.title}</p>
-                  <p>confidence: {latestRecommendation.confidence}</p>
+                  <p className={`confidence-chip confidence-${latestRecommendation.confidence}`}>
+                    自信度: {confidenceLabels[latestRecommendation.confidence]}
+                  </p>
                 </>
               ) : (
-                <p>検知タグ: {data.relatedTags.join(", ") || "monitoring"}</p>
+                <p>AIに渡せる検知タグ: {data.relatedTags.join(", ") || "monitoring"}</p>
               )}
               <div className="help-actions">
                 <button type="button" onClick={onOpenAi}>
-                  AIに原因を聞く
+                  <InlineIcon name="ai" />
+                  この状況をAIに相談
                 </button>
                 <button type="button" className="secondary-button" onClick={() => onOpenColumns(data.relatedTags)}>
                   関連コラムを見る
@@ -1405,15 +2488,15 @@ function BiPage({
               <h2>時系列（費用 / 売上 / CV）</h2>
               <ResponsiveContainer width="100%" height={288}>
                 <LineChart data={data.series} margin={{ top: 12, right: 16, left: 0, bottom: 4 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <CartesianGrid strokeDasharray="3 3" stroke={brandChartColors.grid} />
                   <XAxis dataKey="date" tickLine={false} axisLine={false} />
                   <YAxis yAxisId="money" tickLine={false} axisLine={false} width={72} tickFormatter={(value) => `¥${Math.round(Number(value) / 1000)}k`} />
                   <YAxis yAxisId="cv" orientation="right" allowDecimals={false} tickLine={false} axisLine={false} width={32} />
                   <Tooltip />
                   <Legend />
-                  <Line yAxisId="money" type="monotone" dataKey="cost" stroke="#0b5fff" strokeWidth={2} name="費用" dot={false} />
-                  <Line yAxisId="money" type="monotone" dataKey="revenue" stroke="#0f9d58" strokeWidth={2} name="売上" dot={false} />
-                  <Line yAxisId="cv" type="monotone" dataKey="conversions" stroke="#d97706" strokeWidth={2} name="CV" />
+                  <Line yAxisId="money" type="monotone" dataKey="cost" stroke={brandChartColors.yellowDeep} strokeWidth={2} name="費用" dot={false} />
+                  <Line yAxisId="money" type="monotone" dataKey="revenue" stroke={brandChartColors.green} strokeWidth={2} name="売上" dot={false} />
+                  <Line yAxisId="cv" type="monotone" dataKey="conversions" stroke={brandChartColors.greenSoft} strokeWidth={2} name="CV" />
                 </LineChart>
               </ResponsiveContainer>
             </article>
@@ -1443,11 +2526,11 @@ function BiPage({
             </div>
             <ResponsiveContainer width="100%" height={260}>
               <BarChart data={ranking} layout="vertical" margin={{ top: 8, right: 16, left: 24, bottom: 4 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                <CartesianGrid strokeDasharray="3 3" stroke={brandChartColors.grid} />
                 <XAxis type="number" tickLine={false} axisLine={false} />
                 <YAxis type="category" dataKey="campaign" tickLine={false} axisLine={false} width={132} />
                 <Tooltip formatter={(value) => (rankingMetric === "roas" ? formatPercent(numericValue(value)) : formatMoney(numericValue(value)))} />
-                <Bar dataKey={rankingMetric} fill="#0b5fff" radius={[0, 8, 8, 0]} />
+                <Bar dataKey={rankingMetric} fill={brandChartColors.green} radius={[0, 8, 8, 0]} />
               </BarChart>
             </ResponsiveContainer>
             <CampaignTable rows={ranking} compact />
@@ -1457,6 +2540,114 @@ function BiPage({
         !loading && <EmptyState message="表示できるBIデータがありません。" />
       )}
     </div>
+  );
+}
+
+function WorkItemsPanel({
+  recommendations,
+  tasks,
+  authHeaders,
+  onRefresh,
+}: {
+  recommendations: StoredRecommendation[];
+  tasks: StoredTask[];
+  authHeaders: (extra?: HeadersInit) => HeadersInit;
+  onRefresh: () => void;
+}) {
+  const [comment, setComment] = useState("");
+  const latestRecommendation = recommendations[0];
+  const latestTask = tasks[0];
+
+  async function patchRecommendation(id: string, status: StoredRecommendation["status"]) {
+    await fetch(`${apiBaseUrl}/recommendations/${id}`, {
+      method: "PATCH",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ status }),
+    });
+    onRefresh();
+  }
+
+  async function patchTask(id: string, status: StoredTask["status"]) {
+    await fetch(`${apiBaseUrl}/tasks/${id}`, {
+      method: "PATCH",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ status }),
+    });
+    onRefresh();
+  }
+
+  async function sendFeedback(outcome: "implemented" | "worked" | "did_not_work" | "unclear") {
+    await fetch(`${apiBaseUrl}/feedback`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        recommendationId: latestRecommendation?.id,
+        humanTaskId: latestTask?.id,
+        outcome,
+        comment,
+      }),
+    });
+    setComment("");
+    onRefresh();
+  }
+
+  if (!latestRecommendation && !latestTask) {
+    return null;
+  }
+
+  return (
+    <section className="card work-items-panel">
+      <div className="section-header">
+        <h2>AI提案と実施フィードバック</h2>
+        <button type="button" className="secondary-button" onClick={onRefresh}>更新</button>
+      </div>
+      {latestRecommendation && (
+        <article className={`work-item recommendation-status-${latestRecommendation.status}`}>
+          <p className="eyebrow">AI提案</p>
+          <h3>{latestRecommendation.title}</h3>
+          <div className="status-row">
+            <span className={`status-chip status-${latestRecommendation.status}`}>
+              {recommendationStatusLabels[latestRecommendation.status]}
+            </span>
+            <span className={`confidence-chip confidence-${latestRecommendation.confidence}`}>
+              自信度: {confidenceLabels[latestRecommendation.confidence]}
+            </span>
+          </div>
+          <div className="inline-actions">
+            <button type="button" onClick={() => void patchRecommendation(latestRecommendation.id, "accepted")}>採用する</button>
+            <button type="button" className="secondary-button" onClick={() => void patchRecommendation(latestRecommendation.id, "rejected")}>見送る</button>
+          </div>
+        </article>
+      )}
+      {latestTask && (
+        <article className={`work-item task-status-${latestTask.status}`}>
+          <p className="eyebrow">人間が確認して実行する作業</p>
+          <h3>{latestTask.title}</h3>
+          <div className="status-row">
+            <span className={`status-chip status-${latestTask.status}`}>
+              {taskStatusLabels[latestTask.status]}
+            </span>
+            <span className={`priority-chip priority-${latestTask.priority}`}>
+              優先度: {taskPriorityLabels[latestTask.priority]}
+            </span>
+          </div>
+          <div className="inline-actions">
+            <button type="button" onClick={() => void patchTask(latestTask.id, "doing")}>対応中にする</button>
+            <button type="button" onClick={() => void patchTask(latestTask.id, "done")}>完了にする</button>
+            <button type="button" className="secondary-button" onClick={() => void patchTask(latestTask.id, "rejected")}>見送る</button>
+          </div>
+        </article>
+      )}
+      <div className="feedback-box">
+        <textarea value={comment} onChange={(event) => setComment(event.target.value)} placeholder="実施結果、判断理由、次回AIに覚えてほしい観察メモ" rows={3} />
+        <div className="inline-actions">
+          <button type="button" onClick={() => void sendFeedback("implemented")}>実施した</button>
+          <button type="button" onClick={() => void sendFeedback("worked")}>効果あり</button>
+          <button type="button" onClick={() => void sendFeedback("did_not_work")}>効果なし</button>
+          <button type="button" className="secondary-button" onClick={() => void sendFeedback("unclear")}>まだ不明</button>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -1668,18 +2859,40 @@ function ConnectionsPage({
   const [connectionLoading, setConnectionLoading] = useState(true);
   const [connectionNotice, setConnectionNotice] = useState("");
   const [customers, setCustomers] = useState<Array<{ resourceName: string; customerId: string }>>([]);
+  const [syncingCustomerId, setSyncingCustomerId] = useState("");
+  const [writeLoading, setWriteLoading] = useState(false);
+  const [writeResult, setWriteResult] = useState("");
+  const [writeAuditLogs, setWriteAuditLogs] = useState<AuditLogEntry[]>([]);
+  const [writeAuditLoading, setWriteAuditLoading] = useState(false);
+  const [writeForm, setWriteForm] = useState<{
+    operation: GoogleWriteOperation;
+    customerId: string;
+    campaignId: string;
+    status: GoogleCampaignStatus;
+    amount: string;
+    reason: string;
+    confirmed: boolean;
+  }>({
+    operation: "status",
+    customerId: "",
+    campaignId: "",
+    status: "PAUSED",
+    amount: "",
+    reason: "",
+    confirmed: false,
+  });
   const plannedConnections: Array<{
     platform: Exclude<PlatformFilter, "all">;
     label: string;
     accountHint: string;
   }> = [
-    { platform: "google", label: "Google Ads", accountHint: "Google Ads API read-only OAuth" },
-    { platform: "meta", label: "Meta Ads", accountHint: "Meta Marketing API read-only OAuth" },
-    { platform: "yahoo", label: "Yahoo Ads", accountHint: "Yahoo広告 API read-only OAuth" },
+    { platform: "google", label: "Google Ads", accountHint: "Google Ads API OAuth + 承認付きwrite" },
+    { platform: "meta", label: "Meta Ads", accountHint: "Meta Marketing API read OAuth" },
+    { platform: "yahoo", label: "Yahoo Ads", accountHint: "Yahoo広告 API read OAuth" },
   ];
   const policyNote =
     connectionStatus?.policy.note ??
-    "MVPでは広告媒体APIへの変更操作は行わず、人間が管理画面で実行する手順だけを返します。";
+    "Google Ads writeは、対象と理由を確認したうえで承認付きAPIだけが実行します。AI単体では媒体変更しません。";
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1719,7 +2932,7 @@ function ConnectionsPage({
 
   async function loadGoogleCustomers() {
     setConnectionNotice("");
-    const res = await fetch(`${apiBaseUrl}/google-ads/customers?workspaceId=${workspace.workspaceId}`, {
+    const res = await fetch(`${apiBaseUrl}/google/customers?workspaceId=${workspace.workspaceId}`, {
       headers: { Authorization: `Bearer ${session.access_token}` },
     });
     const data = await res.json();
@@ -1730,23 +2943,146 @@ function ConnectionsPage({
     setCustomers(data.customers ?? []);
   }
 
+  async function connectCustomer(customerId: string) {
+    setConnectionNotice("");
+    const res = await fetch(`${apiBaseUrl}/google/customers/${customerId}/connect?workspaceId=${workspace.workspaceId}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setConnectionNotice(data?.error ?? "Google Ads customerの接続に失敗しました。");
+      return;
+    }
+    setConnectionNotice(`Google Ads ${data.customerId} をworkspaceに接続しました。`);
+    setWriteForm((current) => ({ ...current, customerId: data.customerId ?? customerId }));
+  }
+
+  async function syncCustomer(customerId: string) {
+    setConnectionNotice("");
+    setSyncingCustomerId(customerId);
+    const res = await fetch(`${apiBaseUrl}/sync/google`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${session.access_token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ customerId, days: 30 }),
+    });
+    const data = await res.json();
+    setSyncingCustomerId("");
+    if (!res.ok) {
+      setConnectionNotice(data?.error ?? "Google Ads syncに失敗しました。");
+      return;
+    }
+    setConnectionNotice(`Google Ads ${data.customerId} から ${data.rowsSynced} 行を同期しました。Dashboard/AIに実データを反映します。`);
+  }
+
+  async function loadGoogleWriteAudits(expected?: { eventType: string; customerId: string; campaignId: string }) {
+    setWriteAuditLoading(true);
+    try {
+      const res = await fetch(`${apiBaseUrl}/audit-logs/recent?workspaceId=${workspace.workspaceId}&eventTypePrefix=google_ads.&limit=8`, {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setWriteResult(data?.error ?? "Google Ads audit logの取得に失敗しました。");
+        return;
+      }
+      const logs = Array.isArray(data.logs) ? (data.logs as AuditLogEntry[]) : [];
+      setWriteAuditLogs(logs);
+      if (expected && !logs.some((log) => googleWriteAuditMatches(log, expected))) {
+        setWriteResult("writeは実行されましたが、対象campaignの承認metadata付きaudit logを確認できませんでした。/audit-logs/recent を確認してください。");
+      }
+    } finally {
+      setWriteAuditLoading(false);
+    }
+  }
+
+  async function executeGoogleWrite() {
+    setWriteResult("");
+    const customerId = writeForm.customerId.replace(/^customers\//, "").replace(/-/g, "").trim();
+    const campaignId = writeForm.campaignId.trim();
+    const amount = Number(writeForm.amount);
+
+    if (!writeForm.confirmed) {
+      setWriteResult("実行前チェックを確認し、承認checkboxを入れてください。");
+      return;
+    }
+    if (!customerId || !campaignId) {
+      setWriteResult("customerId と campaignId を入力してください。");
+      return;
+    }
+    const approvalNote = writeForm.reason.trim();
+    if (approvalNote.length < 10 || !hasRollbackCondition(approvalNote)) {
+      setWriteResult("変更理由と戻し条件を10文字以上で入力してください。例: 24時間後にCPA悪化なら元の設定へ戻す。");
+      return;
+    }
+    if (writeForm.operation === "budget" && (!Number.isFinite(amount) || amount <= 0)) {
+      setWriteResult("予算変更では、正の金額を入力してください。");
+      return;
+    }
+
+    setWriteLoading(true);
+    const endpoint =
+      writeForm.operation === "status"
+        ? `${apiBaseUrl}/google/customers/${customerId}/campaigns/${campaignId}/status`
+        : `${apiBaseUrl}/google/customers/${customerId}/campaigns/${campaignId}/budget`;
+    const payload =
+      writeForm.operation === "status"
+        ? { status: writeForm.status, confirmed: true, approvalNote }
+        : { amount, confirmed: true, approvalNote };
+
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setWriteResult(data?.error ?? "Google Ads writeに失敗しました。");
+        return;
+      }
+      const eventType = writeForm.operation === "status" ? "google_ads.campaign_status_updated" : "google_ads.campaign_budget_updated";
+      setWriteResult(
+        writeForm.operation === "status"
+          ? `campaign ${data.campaignId} のstatusを ${data.status} に更新しました。承認metadata付きaudit logを確認しています。`
+          : `campaign ${data.campaignId} のbudgetを ${formatMoney(Number(data.amount ?? amount))} に更新しました。承認metadata付きaudit logを確認しています。`,
+      );
+      await loadGoogleWriteAudits({ eventType, customerId, campaignId });
+      setWriteForm((current) => ({ ...current, confirmed: false }));
+    } finally {
+      setWriteLoading(false);
+    }
+  }
+
   return (
     <div>
-      <PageHeader title="データ連携" description="APIキーを取得せず、広告管理画面へのログイン許可だけで連携します。" />
+      <PageHeader title="データ連携" description="Google AdsはOAuthで連携し、readデータと承認付きwriteを安全に扱います。" />
       {usingDemoData && <MockDataBanner location="データ連携" />}
       <StatusLine loading={connectionLoading} error="" />
       {connectionNotice && <p className="muted connection-fallback">{connectionNotice}</p>}
       <section className="card connection-intro">
         <div>
-          <p className="eyebrow">OAuth read-only</p>
+          <p className="eyebrow">
+            <InlineIcon name="lock" />
+            OAuth + approval
+          </p>
           <h2>ユーザーにAPIキー取得やsecret入力をお願いしません。</h2>
           <p>
-            「連携する」を押すと各広告媒体の認可画面へ移動し、ユーザーはログインして読み取り権限を許可するだけです。
+            「連携する」を押すと各広告媒体の認可画面へ移動します。Google Adsの変更操作は、対象IDと承認を確認したAPI routeだけが実行します。
             トークンはサーバー側で暗号化保存し、ブラウザやAIへの文脈には含めません。
           </p>
           <p className="connection-policy">{policyNote}</p>
         </div>
-        <button type="button" onClick={onOpenAi}>mockデータでAI相談</button>
+        <button type="button" onClick={onOpenAi}>
+          <InlineIcon name="ai" />
+          連携前にAI相談を試す
+        </button>
       </section>
       {customers.length > 0 && (
         <section className="card account-picker">
@@ -1756,13 +3092,124 @@ function ConnectionsPage({
               <li key={customer.resourceName}>
                 <strong>{customer.customerId}</strong>
                 <span>{customer.resourceName}</span>
+                <div className="inline-actions">
+                  <button type="button" onClick={() => void connectCustomer(customer.customerId)}>接続</button>
+                  <button type="button" className="secondary-button" disabled={syncingCustomerId === customer.customerId} onClick={() => void syncCustomer(customer.customerId)}>
+                    {syncingCustomerId === customer.customerId ? "同期中" : "30日同期"}
+                  </button>
+                  <button type="button" className="secondary-button" onClick={() => setWriteForm((current) => ({ ...current, customerId: customer.customerId }))}>
+                    変更対象に使う
+                  </button>
+                </div>
               </li>
             ))}
           </ul>
         </section>
       )}
+      <section className="card google-write-panel">
+        <div className="section-header">
+          <div>
+            <p className="eyebrow">
+              <InlineIcon name="lock" />
+              approval required
+            </p>
+            <h2>Google Ads 承認付き変更</h2>
+          </div>
+          <span className={`status-chip ${connectionStatus?.policy.mediaWriteEnabled ? "status-connected" : "status-pending"}`}>
+            {connectionStatus?.policy.mediaWriteEnabled ? "write有効" : "write無効"}
+          </span>
+        </div>
+        <p className="muted">
+          AI提案を確認した後、対象ID、変更内容、戻し条件を人間が確認した場合だけ実行します。APIは `confirmed=true` とサーバー側 `GOOGLE_ADS_WRITE_ENABLED=true` を必須にします。
+        </p>
+        <div className="write-form-grid">
+          <label>
+            操作
+            <select value={writeForm.operation} onChange={(event) => setWriteForm((current) => ({ ...current, operation: event.target.value as GoogleWriteOperation, confirmed: false }))}>
+              <option value="status">Campaign status</option>
+              <option value="budget">Campaign budget</option>
+            </select>
+          </label>
+          <label>
+            customerId
+            <input value={writeForm.customerId} onChange={(event) => setWriteForm((current) => ({ ...current, customerId: event.target.value, confirmed: false }))} placeholder="1234567890" />
+          </label>
+          <label>
+            campaignId
+            <input value={writeForm.campaignId} onChange={(event) => setWriteForm((current) => ({ ...current, campaignId: event.target.value, confirmed: false }))} placeholder="987654321" />
+          </label>
+          {writeForm.operation === "status" ? (
+            <label>
+              status
+              <select value={writeForm.status} onChange={(event) => setWriteForm((current) => ({ ...current, status: event.target.value as GoogleCampaignStatus, confirmed: false }))}>
+                <option value="PAUSED">PAUSED</option>
+                <option value="ENABLED">ENABLED</option>
+              </select>
+            </label>
+          ) : (
+            <label>
+              amount
+              <input inputMode="decimal" value={writeForm.amount} onChange={(event) => setWriteForm((current) => ({ ...current, amount: event.target.value, confirmed: false }))} placeholder="20000" />
+            </label>
+          )}
+        </div>
+        <label className="write-reason">
+          変更理由と戻し条件
+          <textarea value={writeForm.reason} onChange={(event) => setWriteForm((current) => ({ ...current, reason: event.target.value, confirmed: false }))} rows={3} placeholder="例: 直近7日でCPAが許容値を超過。24-48時間後にCV数とCPAを確認し、悪化なら戻す。" />
+        </label>
+        <label className="approval-check">
+          <input type="checkbox" checked={writeForm.confirmed} onChange={(event) => setWriteForm((current) => ({ ...current, confirmed: event.target.checked }))} />
+          <span>対象campaign、変更内容、影響範囲、戻し条件を確認し、この操作を承認します。</span>
+        </label>
+        <div className="inline-actions">
+          <button type="button" disabled={googleStatus !== "connected" || writeLoading || !writeForm.confirmed} onClick={() => void executeGoogleWrite()}>
+            {writeLoading ? "実行中" : "承認して実行"}
+          </button>
+          <button type="button" className="secondary-button" onClick={() => setWriteForm((current) => ({ ...current, confirmed: false }))}>
+            承認を外す
+          </button>
+        </div>
+        {googleStatus !== "connected" && <p className="muted">Google Ads OAuth連携後に実行できます。</p>}
+        {writeResult && <p className="connection-fallback">{writeResult}</p>}
+        <div className="audit-review-panel">
+          <div className="section-header">
+            <div>
+              <p className="eyebrow">
+                <InlineIcon name="check" />
+                audit review
+              </p>
+              <h3>直近のGoogle Ads監査ログ</h3>
+            </div>
+            <button type="button" className="secondary-button" disabled={writeAuditLoading} onClick={() => void loadGoogleWriteAudits()}>
+              {writeAuditLoading ? "確認中" : "監査ログを更新"}
+            </button>
+          </div>
+          {writeAuditLogs.length === 0 ? (
+            <p className="muted">write実行後に、対象campaignと承認metadataをここで確認します。</p>
+          ) : (
+            <ul className="audit-log-list">
+              {writeAuditLogs.map((log, index) => (
+                <li key={`${log.id ?? log.event_type}-${log.created_at ?? index}`}>
+                  <div>
+                    <strong>{auditEventLabel(log.event_type)}</strong>
+                    <span>{formatAuditTimestamp(log.created_at)}</span>
+                  </div>
+                  <dl>
+                    <dt>customer</dt>
+                    <dd>{stringPayload(log.payload, "customerId") || "-"}</dd>
+                    <dt>campaign</dt>
+                    <dd>{stringPayload(log.payload, "campaignId") || "-"}</dd>
+                    <dt>approval</dt>
+                    <dd>{auditApprovalStatus(log.payload)}</dd>
+                  </dl>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </section>
       <section className="oauth-flow">
-        {["ログイン", "読み取りを許可", "分析に利用"].map((step, index) => (
+        {["ログイン", "OAuth許可", "分析と承認付き実行"].map((step, index) => (
           <div className="oauth-step" key={step}>
             <span>{index + 1}</span>
             <strong>{step}</strong>
@@ -1773,17 +3220,20 @@ function ConnectionsPage({
         {plannedConnections.map((connection) => {
           const connector = findPlannedConnector(connectionStatus, connection.platform);
           return (
-            <article className="card connection-card" key={connection.platform}>
+            <article className={`card connection-card platform-${connection.platform}`} key={connection.platform}>
               <div className="connection-card-header">
                 <p className="badge">APIキー不要</p>
-                <p className="connection-status">{connection.platform === "google" ? statusLabel(googleStatus) : "未接続"}</p>
+                <p className={`connection-status status-${connection.platform === "google" ? googleStatus : "pending"}`}>
+                  {connection.platform === "google" ? statusLabel(googleStatus) : "未接続"}
+                </p>
               </div>
               <h2>{connection.label}</h2>
               <p className="muted">{connection.accountHint} を予定しています。現時点では社内テスト用のmockデータで画面とAI相談を確認します。</p>
               <ul className="connection-notes">
-                <li>read-only OAuth予定</li>
-                <li>媒体write / 自動変更なし</li>
-                <li>secretやtokenはブラウザに表示しない</li>
+                <li><InlineIcon name="lock" />OAuth tokenは暗号化保存</li>
+                <li><InlineIcon name="check" />AI単体の自動変更なし</li>
+                <li><InlineIcon name="check" />Google Adsは承認付きwrite対応</li>
+                <li><InlineIcon name="lock" />secretやtokenはブラウザに表示しない</li>
               </ul>
               {connector?.oauthPath && (
                 <p className="connection-route">
@@ -1793,6 +3243,7 @@ function ConnectionsPage({
               {connection.platform === "google" ? (
                 <div className="connection-actions">
                   <button type="button" onClick={() => void openGoogleOAuth()}>
+                    <InlineIcon name="plug" />
                     Google Ads と連携
                   </button>
                   <button type="button" className="secondary-button" disabled={googleStatus !== "connected"} onClick={() => void loadGoogleCustomers()}>
@@ -1821,6 +3272,57 @@ function statusLabel(status: string) {
   return labels[status] ?? "未接続";
 }
 
+function googleWriteAuditMatches(log: AuditLogEntry, expected: { eventType: string; customerId: string; campaignId: string }) {
+  const payload = log.payload;
+  return (
+    log.event_type === expected.eventType &&
+    stringPayload(payload, "platform") === "google" &&
+    stringPayload(payload, "customerId") === expected.customerId &&
+    stringPayload(payload, "campaignId") === expected.campaignId &&
+    payload?.confirmed === true &&
+    stringPayload(payload, "approvalType") === "explicit_user_confirmation" &&
+    Boolean(stringPayload(payload, "approvedByUserId")) &&
+    timestampIsValid(stringPayload(payload, "approvedAt"))
+  );
+}
+
+function stringPayload(payload: Record<string, unknown> | undefined, key: string) {
+  const value = payload?.[key];
+  return typeof value === "string" || typeof value === "number" ? String(value) : "";
+}
+
+function auditApprovalStatus(payload: Record<string, unknown> | undefined) {
+  const approvedBy = stringPayload(payload, "approvedByUserId");
+  const approvedAt = stringPayload(payload, "approvedAt");
+  const complete =
+    payload?.confirmed === true &&
+    stringPayload(payload, "approvalType") === "explicit_user_confirmation" &&
+    approvedBy &&
+    timestampIsValid(approvedAt);
+  if (!complete) return "metadata未確認";
+  return `${approvedBy} / ${formatAuditTimestamp(approvedAt)}`;
+}
+
+function auditEventLabel(eventType: string) {
+  if (eventType === "google_ads.campaign_status_updated") return "Campaign status updated";
+  if (eventType === "google_ads.campaign_budget_updated") return "Campaign budget updated";
+  if (eventType.endsWith("_failed")) return "Write failed";
+  return eventType;
+}
+
+function formatAuditTimestamp(value: string | undefined) {
+  if (!value || !timestampIsValid(value)) return "時刻未確認";
+  return new Intl.DateTimeFormat("ja-JP", {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(new Date(value));
+}
+
+function timestampIsValid(value: string) {
+  if (!value) return false;
+  return Number.isFinite(Date.parse(value));
+}
+
 function findPlannedConnector(
   status: ConnectionStatusResponse | null,
   platform: Exclude<PlatformFilter, "all">,
@@ -1841,6 +3343,11 @@ function AiSidebar(props: {
   setInput: (value: string) => void;
   threadId: string;
   threads: ChatThreadSummary[];
+  advisorMode: AdvisorMode;
+  onAdvisorModeChange: (mode: AdvisorMode) => void;
+  pendingAdvisorMode: AdvisorMode | null;
+  onCancelAdvisorModeChange: () => void;
+  onConfirmAdvisorModeChange: () => void;
   threadLoading: boolean;
   messages: ChatMessage[];
   todos: TodoItem[];
@@ -1855,13 +3362,28 @@ function AiSidebar(props: {
   onClose: () => void;
 }) {
   return (
-    <aside className="ai-sidebar">
-      <header>
-        <div>
-          <h2>AIサイドバー</h2>
-          <p>相談セッション</p>
+    <aside id="ai-sidebar" className={`ai-sidebar advisor-mode-${props.advisorMode}${props.loading ? " is-thinking" : ""}`}>
+      <header className="ai-sidebar-header">
+        <div className="ai-header-main">
+          <span className="ai-header-icon" aria-hidden="true">
+            <picture>
+              <source srcSet={mascotStaticSrc} media="(prefers-reduced-motion: reduce)" />
+              <img src={props.loading ? mascotReviewSrc : mascotWaitingSrc} alt="" width={44} height={48} />
+            </picture>
+          </span>
+          <div className="ai-header-copy">
+            <div className="ai-header-title-row">
+              <h2>AI広告相談</h2>
+              <span className="ai-entry-chip">
+                {props.advisorMode === "beginner" ? "はじめて向け" : "実務者向け"}
+              </span>
+            </div>
+            <p>{props.advisorMode === "beginner" ? "数字の見方から順番に整理" : "仮説と判断材料を短く深掘り"}</p>
+          </div>
         </div>
-        <button type="button" onClick={props.onClose}>閉じる</button>
+        <button type="button" className="ai-close-button" onClick={props.onClose} aria-label="AIチャットを閉じる">
+          ×
+        </button>
       </header>
       <div className="thread-toolbar">
         <select
@@ -1880,10 +3402,32 @@ function AiSidebar(props: {
           )}
         </select>
         <button type="button" onClick={props.onNewThread} disabled={props.loading}>
-          新規
+          新しい相談
         </button>
       </div>
       <ChatConversation {...props} />
+      {props.pendingAdvisorMode && (
+        <div className="advisor-switch-modal-backdrop" role="presentation">
+          <section className="advisor-switch-modal" role="dialog" aria-modal="true" aria-labelledby="advisor-switch-title">
+            <p className="eyebrow">エージェント入口を切り替えます</p>
+            <h3 id="advisor-switch-title">
+              {props.pendingAdvisorMode === "beginner" ? "はじめて向け" : "実務者向け"}で新しい相談を開始します
+            </h3>
+            <p>
+              途中で入口を変えると、回答方針と会話メモリが混ざりやすくなります。
+              現在の会話は残したまま、新しいスレッドで切り替えます。
+            </p>
+            <div className="advisor-switch-actions">
+              <button type="button" className="secondary-button" onClick={props.onCancelAdvisorModeChange}>
+                キャンセル
+              </button>
+              <button type="button" onClick={props.onConfirmAdvisorModeChange}>
+                切り替えて新規相談
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </aside>
   );
 }
@@ -1896,6 +3440,8 @@ function ChatConversation({
   thinkingStatus,
   loading,
   error,
+  advisorMode,
+  onAdvisorModeChange,
   onCreateTodos,
   onToggleTodo,
   onSend,
@@ -1907,6 +3453,8 @@ function ChatConversation({
   thinkingStatus: string;
   loading: boolean;
   error: string;
+  advisorMode: AdvisorMode;
+  onAdvisorModeChange: (mode: AdvisorMode) => void;
   onCreateTodos: (message: ChatMessage) => void;
   onToggleTodo: (todoId: string) => void;
   onSend: () => void;
@@ -1930,9 +3478,37 @@ function ChatConversation({
         )}
       </div>
       {error && <p className="error">{error}</p>}
-      <div className="composer">
-        <textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder="質問を入力" rows={2} />
-        <button type="button" onClick={onSend} disabled={loading}>{loading ? "送信中" : "送信"}</button>
+      <div className="composer md3-chat-field">
+        <label className="composer-label" htmlFor="ai-chat-input">AIへの相談内容</label>
+        <textarea
+          id="ai-chat-input"
+          value={input}
+          onChange={(event) => setInput(event.target.value)}
+          placeholder="例: CPAが悪化した原因と、今日確認する順番を教えて"
+          rows={3}
+        />
+        <div className="composer-supporting-row">
+          <span className="composer-supporting-text">
+            {advisorMode === "beginner" ? "専門用語をほどいて、確認順に整理します" : "指標・仮説・運用判断を短く深掘りします"}
+          </span>
+          <div className="composer-actions">
+            <label className="advisor-mode-select">
+              <span>回答</span>
+              <select
+                aria-label="AI回答モード"
+                value={advisorMode}
+                onChange={(event) => onAdvisorModeChange(event.target.value as AdvisorMode)}
+                disabled={loading}
+              >
+                <option value="beginner">はじめて</option>
+                <option value="experienced">実務</option>
+              </select>
+            </label>
+            <button type="button" onClick={onSend} disabled={loading} aria-label={loading ? "分析中" : "送信"}>
+              {loading ? "…" : "↑"}
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -2159,7 +3735,7 @@ async function readChatStream(response: Response, onStatus: (status: string) => 
         finalChat = event.payload;
       }
       if (event.type === "error") {
-        throw new Error(event.payload.error ?? event.payload.detail ?? "AI応答の取得に失敗しました。");
+        throw new Error(event.payload.detail ?? event.payload.error ?? "AI応答の取得に失敗しました。");
       }
     }
   }
@@ -2206,17 +3782,17 @@ function FilterControls({
 
 function KpiCards({ summary, changes }: { summary: MetricTotals; changes: DashboardResponse["changes"] }) {
   const cards = [
-    { label: "CTR", value: formatPercent(summary.ctr, 2), change: changes.ctr },
-    { label: "CVR", value: formatPercent(summary.cvr, 2), change: changes.cvr },
-    { label: "CPA", value: formatMoney(summary.cpa), change: changes.cpa },
-    { label: "ROAS", value: formatPercent(summary.roas), change: changes.roas },
-    { label: "費用", value: formatMoney(summary.cost), change: changes.cost },
-    { label: "CV", value: summary.conversions.toLocaleString("ja-JP"), change: changes.conversions },
+    { label: "CTR", value: formatPercent(summary.ctr, 2), change: changes.ctr, tone: "primary" },
+    { label: "CVR", value: formatPercent(summary.cvr, 2), change: changes.cvr, tone: "secondary" },
+    { label: "CPA", value: formatMoney(summary.cpa), change: changes.cpa, tone: "warning" },
+    { label: "ROAS", value: formatPercent(summary.roas), change: changes.roas, tone: "success" },
+    { label: "費用", value: formatMoney(summary.cost), change: changes.cost, tone: "neutral" },
+    { label: "CV", value: summary.conversions.toLocaleString("ja-JP"), change: changes.conversions, tone: "tertiary" },
   ];
   return (
     <section aria-label="KPIサマリー" className="kpi-grid">
       {cards.map((card) => (
-        <article key={card.label} className="card kpi-card">
+        <article key={card.label} className={`card kpi-card kpi-card-${card.tone}`}>
           <p>{card.label}</p>
           <strong>{card.value}</strong>
           <span className={changeClass(card.change)}>{formatChange(card.change)}</span>
@@ -2318,7 +3894,7 @@ function createDemoReadiness(): ReadinessResponse {
         checks: [
           {
             id: "local-services",
-            label: "Web / API / ADK agentをローカル起動できる",
+            label: "Web / API / OpenAI agentをローカル起動できる",
             status: "pass",
             evidence: ["npm run dev"],
           },
@@ -2330,9 +3906,9 @@ function createDemoReadiness(): ReadinessResponse {
           },
           {
             id: "human-in-loop",
-            label: "媒体writeを行わず、人間向け作業手順として提案する",
+            label: "媒体writeは承認付きAPIだけで実行する",
             status: "pass",
-            evidence: ["mediaWriteEnabled=false"],
+            evidence: ["humanInTheLoopRequired=true"],
           },
         ],
         nextActions: ["社内テスト範囲をmockデータの体験検証に限定する。"],
@@ -2343,16 +3919,28 @@ function createDemoReadiness(): ReadinessResponse {
         note: "Supabase Auth、実OAuth、共有URLが未完了です。",
         checks: [
           {
-            id: "auth-oauth",
-            label: "Supabase Authと実OAuth callbackのE2E",
+            id: "auth-callback-url",
+            label: "Supabase Auth Redirect URLsにcallbackが登録されている",
             status: "todo",
-            evidence: ["demo workspaceで代替"],
+            evidence: ["API未接続時のfallback。/auth/callback を環境ごとに登録してください。"],
+          },
+          {
+            id: "google-login-provider",
+            label: "Googleログイン用OAuth provider credentialが設定されている",
+            status: "todo",
+            evidence: ["API未接続時のfallback。Supabase Auth ProviderでGoogleを有効化してください。"],
           },
           {
             id: "real-media-apis",
-            label: "Google / Meta / Yahoo read-only APIの実接続",
+            label: "Google Ads read/write APIの実接続",
             status: "todo",
             evidence: ["mock広告データで代替"],
+          },
+          {
+            id: "stripe-billing",
+            label: "Stripe Checkout / Portal / Webhookが設定されている",
+            status: "todo",
+            evidence: ["API未接続時のfallback。Stripe secretとwebhook secretを環境ごとに設定してください。"],
           },
           {
             id: "deployment",
@@ -2371,7 +3959,7 @@ function createDemoReadiness(): ReadinessResponse {
     checks: [
       {
         id: "local-services",
-        label: "Web / API / ADK agentをローカル起動できる",
+        label: "Web / API / OpenAI agentをローカル起動できる",
         status: "pass",
         evidence: ["npm run dev"],
       },
@@ -2383,21 +3971,33 @@ function createDemoReadiness(): ReadinessResponse {
       },
       {
         id: "human-in-loop",
-        label: "媒体writeを行わず、人間向け作業手順として提案する",
+        label: "媒体writeは承認付きAPIだけで実行する",
         status: "pass",
-        evidence: ["mediaWriteEnabled=false"],
+        evidence: ["humanInTheLoopRequired=true"],
       },
       {
-        id: "auth-oauth",
-        label: "Supabase Authと実OAuth callbackのE2E",
+        id: "auth-callback-url",
+        label: "Supabase Auth Redirect URLsにcallbackが登録されている",
         status: "todo",
-        evidence: ["demo workspaceで代替"],
+        evidence: ["API未接続時のfallback。/auth/callback を環境ごとに登録してください。"],
+      },
+      {
+        id: "google-login-provider",
+        label: "Googleログイン用OAuth provider credentialが設定されている",
+        status: "todo",
+        evidence: ["API未接続時のfallback。Supabase Auth ProviderでGoogleを有効化してください。"],
       },
       {
         id: "real-media-apis",
-        label: "Google / Meta / Yahoo read-only APIの実接続",
+        label: "Google Ads read/write APIの実接続",
         status: "todo",
         evidence: ["mock広告データで代替"],
+      },
+      {
+        id: "stripe-billing",
+        label: "Stripe Checkout / Portal / Webhookが設定されている",
+        status: "todo",
+        evidence: ["API未接続時のfallback。Stripe secretとwebhook secretを環境ごとに設定してください。"],
       },
       {
         id: "deployment",
@@ -2439,7 +4039,15 @@ function createLegacyMockScope(readiness: ReadinessResponse): ReadinessScope {
 
 function createLegacyProductionScope(readiness: ReadinessResponse): ReadinessScope {
   const productionChecks = readiness.checks.filter((check) =>
-    ["auth-oauth", "real-media-apis", "deployment"].includes(check.id),
+    [
+      "supabase-auth-env",
+      "auth-site-url",
+      "auth-callback-url",
+      "google-login-provider",
+      "auth-oauth",
+      "real-media-apis",
+      "deployment",
+    ].includes(check.id),
   );
   return {
     label: "production readiness",
@@ -2476,6 +4084,18 @@ function writeColumnBookmarks(ids: string[]) {
   window.localStorage.setItem(columnBookmarkStorageKey, JSON.stringify(ids));
 }
 
+function readAuthErrorFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  const error =
+    params.get("error_description") ??
+    hashParams.get("error_description") ??
+    params.get("error") ??
+    hashParams.get("error");
+  if (!error) return "";
+  return decodeURIComponent(error).replace(/\+/g, " ");
+}
+
 function createDemoChatResponse(question: string, data: DashboardResponse | null): ChatResponse {
   const source = data ?? demoDashboardData;
   const highPriority =
@@ -2485,7 +4105,7 @@ function createDemoChatResponse(question: string, data: DashboardResponse | null
     message: {
       role: "assistant",
       content: [
-        `結論:\nAPIまたはADK Agent Serviceが未起動のため、ユーザーテスト用のデモ応答を表示しています。直近では「${highPriority.campaign}」のCPA悪化を最優先で確認してください。`,
+        `結論:\nAPIまたはOpenAI Agent Serviceが未起動のため、ユーザーテスト用のデモ応答を表示しています。直近では「${highPriority.campaign}」のCPA悪化を最優先で確認してください。`,
         `根拠:\n- 対象期間: 直近${source.range}日\n- CPA: ${formatMoney(source.comparison.cpa)} → ${formatMoney(source.summary.cpa)}（${formatChange(source.changes.cpa)}）\n- CVR: ${formatPercent(source.comparison.cvr, 2)} → ${formatPercent(source.summary.cvr, 2)}（${formatChange(source.changes.cvr)}）\n- CPC: ${formatMoney(source.comparison.cpc)} → ${formatMoney(source.summary.cpc)}（${formatChange(source.changes.cpc)}）\n- 優先キャンペーン: ${highPriority.campaign} / CPA ${formatMoney(highPriority.cpa)} / ROAS ${formatPercent(highPriority.roas)}`,
         "原因仮説:\nCVR低下とCPC上昇が同時に起きているため、配信面、ターゲット、検索語句、クリエイティブ訴求、LPとの一致度が影響している可能性があります。",
         "推奨アクション:\n1. 対象キャンペーンの配信単位別CPA、CVR、CPCを比較する\n2. CVR低下が大きい広告とLPの訴求一致を確認する\n3. CPC上昇が大きい配信面や検索語句を洗い出す",
@@ -2557,15 +4177,19 @@ function countSeverity(anomalies: DashboardResponse["anomalies"]) {
 
 function severityChartData(data: DashboardResponse) {
   return [
-    { severity: "High", count: data.severityCounts.High, color: "#d93025" },
-    { severity: "Medium", count: data.severityCounts.Medium, color: "#d97706" },
-    { severity: "Low", count: data.severityCounts.Low, color: "#0f9d58" },
+    { severity: "High", count: data.severityCounts.High, color: brandChartColors.green },
+    { severity: "Medium", count: data.severityCounts.Medium, color: brandChartColors.yellowDeep },
+    { severity: "Low", count: data.severityCounts.Low, color: brandChartColors.greenSoft },
   ];
 }
 
 function formatMoney(value: number | null) {
   if (value === null) return "-";
   return `¥${Math.round(value).toLocaleString("ja-JP")}`;
+}
+
+function hasRollbackCondition(value: string) {
+  return /戻す|戻し|復元|ロールバック|rollback|restore|revert|元に/i.test(value);
 }
 
 function formatPercent(value: number | null, digits = 1) {
@@ -2591,9 +4215,9 @@ function numericValue(value: unknown) {
 }
 
 function platformColor(platform: Exclude<PlatformFilter, "all">) {
-  if (platform === "google") return "#d97706";
-  if (platform === "meta") return "#0b5fff";
-  return "#0f9d58";
+  if (platform === "google") return brandChartColors.yellow;
+  if (platform === "meta") return brandChartColors.green;
+  return brandChartColors.greenSoft;
 }
 
 function formatDateTime(value: string) {

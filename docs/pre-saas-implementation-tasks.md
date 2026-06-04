@@ -1,523 +1,263 @@
-# Pre-SaaS Implementation Tasks
+# Production Handoff Tasks
 
-このタスク表は、AdOps Advisorを「mockユーザーテスト」から「実広告APIで限定運用できるPre-SaaS MVP」へ引き上げるための実装計画です。
+このタスク表は、旧Pre-SaaS read-only / ADK MVP計画を置き換えるものです。現在の到達目標は、OpenAI Agents SDK、Google Ads read/write、Stripe課金を組み込んだ production candidate を作り、外部環境の準備後に staging E2E と最終 smoke を通せる状態にすることです。
 
-## 0. 到達状態
+詳細なデプロイ手順は `docs/deployment.md`、最終チェックリストは `deploy/production-readiness-checklist.md` を正本にします。
 
-目標:
+## 0. Target State
 
-- 限定ユーザーがログインできる
-- 1 workspace = 1会社としてtenant境界が守られる
-- Google Ads / Meta Ads / Yahoo Adsをread-only OAuthで連携できる
-- 実広告データをDashboard / BI / AI Advisorで扱える
-- AIは分析、提案、人間向け作業手順、human task作成まで行う
-- 媒体API write toolは存在しない
-- secret/token/API keyをLLM prompt、agent memory、tool output、log、ブラウザへ出さない
-- Cloudflare移行前の状態として、Web/API/OAuth callbackを移し替えやすい境界になっている
+Production candidate の完了条件:
+
+- OpenAI Agents SDK が正規agent runtimeである
+- 素人モード / 玄人モードを routePlan と API context で切り替えられる
+- OpenAI agent prompts / tools / QA gate が secret除外、根拠不足、write境界を守る
+- Supabase Auth と workspace scope が product API の入口で効く
+- Google Ads OAuth、customer list、metrics sync が実媒体APIへ接続できる
+- Google Ads write は campaign status / budget に限定し、人間の明示承認と audit log を必須にする
+- Stripe Checkout / Billing Portal / Webhook が login後課金導線として動く
+- production API は未ログインで `401`、未課金で `402`、Stripe未設定で `503 billing_not_configured` として fail closed する
+- Cloudflare Pages、Cloud Run API、Cloud Run Agent、Supabase、Stripe、Google Ads の env境界が分離されている
+- `npm run verify`、staging E2E、production smoke が揃う
 
 対象外:
 
-- 媒体設定の自動変更
-- 代理店向けマルチクライアントUI
-- 高度なBI
-- Slack通知
-- 定期自律実行
-- Cloudflare Workersへの完全移行
+- Meta Ads / Yahoo Ads の write
+- AI agent tool による広告媒体mutation
+- 完全自律運用
+- 代理店向けマルチクライアント管理
 
 ## 1. Milestone Map
 
-| ID | Milestone | 目的 | 完了条件 |
+| ID | Milestone | Status | Completion Evidence |
 | --- | --- | --- | --- |
-| M0 | Stabilize Current MVP | 現在のmock版を壊さず、実装土台を安定させる | test/build/typecheckが通り、readinessで残タスクが見える |
-| M1 | Supabase Auth / Workspace | tenant境界を作る | login後、自workspaceだけ読める |
-| M2 | DB Persistence | in-memory/demo固定をやめる | chat/recommendation/taskがDB永続化される |
-| M3 | Google Ads Read-only | 最初の実媒体連携を完成させる | Google Ads実データでDashboardとAI回答が動く |
-| M4 | Cloud Run ADK Deploy | 実ADK serviceをデプロイする | APIからCloud Run ADKへ安全に接続できる |
-| M5 | Meta Ads Read-only | SNS広告データを横断分析に入れる | Meta実データが正規化される |
-| M6 | Yahoo Ads Read-only | 国内MVP対象媒体を満たす | Yahoo実データが正規化される |
-| M7 | Limited Production Deploy | 限定ユーザーがURLで使える | ローカルなしでlogin/OAuth/AI相談が完了 |
-| M8 | Cloudflare Migration Ready | SaaS化移行の境界を整える | Pages/Workersへ移す作業だけが残る |
+| M0 | Repo Contract / Goal Audit | Done | `npm run check:goal` |
+| M1 | OpenAI Agent Runtime | Done | Agent pytest + OpenAI runtime contract tests |
+| M2 | Beginner / Experienced Routing | Done | conversation router tests + staging E2E chat |
+| M3 | Supabase Auth / Workspace / Billing Gate | Code Done, external E2E pending | API tests + Supabase staging E2E |
+| M4 | Google Ads Read/Write | Code Done, external E2E pending | API tests + reversible staging write E2E |
+| M5 | Stripe Billing | Code Done, external E2E pending | API tests + Stripe webhook/hosted Checkout staging E2E |
+| M6 | Deployment Surfaces | Code Done, operator tooling pending | Dockerfile checks + Docker builds + deploy preflight |
+| M7 | Production Smoke | Pending external env | `EXPECT_PRODUCTION_READY=true npm run smoke:deploy` |
 
-## 2. M0 Stabilize Current MVP
-
-Requirement:
-
-- `REQUIREMENTS.md` 4. MVPスコープ
-- `REQUIREMENTS.md` 17. セキュリティ・ガードレール
-- `docs/user-test-readiness.md`
+## 2. M0 Repo Contract / Goal Audit
 
 Tasks:
 
-- [ ] M0-01: Python 3.11以上でADK testを実行できるローカル手順を作る
-  - Owner: backend
-  - Depends on: none
-  - Output: READMEまたはdocsにPython 3.11実行手順
-  - Verify: `python3.11 -m pytest` in `services/adk-agent`
+- [x] Add `scripts/check-production-goal.mjs`.
+- [x] Add `npm run check:goal`.
+- [x] Include `check:goal` in `npm run verify`.
+- [x] Wire production goal audit into GitHub Actions.
+- [x] Confirm docs mention `check:goal`.
 
-- [ ] M0-02: `npm run typecheck` / `npm run build` / `python3.11 -m pytest` を標準検証コマンドにする
-  - Owner: fullstack
-  - Depends on: M0-01
-  - Output: README更新、必要ならscript追加
-  - Verify: 3コマンドが成功
+Verify:
 
-- [ ] M0-03: API入口でsecret guardを実装する
-  - Owner: backend
-  - Depends on: current ADK secret guard
-  - Output: `apps/api`のchat routeでsecretらしき入力をDB/ADKへ渡さず拒否
-  - Verify: dummy secret入力で値を再掲しない
+```sh
+npm run check:goal
+npm run verify
+```
 
-- [ ] M0-04: no-write policyをAPIとADKの両方で統一する
-  - Owner: backend
-  - Depends on: none
-  - Output: shared policyまたは同等テスト
-  - Verify: 「キャンペーンを停止して」「予算を上げて」「広告を入稿して」が拒否/手順化される
-
-- [ ] M0-05: `/readiness` を `mock` と `production` 観点に分ける
-  - Owner: fullstack
-  - Depends on: current `/readiness`
-  - Output: API responseとUI表示
-  - Verify: mock testはGo、productionは未完了項目が出る
-
-- [ ] M0-06: API成功時でもmockデータであることをUIで明示する
-  - Owner: frontend
-  - Depends on: API response mode
-  - Output: Dashboard / BI / Connectionsにmock banner
-  - Verify: 実データ接続済みと誤認しない文言
-
-- [ ] M0-07: データ連携画面を社内テスト用に未接続状態として見せる
-  - Owner: frontend
-  - Depends on: `/connections`
-  - Output: Google / Meta / Yahooがread-only OAuth予定として表示
-  - Verify: APIキー入力欄がない
-
-Exit Criteria:
-
-- [ ] `npm run typecheck` success
-- [ ] `npm run build` success
-- [ ] `python3.11 -m pytest` success
-- [ ] secret/no-write smoke test success
-- [ ] docs/user-test-readiness.mdのGo条件を満たす
-
-## 3. M1 Supabase Auth / Workspace
-
-Requirement:
-
-- `REQUIREMENTS.md` 5. ワークスペース設計
-- `REQUIREMENTS.md` 6. 認証・広告アカウント連携
-- `docs/database.md` 4. RLS / Membership
+## 3. M1 OpenAI Agent Runtime
 
 Tasks:
 
-- [ ] M1-01: Supabase project/envを定義する
-  - Owner: infra
-  - Depends on: none
-  - Output: env list, local/staging/prodの区分
-  - Verify: `.env.example`に必要キーが揃う
+- [x] Make OpenAI Agents SDK the default runtime via `ADOPS_AGENT_RUNTIME=openai`.
+- [x] Require OpenAI Agents SDK import availability before Agent `/health` reports `runtimeConfigured=true`.
+- [x] Keep Gemini/ADK only as a compatibility fallback.
+- [x] Add OpenAI orchestrator with specialist agents as tools.
+- [x] Package prompt markdown and eval JSON in the Agent Docker image.
+- [x] Expose Agent `/health` with `service=openai-agent`, runtime mode, runtime configuration, and data-safety flags.
+- [x] Sanitize production Agent context at the API boundary before sending it to the Agent Service.
+- [x] Add deterministic QA gate for no-secret, no-unapproved-write, required sections, and overconfident claims.
 
-- [ ] M1-02: WebにSupabase Auth clientを追加する
-  - Owner: frontend
-  - Depends on: M1-01
-  - Output: login/logout/session restore
-  - Verify: localでemail loginまたはmagic link loginが動く
+Verify:
 
-- [ ] M1-03: APIでSupabase JWTを検証するmiddlewareを追加する
-  - Owner: backend
-  - Depends on: M1-01
-  - Output: authenticated API boundary
-  - Verify: tokenなしは401、valid tokenは通る
+```sh
+python3.11 -m pytest services/adk-agent/tests
+npm run check:goal
+```
 
-- [ ] M1-04: workspace bootstrap flowを作る
-  - Owner: fullstack
-  - Depends on: M1-02, M1-03
-  - Output: 初回ログイン時にworkspace作成/owner membership作成
-  - Verify: `workspaces` と `workspace_members` に作成される
-
-- [ ] M1-05: APIでworkspace membershipを検証する
-  - Owner: backend
-  - Depends on: M1-03, M1-04
-  - Output: `workspaceId` query/bodyを信用せずmembership確認
-  - Verify: 他workspace ID指定で403
-
-- [ ] M1-06: Webのdemo payload固定をauth session由来に置き換える
-  - Owner: frontend
-  - Depends on: M1-04, M1-05
-  - Output: `userId`, `workspaceId`, `threadId`の実値化
-  - Verify: demo user固定が通常導線から消える
-
-- [ ] M1-07: RLS migrationをlocal/stagingで適用検証する
-  - Owner: backend
-  - Depends on: M1-04
-  - Output: migration apply notes
-  - Verify: owner/member/viewerのselect/write境界が期待通り
-
-Exit Criteria:
-
-- [ ] login/logout works
-- [ ] workspace create works
-- [ ] API rejects unauthenticated requests
-- [ ] other workspace access returns 403
-- [ ] no service role key in browser
-
-## 4. M2 DB Persistence
-
-Requirement:
-
-- `docs/database.md` 2. Core Tables
-- `REQUIREMENTS.md` 11. DBルール
+## 4. M2 Beginner / Experienced Routing
 
 Tasks:
 
-- [ ] M2-01: 現行migrationとrepository実装の差分を棚卸しする
-  - Owner: backend
-  - Depends on: M1
-  - Output: missing table/column list
-  - Verify: docs/database.mdとの差分が説明できる
+- [x] Add conversation router and routePlan contract.
+- [x] Route beginner mode to explanatory, step-oriented responses.
+- [x] Route experienced mode to KPI decomposition, hypotheses, priorities, approval-gated write candidates, and rollback conditions.
+- [x] Pass advisor mode from web/API context to Agent Service.
+- [x] Add UI selector for advisor mode.
 
-- [ ] M2-02: `agent_threads` 作成/取得APIを実装する
-  - Owner: backend
-  - Depends on: M1-05
-  - Output: thread UUID運用
-  - Verify: thread作成後にDBへ保存される
+Verify:
 
-- [ ] M2-03: `agent_messages` DB保存へ切り替える
-  - Owner: backend
-  - Depends on: M2-02
-  - Output: user/assistant message persistence
-  - Verify: 再起動後も会話履歴が残る
+```sh
+python3.11 -m pytest services/adk-agent/tests/test_conversation_router.py
+npm run e2e:staging
+```
 
-- [ ] M2-04: recommendationsをDB保存へ切り替える
-  - Owner: backend
-  - Depends on: M2-03
-  - Output: `recommendations` repository/API
-  - Verify: AI回答後にrecommendationがDBへ保存される
-
-- [ ] M2-05: human tasksをDB保存へ切り替える
-  - Owner: backend
-  - Depends on: M2-04
-  - Output: `human_tasks` repository/API
-  - Verify: task status updateがworkspace scopedで動く
-
-- [ ] M2-06: operator feedbackを実装する
-  - Owner: fullstack
-  - Depends on: M2-05
-  - Output: adopted/rejected/done/result memo
-  - Verify: feedbackがuser/workspace/threadに紐づく
-
-- [ ] M2-07: agent tool audit logをDB保存する
-  - Owner: backend
-  - Depends on: M2-03
-  - Output: `agent_tool_calls`
-  - Verify: tool started/succeeded/failedが保存される
-
-Exit Criteria:
-
-- [ ] chat history persists
-- [ ] recommendations persist
-- [ ] human tasks persist
-- [ ] operator feedback persists
-- [ ] all persistence is workspace scoped
-
-## 5. M3 Google Ads Read-only OAuth
-
-Requirement:
-
-- `REQUIREMENTS.md` 6. 認証・広告アカウント連携
-- `docs/database.md` 6. Token Storage
+## 5. M3 Supabase Auth / Workspace / Billing Gate
 
 Tasks:
 
-- [ ] M3-01: Google Ads OAuth app設定を整理する
-  - Owner: infra
-  - Depends on: M1
-  - Output: redirect URI, scopes, env list
-  - Verify: OAuth consent画面にread-only目的が表示される
+- [x] Require authenticated Supabase session for product APIs in configured staging / production.
+- [x] Scope data access by workspace membership.
+- [x] Bootstrap workspace for logged-in users.
+- [x] Gate app shell after login on `/billing/status`.
+- [x] Block agent chat and Google Ads write before billing access.
+- [x] Add fail-closed production behavior when Stripe is not configured.
+- [ ] Apply migrations to staging Supabase.
+- [ ] Run Supabase schema/RLS E2E against staging.
 
-- [ ] M3-02: token encryption moduleを実装する
-  - Owner: backend
-  - Depends on: M3-01
-  - Output: AES-256-GCM envelope encryption
-  - Verify: encrypt/decrypt unit test, plaintext tokenを保存しない
+Verify:
 
-- [ ] M3-03: OAuth state/PKCE storageを実装する
-  - Owner: backend
-  - Depends on: M3-02
-  - Output: state nonce, workspace/user binding, expiry
-  - Verify: invalid state is rejected
+```sh
+SUPABASE_URL=https://your-staging-project.supabase.co \
+npm run e2e:supabase
+```
 
-- [ ] M3-04: Google OAuth start routeを実装する
-  - Owner: backend
-  - Depends on: M3-03
-  - Output: `/oauth/google/start`
-  - Verify: authenticated userだけ開始できる
+Requires `SUPABASE_SERVICE_ROLE_KEY` in the operator environment. Do not paste service role keys into shell history.
 
-- [ ] M3-05: Google OAuth callback routeを実装する
-  - Owner: backend
-  - Depends on: M3-04
-  - Output: code exchange, token encryption save
-  - Verify: token columnはencrypted only
-
-- [ ] M3-06: Google Ads customer list取得を実装する
-  - Owner: backend
-  - Depends on: M3-05
-  - Output: accessible customers list
-  - Verify: customer ID/name/currency/timezoneを保存できる
-
-- [ ] M3-07: ad account選択/紐付けUIを実装する
-  - Owner: frontend
-  - Depends on: M3-06
-  - Output: account picker
-  - Verify: selected accountが`ad_accounts`に保存される
-
-- [ ] M3-08: Google campaign metrics syncを実装する
-  - Owner: backend
-  - Depends on: M3-07
-  - Output: account/campaign daily metrics
-  - Verify: `ad_daily_metrics`に日別指標が保存される
-
-- [ ] M3-09: token refreshを実装する
-  - Owner: backend
-  - Depends on: M3-05
-  - Output: refresh before expiry, failure status
-  - Verify: expired tokenでstatusが安全に更新される
-
-- [ ] M3-10: Google Ads dataをDashboard/APIへ接続する
-  - Owner: fullstack
-  - Depends on: M3-08
-  - Output: mock fallbackではなくDB metricsを返す
-  - Verify: 実Google Ads指標がDashboardに出る
-
-- [ ] M3-11: Google Ads dataをADK contextへ渡す
-  - Owner: backend
-  - Depends on: M3-10, M2
-  - Output: scope済みmetrics context
-  - Verify: AI回答の根拠に実指標が含まれる
-
-- [ ] M3-12: Google Ads OAuth/security testsを追加する
-  - Owner: backend
-  - Depends on: M3-05
-  - Output: state, token redaction, no prompt leakage tests
-  - Verify: dummy tokenがlog/responseに出ない
-
-Exit Criteria:
-
-- [ ] Google OAuth read-only connection works
-- [ ] Google Ads account is selectable
-- [ ] Google campaign metrics sync works
-- [ ] Dashboard uses real Google Ads data
-- [ ] AI uses real Google Ads evidence
-- [ ] no media write tool exists
-- [ ] token is encrypted and never returned to browser
-
-## 6. M4 Cloud Run ADK Deploy
+## 6. M4 Google Ads Read/Write
 
 Tasks:
 
-- [ ] M4-01: ADK service Dockerfileを作る
-  - Owner: infra/backend
-  - Depends on: M0
-  - Output: Cloud Run compatible container
-  - Verify: local container starts `/health`
+- [x] Add Google OAuth start-url and callback.
+- [x] Store OAuth state server-side with workspace/user binding.
+- [x] Encrypt token storage server-side.
+- [x] Refresh expired Google Ads access tokens before read/sync/write provider calls.
+- [x] Add Google Ads accessible customer list endpoint.
+- [x] Add customer connect and metrics sync.
+- [x] Use canonical `/google/customers` web endpoint.
+- [x] Add approval-gated campaign status write route.
+- [x] Restrict campaign status write to reversible `ENABLED` / `PAUSED` changes.
+- [x] Add approval-gated campaign budget write route.
+- [x] Require authenticated user, workspace scope, billing access, `confirmed=true`, `approvalNote`, and `GOOGLE_ADS_WRITE_ENABLED=true`.
+- [x] Add `GOOGLE_ADS_MAX_BUDGET_AMOUNT` cap for campaign budget writes.
+- [x] Audit Google Ads write events with approval note, target IDs, old/new intent, and no secrets.
+- [x] Add staging E2E script path for reversible write and restore.
+- [ ] Configure Google Ads OAuth app and developer token in staging.
+- [ ] Connect a low-risk staging/test Google Ads account.
+- [ ] Run read customer list and metrics sync E2E.
+- [ ] Run reversible campaign status or budget write E2E and restore value.
 
-- [ ] M4-02: Cloud Run serviceを作成する
-  - Owner: infra
-  - Depends on: M4-01
-  - Output: staging Cloud Run ADK URL
-  - Verify: `/health` success
+Verify:
 
-- [ ] M4-03: APIからCloud Run ADKを呼ぶ認証方式を決める
-  - Owner: backend/infra
-  - Depends on: M4-02
-  - Output: service auth or shared internal token
-  - Verify: direct unauthenticated access is rejected or non-public
+```sh
+API_ORIGIN=https://api.staging.example.com \
+AGENT_SERVICE_URL=https://agent.staging.example.com \
+WORKSPACE_ID=<workspace-id> \
+CHECK_GOOGLE_WRITE=true \
+CONFIRM_GOOGLE_WRITE=true \
+GOOGLE_CUSTOMER_ID=<customer-id> \
+GOOGLE_CAMPAIGN_ID=<campaign-id> \
+GOOGLE_WRITE_ROLLBACK="Reason and rollback condition for the reversible staging write." \
+npm run e2e:staging
+```
 
-- [ ] M4-04: API `USE_ADK_AGENT=true` staging動作確認
-  - Owner: backend
-  - Depends on: M4-03
-  - Output: staging API -> Cloud Run ADK
-  - Verify: `/agent/chat/stream`がADK経由で応答
+Requires `AUTH_TOKEN` in the operator environment. Do not paste user access tokens into shell history.
 
-- [ ] M4-05: ADK logsからsecretを除外する
-  - Owner: backend
-  - Depends on: M4-04
-  - Output: redaction/logging policy
-  - Verify: dummy secret smoke testでlogに出ない
+Set `GOOGLE_ADS_STAGING_E2E_PASSED_AT=<ISO timestamp>` only after the script verifies both the write audit log and restore audit log include the expected target payload and approval metadata.
 
-- [ ] M4-06: ADK eval/contract testsをCI相当にまとめる
-  - Owner: backend
-  - Depends on: M4-04
-  - Output: no-write, evidence, response format checks
-  - Verify: eval test suite success
-
-Exit Criteria:
-
-- [ ] ADK Cloud Run deployed
-- [ ] API can call ADK securely
-- [ ] ADK responses follow required format
-- [ ] no-write and secret exclusion enforced
-
-## 7. M5 Meta Ads Read-only OAuth
+## 7. M5 Stripe Billing
 
 Tasks:
 
-- [ ] M5-01: Meta OAuth app/scopesを整理する
-- [ ] M5-02: Meta OAuth start/callbackを実装する
-- [ ] M5-03: Meta ad account一覧を取得する
-- [ ] M5-04: Meta campaign/ad set/ad metrics syncを実装する
-- [ ] M5-05: Meta指標を共通metric schemaへ正規化する
-- [ ] M5-06: creative fatigue分析に必要なfrequency/CTR/CVR/CPAを扱う
-- [ ] M5-07: Dashboard/BIのplatform filterでMeta実データを表示する
-- [ ] M5-08: ADK contextへMeta metricsを渡す
-- [ ] M5-09: token refresh/error handling/security testsを追加する
+- [x] Add `billing_customers` and `billing_subscriptions` schema.
+- [x] Add Checkout session route.
+- [x] Add Billing Portal route.
+- [x] Add signed webhook route.
+- [x] Mirror subscription status into Supabase.
+- [x] Gate login-time app shell on billing access.
+- [x] Add API fail-closed behavior for production Stripe misconfiguration.
+- [x] Add webhook E2E script for signed test events.
+- [x] Require handled Stripe webhook events to include workspace metadata and return `handled=true` evidence.
+- [ ] Create staging Stripe product and subscription price.
+- [ ] Configure webhook endpoint to `<API_PUBLIC_ORIGIN>/billing/webhook`.
+- [ ] Complete hosted Checkout in staging.
+- [ ] Confirm webhook row updates and login-time billing gate.
 
-Exit Criteria:
+Verify:
 
-- [ ] Meta read-only OAuth works
-- [ ] Meta metrics sync works
-- [ ] Google + Meta横断Dashboardが動く
-- [ ] AIがplatform差を踏まえて回答する
+```sh
+API_ORIGIN=https://api.staging.example.com \
+WORKSPACE_ID=<workspace-id> \
+npm run e2e:stripe-webhook
+```
 
-## 8. M6 Yahoo Ads Read-only OAuth
+Requires `AUTH_TOKEN` and `STRIPE_WEBHOOK_SECRET` in the operator environment. Do not paste access tokens or webhook secrets into shell history.
 
-Tasks:
+Set `STRIPE_STAGING_E2E_PASSED_AT=<ISO timestamp>` only after hosted Checkout, existing customer reuse, webhook delivery, database rows, and billing gate are confirmed.
 
-- [ ] M6-01: Yahoo Ads OAuth/API仕様を整理する
-- [ ] M6-02: Yahoo OAuth start/callbackを実装する
-- [ ] M6-03: Yahoo account一覧を取得する
-- [ ] M6-04: Yahoo campaign metrics syncを実装する
-- [ ] M6-05: Google検索広告に近い指標へ正規化する
-- [ ] M6-06: Yahoo固有エラーの日本語表示を整える
-- [ ] M6-07: Dashboard/BI/ADK contextへYahoo実データを接続する
-- [ ] M6-08: token refresh/error handling/security testsを追加する
-
-Exit Criteria:
-
-- [ ] Yahoo read-only OAuth works
-- [ ] Yahoo metrics sync works
-- [ ] Google / Meta / Yahooの3媒体が横断表示される
-
-## 9. M7 Limited Production Deploy
+## 8. M6 Deployment Surfaces
 
 Tasks:
 
-- [ ] M7-01: deploy targetを確定する
-  - Candidate: Web/API Cloud Run, ADK Cloud Run, Supabase
-  - Output: deployment diagram
+- [x] Add API Dockerfile.
+- [x] Add Agent Dockerfile.
+- [x] Add Cloudflare Pages env template.
+- [x] Add Cloud Run API env template.
+- [x] Add Cloud Run Agent env template.
+- [x] Add deploy preflight script.
+- [x] Add production candidate audit script.
+- [x] Add deploy smoke script.
+- [x] Add GitHub Actions verify workflow with Docker builds.
+- [ ] Start Docker daemon on operator machine.
+- [ ] Install/authenticate Google Cloud CLI.
+- [ ] Set active Google Cloud project.
+- [ ] Install/authenticate Wrangler.
+- [ ] Install/authenticate Supabase CLI.
+- [ ] Install/authenticate Stripe CLI.
 
-- [ ] M7-02: staging/prod env inventoryを作る
-  - Include: Supabase URL/anon key, service key location, OAuth client IDs/secrets, token encryption key, ADK URL
+Verify:
 
-- [ ] M7-03: Web/API deploy pipelineを作る
-  - Verify: staging URLでWebが表示される
+```sh
+npm run verify
+npm run audit:production-candidate
+npm run deploy:preflight
+```
 
-- [ ] M7-04: OAuth redirect URIをstaging/prod URLに設定する
-  - Verify: provider consoleとenvが一致
+Current known blocker: `npm run deploy:preflight` fails until Docker daemon and `gcloud` / `wrangler` / `supabase` / `stripe` CLIs are available on the operator machine.
 
-- [ ] M7-05: CORS/CSRF/session cookie方針を実装する
-  - Verify: unauthorized cross-origin access is blocked
-
-- [ ] M7-06: staging smoke testを作る
-  - Steps: login -> workspace -> Google OAuth -> sync -> dashboard -> AI chat
-
-- [ ] M7-07: operational loggingを整える
-  - Constraint: no token, no service role, no customer secret in logs
-
-- [ ] M7-08: rollback手順を書く
-  - Include: deploy rollback, migration rollback notes, OAuth disable
-
-- [ ] M7-09: internal beta checklistを作る
-  - Include: tester account, allowed data, support contact, incident stop condition
-
-Exit Criteria:
-
-- [ ] staging URLでloginからAI相談まで完了
-- [ ] Google Ads実データでE2E完了
-- [ ] logsにsecretなし
-- [ ] rollback手順あり
-
-## 10. M8 Cloudflare Migration Ready
+## 9. M7 Production Smoke
 
 Tasks:
 
-- [ ] M8-01: Web static buildをCloudflare Pagesへ載せられる形にする
-- [ ] M8-02: APIをBFF/lightweight APIとheavy processingに分ける
-- [ ] M8-03: OAuth callbackをWorkersへ移せるroute contractにする
-- [ ] M8-04: Workers -> Cloud Run ADK proxyの認証設計を決める
-- [ ] M8-05: Supabase Auth sessionをPages/Workersで扱う方針を決める
-- [ ] M8-06: environment/secrets mappingをCloudflare用に作る
-- [ ] M8-07: current deployとCloudflare deployの差分表を作る
-- [ ] M8-08: migration runbookを作る
+- [ ] Deploy Cloud Run Agent with server-side `OPENAI_API_KEY`.
+- [ ] Deploy Cloud Run API with Supabase, Google Ads, Stripe, and Agent Service env.
+- [ ] Deploy Cloudflare Pages web build with only `VITE_*` browser-safe values.
+- [ ] Grant API service account permission to invoke private Agent service.
+- [ ] Set `OPENAI_AGENT_STAGING_E2E_PASSED_AT`.
+- [ ] Set `GOOGLE_ADS_STAGING_E2E_PASSED_AT`.
+- [ ] Set `STRIPE_STAGING_E2E_PASSED_AT`.
+- [ ] Set `DEPLOYMENT_RUNBOOK_ACK=true` after checklist review.
+- [ ] Run final deployed smoke with production readiness required.
 
-Exit Criteria:
+Verify:
 
-- [ ] Cloudflare移行時の変更対象がWeb/BFF/OAuth callbackに限定されている
-- [ ] ADK heavy処理はCloud Run継続で問題ない
-- [ ] Supabase/DB schemaは移行不要
-- [ ] migration runbookだけで作業に入れる
+```sh
+EXPECT_PRODUCTION_READY=true \
+API_ORIGIN=https://api.example.com \
+AGENT_SERVICE_URL=https://agent.example.com \
+WEB_ORIGIN=https://app.example.com \
+npm run smoke:deploy
+```
 
-## 11. Cross-Cutting Security Tasks
+Goal completion requires this smoke to pass against deployed API, Agent, and Web services. Until then, the repo can be code-ready but the user goal remains active.
 
-- [ ] S-01: secret redaction utilityをTypeScript/Pythonで揃える
-- [ ] S-02: token/API key/service roleのlog出力禁止テストを作る
-- [ ] S-03: LLM prompt payload snapshot testを作り、secret/tokenがないことを確認する
-- [ ] S-04: OAuth state replay testを作る
-- [ ] S-05: workspace scope bypass testを作る
-- [ ] S-06: no media write tool contract testを作る
-- [ ] S-07: service role keyの使用箇所をallowlist化する
-- [ ] S-08: production envでdebug stack traceを返さない
+## 10. Production Evidence Rules
 
-## 12. Cross-Cutting Product Tasks
+Evidence env values must be valid ISO timestamps:
 
-- [ ] P-01: onboarding copyを実OAuth前提へ更新する
-- [ ] P-02: connection statusを `not_connected`, `connecting`, `connected`, `expired`, `error`, `revoked` で表現する
-- [ ] P-03: 初回Google Ads接続後の「最初にAIへ聞く」CTAを作る
-- [ ] P-04: AI回答内human taskをDB保存し、UIで完了/却下できる
-- [ ] P-05: operator feedbackを次回AI contextへ反映する
-- [ ] P-06: root_agent / setup_advisor_agent / performance_analyst_agent / action_plan_agent / qa_agentの責務をdocsと実装で一致させる
-- [ ] P-07: 根拠不足時の回答テンプレートを固定する
-- [ ] P-08: 代表質問セットを作り、Google/Meta/Yahooで回答品質を確認する
+- `OPENAI_AGENT_STAGING_E2E_PASSED_AT`
+- `GOOGLE_ADS_STAGING_E2E_PASSED_AT`
+- `STRIPE_STAGING_E2E_PASSED_AT`
 
-## 13. Suggested First Sprint
+`/readiness` treats malformed or missing evidence as production `No-Go`. `scripts/check-env.mjs` also rejects stale or malformed production evidence. Do not set these values from intent alone; set them only after the corresponding staging E2E actually passed.
 
-Sprint goal:
-
-Google Ads実連携に入る前に、auth/workspace/securityの足場を作る。
-
-Candidate tasks:
-
-1. M0-01 Python 3.11検証
-2. M0-03 API secret guard
-3. M0-04 no-write policy統一
-4. M1-01 Supabase env整理
-5. M1-02 Web Auth client
-6. M1-03 API JWT middleware
-7. M1-04 workspace bootstrap
-8. M1-05 workspace membership検証
-
-Sprint exit:
-
-- loginできる
-- workspaceが作れる
-- APIがJWTとmembershipを見る
-- dummy secret/no-writeがAPI入口で止まる
-- mock Dashboard/AIは引き続き動く
-
-## 14. Open Decisions
-
-- [ ] Web/API初回deploy先をCloud Runにするか、Webだけ先にCloudflare Pagesへ置くか
-- [ ] OAuth callbackを初期からWorkersに置くか、まずNode APIで実装して後で移すか
-- [ ] token encryption keyをMVPでenv base64 secretにするか、最初からCloud KMS/Secret Managerにするか
-- [ ] metrics syncをrequest-time取得にするか、明示sync jobにするか
-- [ ] Google Ads developer tokenの運用主体と申請状態
-- [ ] Meta/Yahooの審査・権限申請をいつ始めるか
-- [ ] stagingに実広告アカウントを接続する社内ルール
-
-## 15. Risk Register
+## 11. Risk Register
 
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
-| Supabase Auth未接続のまま共有URLを出す | tenant漏洩 | M1完了まで共有URLテストしない |
-| tokenがlog/LLMへ混入 | credential漏洩 | S-01からS-03をM3前に完了 |
-| Google Ads developer token/審査で遅延 | 実API連携遅延 | M1/M2/M4を先行し、Google Ads待ちをブロックにしない |
-| 実媒体APIのrate limit | data sync失敗 | 最初は短期間/少数accountでsync、retry/backoff |
-| Cloudflare移行を早くやりすぎる | 実API実装が遅れる | M8までは境界設計だけに留める |
-| AIがwrite実行したように見える | product trust低下 | no-write policy/evalをCI相当にする |
+| Operator machine lacks deploy tools | Staging/prod deploy cannot start | `npm run deploy:preflight` prints concrete remediation |
+| Google Ads write target is not safely reversible | Real campaign damage | Use staging/test account, explicit `approvalNote`, restore value, audit verification |
+| Stripe evidence set before hosted Checkout | False production Go | Only set `STRIPE_STAGING_E2E_PASSED_AT` after Checkout, webhook delivery, DB rows, and billing gate |
+| Secret leaks to prompt/browser/log | Credential exposure | env checks, prompt evals, QA gate, no `VITE_*` server secrets |
+| Agent claims write was executed | User trust and operational risk | QA gate and no-write policy convert to approval-gated candidate language |

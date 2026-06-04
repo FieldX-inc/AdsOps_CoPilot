@@ -81,8 +81,8 @@ function ProductMock() {
           <strong>ちょこっとインハウス</strong>
         </div>
         <div className="mock-badges">
-          <span>read-only連携</span>
-          <span>自動変更なし</span>
+          <span>OAuth連携</span>
+          <span>承認付き変更</span>
         </div>
       </header>
       <div className="mock-body">
@@ -315,7 +315,7 @@ function App() {
         </div>
         <div className="flow-grid">
           <article>
-            <p className="flow-title">各媒体のデータを連携（read-only）</p>
+            <p className="flow-title">各媒体のデータをOAuth連携</p>
             {platformLogos.map(([name, mark]) => (
               <PlatformLogo key={name} name={name} mark={mark} />
             ))}
@@ -354,11 +354,11 @@ function App() {
           <h2>人が主役の運用を、AIが支えます。</h2>
           <div className="safety-point">
             <strong>AIが広告設定を勝手に変更することはありません</strong>
-            <p>ちょこっとインハウスは提案に特化。入札単価の変更や予算の調整など、設定の変更は手順を見ながら人が行います。</p>
+            <p>ちょこっとインハウスは提案と承認付き操作に特化。Google Adsの予算やcampaign statusは、人が確認して承認した場合だけAPI経由で実行します。</p>
           </div>
           <div className="safety-point">
-            <strong>read-only連携で安心・安全</strong>
-            <p>広告配信データをread-onlyで読み取り、データは暗号化して扱います。</p>
+            <strong>OAuth tokenとsecretを安全に扱います</strong>
+            <p>広告配信データと承認付き操作はサーバー側で扱い、tokenやdeveloper tokenをブラウザやAI回答に出しません。</p>
           </div>
         </div>
         <div className="operator-card">

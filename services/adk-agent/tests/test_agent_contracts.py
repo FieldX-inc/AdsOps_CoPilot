@@ -58,7 +58,9 @@ def test_root_instruction_keeps_no_write_and_answer_shape_contract() -> None:
 
     assert "human-in-the-loop" in instruction
     assert "広告媒体の設定を直接変更したと主張してはいけません" in instruction
-    assert "変更するtoolを呼んだり、存在すると仮定してはいけません" in instruction
+    assert "承認付きwrite APIへ移行" in instruction
+    assert "confirmed=true" in instruction
+    assert "AI toolとして直接変更したと主張してはいけません" in instruction
     for section in REQUIRED_ANSWER_SECTIONS:
         assert section in instruction
 
@@ -69,14 +71,26 @@ def test_prompt_files_preserve_policy_and_evidence_contracts() -> None:
         encoding="utf-8"
     )
     action_plan_prompt = (SERVICE_ROOT / "ad_ops_advisor/prompts/action_plan.md").read_text(encoding="utf-8")
+    setup_prompt = (SERVICE_ROOT / "ad_ops_advisor/prompts/setup_advisor.md").read_text(encoding="utf-8")
 
     assert "媒体設定を直接変更する" in root_prompt
     assert "根拠のない数値を作る" in root_prompt
     assert "秘密情報を出力する" in root_prompt
+    assert "質問タイプ別のルーティング" in root_prompt
+    assert "今の広告運用、うまくいってる？" in root_prompt
+    assert "予算が使いきれない" in root_prompt
+    assert "ターゲティングが合っているかわからない" in root_prompt
+    assert "挨拶、雑談、使い方確認" in agent.ROOT_INSTRUCTION
+    assert "運用改善フォーマットは、改善・分析・作業手順化の依頼だけ" in agent.ROOT_INSTRUCTION
     for expected in ("対象期間", "比較期間", "見た指標", "まだ分からないこと"):
         assert expected in performance_prompt
-    for expected in ("人間が媒体管理画面で実行", "実施前チェック", "リスク", "実施後の観察計画", "自信度"):
+    assert "問い合わせが取れない" in performance_prompt
+    assert "どこが一番ボトルネック" in performance_prompt
+    for expected in ("人間が確認・承認", "承認付きAPI候補", "実施前チェック", "リスク", "実施後の観察計画", "自信度"):
         assert expected in action_plan_prompt
+    assert "これから何を優先すべき" in action_plan_prompt
+    assert "どこをコンバージョンとして設定" in setup_prompt
+    assert "そもそもこの媒体で合ってる" in setup_prompt
 
 
 def test_tool_signatures_require_scope_and_do_not_accept_secrets() -> None:
@@ -128,6 +142,9 @@ def test_pyproject_is_ready_for_python_311_pytest() -> None:
     assert 'requires-python = ">=3.11"' in pyproject
     assert '"pytest>=8"' in pyproject
     assert 'testpaths = ["tests"]' in pyproject
+    assert "[tool.setuptools.package-data]" in pyproject
+    assert '"prompts/*.md"' in pyproject
+    assert '"evals/*.json"' in pyproject
 
 
 def _root_agent_tool_names_from_source() -> set[str]:
