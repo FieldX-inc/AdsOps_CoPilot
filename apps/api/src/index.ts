@@ -724,7 +724,8 @@ app.post("/google/customers/:customerId/connect", async (c) => {
     const auth = await assertWorkspaceMembership(c.req.raw, c.req.query("workspaceId"));
     const billingGate = await requireBillingAccess(c, auth);
     if (billingGate) return billingGate;
-    const result = await connectGoogleCustomer(auth, c.req.param("customerId"));
+    const body: { managerCustomerId?: string | null } = await c.req.json<{ managerCustomerId?: string | null }>().catch(() => ({}));
+    const result = await connectGoogleCustomer(auth, c.req.param("customerId"), body.managerCustomerId);
     return c.json(result);
   } catch (error) {
     return handleAuthError(c, error);
@@ -736,10 +737,12 @@ app.post("/sync/google", async (c) => {
     const auth = await authenticateRequest(c.req.raw);
     const billingGate = await requireBillingAccess(c, auth);
     if (billingGate) return billingGate;
-    const body: { customerId?: string; days?: number } = await c.req.json<{ customerId?: string; days?: number }>().catch(() => ({}));
+    const body: { customerId?: string; days?: number; managerCustomerId?: string | null } = await c.req
+      .json<{ customerId?: string; days?: number; managerCustomerId?: string | null }>()
+      .catch(() => ({}));
     const customerId = body.customerId ?? c.req.query("customerId");
     if (!customerId) return c.json({ error: "customerId is required" }, 400);
-    const result = await syncGoogleCustomer(auth, customerId, body.days ?? 30);
+    const result = await syncGoogleCustomer(auth, customerId, body.days ?? 30, { managerCustomerId: body.managerCustomerId });
     return c.json(result);
   } catch (error) {
     return handleAuthError(c, error);

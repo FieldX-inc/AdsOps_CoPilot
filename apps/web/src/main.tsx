@@ -2897,7 +2897,14 @@ function ConnectionsPage({
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatusResponse | null>(null);
   const [connectionLoading, setConnectionLoading] = useState(true);
   const [connectionNotice, setConnectionNotice] = useState("");
-  const [customers, setCustomers] = useState<Array<{ resourceName: string; customerId: string; descriptiveName?: string | null; managerCustomerId?: string | null; manager?: boolean | null }>>([]);
+  type GoogleCustomer = {
+    resourceName: string;
+    customerId: string;
+    descriptiveName?: string | null;
+    managerCustomerId?: string | null;
+    manager?: boolean | null;
+  };
+  const [customers, setCustomers] = useState<GoogleCustomer[]>([]);
   const [syncingCustomerId, setSyncingCustomerId] = useState("");
   const plannedConnections: Array<{
     platform: Exclude<PlatformFilter, "all">;
@@ -2961,11 +2968,15 @@ function ConnectionsPage({
     setCustomers(data.customers ?? []);
   }
 
-  async function connectCustomer(customerId: string) {
+  async function connectCustomer(customer: GoogleCustomer) {
     setConnectionNotice("");
-    const res = await fetch(`${apiBaseUrl}/google/customers/${customerId}/connect?workspaceId=${workspace.workspaceId}`, {
+    const res = await fetch(`${apiBaseUrl}/google/customers/${customer.customerId}/connect?workspaceId=${workspace.workspaceId}`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${session.access_token}` },
+      headers: {
+        Authorization: `Bearer ${session.access_token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ managerCustomerId: customer.managerCustomerId ?? null }),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -2975,16 +2986,16 @@ function ConnectionsPage({
     setConnectionNotice(`Google Ads ${data.customerId} をworkspaceに接続しました。`);
   }
 
-  async function syncCustomer(customerId: string) {
+  async function syncCustomer(customer: GoogleCustomer) {
     setConnectionNotice("");
-    setSyncingCustomerId(customerId);
+    setSyncingCustomerId(customer.customerId);
     const res = await fetch(`${apiBaseUrl}/sync/google`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${session.access_token}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ customerId, days: 30 }),
+      body: JSON.stringify({ customerId: customer.customerId, managerCustomerId: customer.managerCustomerId ?? null, days: 30 }),
     });
     const data = await res.json();
     setSyncingCustomerId("");
@@ -3032,8 +3043,8 @@ function ConnectionsPage({
                   {customer.managerCustomerId ? ` / MCC ${customer.managerCustomerId} 配下` : ""}
                 </span>
                 <div className="inline-actions">
-                  <button type="button" onClick={() => void connectCustomer(customer.customerId)}>接続</button>
-                  <button type="button" className="secondary-button" disabled={Boolean(customer.manager) || syncingCustomerId === customer.customerId} onClick={() => void syncCustomer(customer.customerId)}>
+                  <button type="button" onClick={() => void connectCustomer(customer)}>接続</button>
+                  <button type="button" className="secondary-button" disabled={Boolean(customer.manager) || syncingCustomerId === customer.customerId} onClick={() => void syncCustomer(customer)}>
                     {syncingCustomerId === customer.customerId ? "同期中" : "30日同期"}
                   </button>
                 </div>

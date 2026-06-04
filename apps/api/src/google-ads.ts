@@ -27,6 +27,10 @@ const googleAdsApiVersion = "v22";
 const defaultGoogleAdsMaxBudgetAmount = 50_000;
 
 type GoogleCampaignStatus = "ENABLED" | "PAUSED";
+type GoogleAdsRequestOptions = {
+  omitLoginCustomerId?: boolean;
+  loginCustomerId?: string | null;
+};
 
 export class GoogleAdsWriteError extends Error {
   status: 400 | 503;
@@ -185,32 +189,34 @@ function dedupeGoogleCustomers<T extends { customerId: string; managerCustomerId
   return result;
 }
 
-export async function connectGoogleCustomer(auth: AuthContext, customerId: string) {
+export async function connectGoogleCustomer(auth: AuthContext, customerId: string, managerCustomerId?: string | null) {
   const normalized = normalizeCustomerId(customerId);
   if (!normalized) throw new Error("customerIdが不正です。");
+  const normalizedManagerCustomerId = normalizeCustomerId(managerCustomerId ?? "");
   const account = await upsertAdAccount({
     workspaceId: auth.workspace.id,
     platform: "google",
     externalAccountId: normalized,
-    name: `Google Ads ${normalized}`,
+    name: normalizedManagerCustomerId ? `Google Ads ${normalized} (MCC ${normalizedManagerCustomerId})` : `Google Ads ${normalized}`,
     status: "connected",
   });
-  return { customerId: normalized, adAccountId: account.id };
+  return { customerId: normalized, managerCustomerId: normalizedManagerCustomerId || null, adAccountId: account.id };
 }
 
-export async function syncGoogleCustomer(auth: AuthContext, customerId: string, days = 30) {
+export async function syncGoogleCustomer(auth: AuthContext, customerId: string, days = 30, options: { managerCustomerId?: string | null } = {}) {
   const normalized = normalizeCustomerId(customerId);
   if (!normalized) throw new Error("customerIdが不正です。");
+  const normalizedManagerCustomerId = normalizeCustomerId(options.managerCustomerId ?? "");
   const accessToken = await readGoogleAccessToken(auth);
 
   const account = await upsertAdAccount({
     workspaceId: auth.workspace.id,
     platform: "google",
     externalAccountId: normalized,
-    name: `Google Ads ${normalized}`,
+    name: normalizedManagerCustomerId ? `Google Ads ${normalized} (MCC ${normalizedManagerCustomerId})` : `Google Ads ${normalized}`,
     status: "connected",
   });
-  const rows = await fetchGoogleAdGroupMetrics(accessToken, normalized, days);
+  const rows = await fetchGoogleAdGroupMetrics(accessToken, normalized, days, { loginCustomerId: normalizedManagerCustomerId });
   const campaignIds = new Map<string, string>();
   for (const row of rows) {
     const campaign = await upsertCampaignSnapshot({
@@ -254,6 +260,7 @@ export async function syncGoogleCustomer(auth: AuthContext, customerId: string, 
   })));
   return {
     customerId: normalized,
+    managerCustomerId: normalizedManagerCustomerId || null,
     adAccountId: account.id,
     rowsSynced: rows.length,
     campaignCount: new Set(rows.map((row) => row.campaignId)).size,
@@ -479,7 +486,7 @@ type GoogleMetricRow = {
   revenue: number;
 };
 
-async function fetchGoogleAdGroupMetrics(accessToken: string, customerId: string, days: number): Promise<GoogleMetricRow[]> {
+async function fetchGoogleAdGroupMetrics(accessToken: string, customerId: string, days: number, options: GoogleAdsRequestOptions = {}): Promise<GoogleMetricRow[]> {
   const query = `
     SELECT
       segments.date,
@@ -499,12 +506,7 @@ async function fetchGoogleAdGroupMetrics(accessToken: string, customerId: string
   `;
   const res = await fetch(`https://googleads.googleapis.com/${googleAdsApiVersion}/customers/${customerId}/googleAds:searchStream`, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "developer-token": requiredEnv("GOOGLE_ADS_DEVELOPER_TOKEN"),
-      "Content-Type": "application/json",
-      ...(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID ? { "login-customer-id": normalizeCustomerId(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID) } : {}),
-    },
+    headers: googleAdsHeaders(accessToken, options),
     body: JSON.stringify({ query }),
   });
   if (!res.ok) {
@@ -543,7 +545,7 @@ async function fetchCampaignBudgetResourceName(accessToken: string, customerId: 
   return String(budget);
 }
 
-async function postGoogleAdsSearch(accessToken: string, customerId: string, query: string, options: { omitLoginCustomerId?: boolean } = {}) {
+async function postGoogleAdsSearch(accessToken: string, customerId: string, query: string, options: GoogleAdsRequestOptions = {}) {
   const res = await fetch(`https://googleads.googleapis.com/${googleAdsApiVersion}/customers/${customerId}/googleAds:searchStream`, {
     method: "POST",
     headers: googleAdsHeaders(accessToken, options),
@@ -609,12 +611,15 @@ function googleAccessTokenNeedsRefresh(expiresAt: string | null | undefined) {
   return expiresAtMs - Date.now() < 5 * 60 * 1000;
 }
 
-function googleAdsHeaders(accessToken: string, options: { omitLoginCustomerId?: boolean } = {}) {
+function googleAdsHeaders(accessToken: string, options: GoogleAdsRequestOptions = {}) {
+  const loginCustomerId = options.omitLoginCustomerId
+    ? ""
+    : normalizeCustomerId(options.loginCustomerId ?? process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID ?? "");
   return {
     Authorization: `Bearer ${accessToken}`,
     "developer-token": requiredEnv("GOOGLE_ADS_DEVELOPER_TOKEN"),
     "Content-Type": "application/json",
-    ...(!options.omitLoginCustomerId && process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID ? { "login-customer-id": requireNormalizedCustomerId(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID) } : {}),
+    ...(loginCustomerId ? { "login-customer-id": loginCustomerId } : {}),
   };
 }
 
