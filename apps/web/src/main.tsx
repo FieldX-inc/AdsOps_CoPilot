@@ -24,8 +24,6 @@ type PlatformFilter = "all" | "google" | "meta" | "yahoo";
 type Confidence = "high" | "medium" | "low";
 type AdvisorMode = "beginner" | "experienced";
 type AdvisorEntry = "setup_advisor_beginner" | "performance_analyst_experienced";
-type GoogleWriteOperation = "status" | "budget";
-type GoogleCampaignStatus = "ENABLED" | "PAUSED";
 
 type ChatMessage = {
   id?: string;
@@ -247,13 +245,6 @@ type ConnectionStatusResponse = {
     status: "planned" | "ready";
     oauthPath: string;
   }>;
-};
-
-type AuditLogEntry = {
-  id?: string;
-  event_type: string;
-  created_at?: string;
-  payload?: Record<string, unknown>;
 };
 
 type HelpArticle = {
@@ -2858,29 +2849,8 @@ function ConnectionsPage({
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatusResponse | null>(null);
   const [connectionLoading, setConnectionLoading] = useState(true);
   const [connectionNotice, setConnectionNotice] = useState("");
-  const [customers, setCustomers] = useState<Array<{ resourceName: string; customerId: string }>>([]);
+  const [customers, setCustomers] = useState<Array<{ resourceName: string; customerId: string; descriptiveName?: string | null; managerCustomerId?: string | null; manager?: boolean | null }>>([]);
   const [syncingCustomerId, setSyncingCustomerId] = useState("");
-  const [writeLoading, setWriteLoading] = useState(false);
-  const [writeResult, setWriteResult] = useState("");
-  const [writeAuditLogs, setWriteAuditLogs] = useState<AuditLogEntry[]>([]);
-  const [writeAuditLoading, setWriteAuditLoading] = useState(false);
-  const [writeForm, setWriteForm] = useState<{
-    operation: GoogleWriteOperation;
-    customerId: string;
-    campaignId: string;
-    status: GoogleCampaignStatus;
-    amount: string;
-    reason: string;
-    confirmed: boolean;
-  }>({
-    operation: "status",
-    customerId: "",
-    campaignId: "",
-    status: "PAUSED",
-    amount: "",
-    reason: "",
-    confirmed: false,
-  });
   const plannedConnections: Array<{
     platform: Exclude<PlatformFilter, "all">;
     label: string;
@@ -2955,7 +2925,6 @@ function ConnectionsPage({
       return;
     }
     setConnectionNotice(`Google Ads ${data.customerId} をworkspaceに接続しました。`);
-    setWriteForm((current) => ({ ...current, customerId: data.customerId ?? customerId }));
   }
 
   async function syncCustomer(customerId: string) {
@@ -2976,88 +2945,6 @@ function ConnectionsPage({
       return;
     }
     setConnectionNotice(`Google Ads ${data.customerId} から ${data.rowsSynced} 行を同期しました。Dashboard/AIに実データを反映します。`);
-  }
-
-  async function loadGoogleWriteAudits(expected?: { eventType: string; customerId: string; campaignId: string }) {
-    setWriteAuditLoading(true);
-    try {
-      const res = await fetch(`${apiBaseUrl}/audit-logs/recent?workspaceId=${workspace.workspaceId}&eventTypePrefix=google_ads.&limit=8`, {
-        headers: { Authorization: `Bearer ${session.access_token}` },
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setWriteResult(data?.error ?? "Google Ads audit logの取得に失敗しました。");
-        return;
-      }
-      const logs = Array.isArray(data.logs) ? (data.logs as AuditLogEntry[]) : [];
-      setWriteAuditLogs(logs);
-      if (expected && !logs.some((log) => googleWriteAuditMatches(log, expected))) {
-        setWriteResult("writeは実行されましたが、対象campaignの承認metadata付きaudit logを確認できませんでした。/audit-logs/recent を確認してください。");
-      }
-    } finally {
-      setWriteAuditLoading(false);
-    }
-  }
-
-  async function executeGoogleWrite() {
-    setWriteResult("");
-    const customerId = writeForm.customerId.replace(/^customers\//, "").replace(/-/g, "").trim();
-    const campaignId = writeForm.campaignId.trim();
-    const amount = Number(writeForm.amount);
-
-    if (!writeForm.confirmed) {
-      setWriteResult("実行前チェックを確認し、承認checkboxを入れてください。");
-      return;
-    }
-    if (!customerId || !campaignId) {
-      setWriteResult("customerId と campaignId を入力してください。");
-      return;
-    }
-    const approvalNote = writeForm.reason.trim();
-    if (approvalNote.length < 10 || !hasRollbackCondition(approvalNote)) {
-      setWriteResult("変更理由と戻し条件を10文字以上で入力してください。例: 24時間後にCPA悪化なら元の設定へ戻す。");
-      return;
-    }
-    if (writeForm.operation === "budget" && (!Number.isFinite(amount) || amount <= 0)) {
-      setWriteResult("予算変更では、正の金額を入力してください。");
-      return;
-    }
-
-    setWriteLoading(true);
-    const endpoint =
-      writeForm.operation === "status"
-        ? `${apiBaseUrl}/google/customers/${customerId}/campaigns/${campaignId}/status`
-        : `${apiBaseUrl}/google/customers/${customerId}/campaigns/${campaignId}/budget`;
-    const payload =
-      writeForm.operation === "status"
-        ? { status: writeForm.status, confirmed: true, approvalNote }
-        : { amount, confirmed: true, approvalNote };
-
-    try {
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${session.access_token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setWriteResult(data?.error ?? "Google Ads writeに失敗しました。");
-        return;
-      }
-      const eventType = writeForm.operation === "status" ? "google_ads.campaign_status_updated" : "google_ads.campaign_budget_updated";
-      setWriteResult(
-        writeForm.operation === "status"
-          ? `campaign ${data.campaignId} のstatusを ${data.status} に更新しました。承認metadata付きaudit logを確認しています。`
-          : `campaign ${data.campaignId} のbudgetを ${formatMoney(Number(data.amount ?? amount))} に更新しました。承認metadata付きaudit logを確認しています。`,
-      );
-      await loadGoogleWriteAudits({ eventType, customerId, campaignId });
-      setWriteForm((current) => ({ ...current, confirmed: false }));
-    } finally {
-      setWriteLoading(false);
-    }
   }
 
   return (
@@ -3089,16 +2976,17 @@ function ConnectionsPage({
           <h2>取得できたGoogle Adsアカウント</h2>
           <ul>
             {customers.map((customer) => (
-              <li key={customer.resourceName}>
-                <strong>{customer.customerId}</strong>
-                <span>{customer.resourceName}</span>
+              <li key={`${customer.resourceName}-${customer.managerCustomerId ?? "direct"}`}>
+                <strong>{customer.descriptiveName || customer.customerId}</strong>
+                <span>
+                  {customer.customerId}
+                  {customer.manager ? " / MCC" : ""}
+                  {customer.managerCustomerId ? ` / MCC ${customer.managerCustomerId} 配下` : ""}
+                </span>
                 <div className="inline-actions">
                   <button type="button" onClick={() => void connectCustomer(customer.customerId)}>接続</button>
-                  <button type="button" className="secondary-button" disabled={syncingCustomerId === customer.customerId} onClick={() => void syncCustomer(customer.customerId)}>
+                  <button type="button" className="secondary-button" disabled={Boolean(customer.manager) || syncingCustomerId === customer.customerId} onClick={() => void syncCustomer(customer.customerId)}>
                     {syncingCustomerId === customer.customerId ? "同期中" : "30日同期"}
-                  </button>
-                  <button type="button" className="secondary-button" onClick={() => setWriteForm((current) => ({ ...current, customerId: customer.customerId }))}>
-                    変更対象に使う
                   </button>
                 </div>
               </li>
@@ -3106,108 +2994,6 @@ function ConnectionsPage({
           </ul>
         </section>
       )}
-      <section className="card google-write-panel">
-        <div className="section-header">
-          <div>
-            <p className="eyebrow">
-              <InlineIcon name="lock" />
-              approval required
-            </p>
-            <h2>Google Ads 承認付き変更</h2>
-          </div>
-          <span className={`status-chip ${connectionStatus?.policy.mediaWriteEnabled ? "status-connected" : "status-pending"}`}>
-            {connectionStatus?.policy.mediaWriteEnabled ? "write有効" : "write無効"}
-          </span>
-        </div>
-        <p className="muted">
-          AI提案を確認した後、対象ID、変更内容、戻し条件を人間が確認した場合だけ実行します。APIは `confirmed=true` とサーバー側 `GOOGLE_ADS_WRITE_ENABLED=true` を必須にします。
-        </p>
-        <div className="write-form-grid">
-          <label>
-            操作
-            <select value={writeForm.operation} onChange={(event) => setWriteForm((current) => ({ ...current, operation: event.target.value as GoogleWriteOperation, confirmed: false }))}>
-              <option value="status">Campaign status</option>
-              <option value="budget">Campaign budget</option>
-            </select>
-          </label>
-          <label>
-            customerId
-            <input value={writeForm.customerId} onChange={(event) => setWriteForm((current) => ({ ...current, customerId: event.target.value, confirmed: false }))} placeholder="1234567890" />
-          </label>
-          <label>
-            campaignId
-            <input value={writeForm.campaignId} onChange={(event) => setWriteForm((current) => ({ ...current, campaignId: event.target.value, confirmed: false }))} placeholder="987654321" />
-          </label>
-          {writeForm.operation === "status" ? (
-            <label>
-              status
-              <select value={writeForm.status} onChange={(event) => setWriteForm((current) => ({ ...current, status: event.target.value as GoogleCampaignStatus, confirmed: false }))}>
-                <option value="PAUSED">PAUSED</option>
-                <option value="ENABLED">ENABLED</option>
-              </select>
-            </label>
-          ) : (
-            <label>
-              amount
-              <input inputMode="decimal" value={writeForm.amount} onChange={(event) => setWriteForm((current) => ({ ...current, amount: event.target.value, confirmed: false }))} placeholder="20000" />
-            </label>
-          )}
-        </div>
-        <label className="write-reason">
-          変更理由と戻し条件
-          <textarea value={writeForm.reason} onChange={(event) => setWriteForm((current) => ({ ...current, reason: event.target.value, confirmed: false }))} rows={3} placeholder="例: 直近7日でCPAが許容値を超過。24-48時間後にCV数とCPAを確認し、悪化なら戻す。" />
-        </label>
-        <label className="approval-check">
-          <input type="checkbox" checked={writeForm.confirmed} onChange={(event) => setWriteForm((current) => ({ ...current, confirmed: event.target.checked }))} />
-          <span>対象campaign、変更内容、影響範囲、戻し条件を確認し、この操作を承認します。</span>
-        </label>
-        <div className="inline-actions">
-          <button type="button" disabled={googleStatus !== "connected" || writeLoading || !writeForm.confirmed} onClick={() => void executeGoogleWrite()}>
-            {writeLoading ? "実行中" : "承認して実行"}
-          </button>
-          <button type="button" className="secondary-button" onClick={() => setWriteForm((current) => ({ ...current, confirmed: false }))}>
-            承認を外す
-          </button>
-        </div>
-        {googleStatus !== "connected" && <p className="muted">Google Ads OAuth連携後に実行できます。</p>}
-        {writeResult && <p className="connection-fallback">{writeResult}</p>}
-        <div className="audit-review-panel">
-          <div className="section-header">
-            <div>
-              <p className="eyebrow">
-                <InlineIcon name="check" />
-                audit review
-              </p>
-              <h3>直近のGoogle Ads監査ログ</h3>
-            </div>
-            <button type="button" className="secondary-button" disabled={writeAuditLoading} onClick={() => void loadGoogleWriteAudits()}>
-              {writeAuditLoading ? "確認中" : "監査ログを更新"}
-            </button>
-          </div>
-          {writeAuditLogs.length === 0 ? (
-            <p className="muted">write実行後に、対象campaignと承認metadataをここで確認します。</p>
-          ) : (
-            <ul className="audit-log-list">
-              {writeAuditLogs.map((log, index) => (
-                <li key={`${log.id ?? log.event_type}-${log.created_at ?? index}`}>
-                  <div>
-                    <strong>{auditEventLabel(log.event_type)}</strong>
-                    <span>{formatAuditTimestamp(log.created_at)}</span>
-                  </div>
-                  <dl>
-                    <dt>customer</dt>
-                    <dd>{stringPayload(log.payload, "customerId") || "-"}</dd>
-                    <dt>campaign</dt>
-                    <dd>{stringPayload(log.payload, "campaignId") || "-"}</dd>
-                    <dt>approval</dt>
-                    <dd>{auditApprovalStatus(log.payload)}</dd>
-                  </dl>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      </section>
       <section className="oauth-flow">
         {["ログイン", "OAuth許可", "分析と承認付き実行"].map((step, index) => (
           <div className="oauth-step" key={step}>
@@ -3270,52 +3056,6 @@ function statusLabel(status: string) {
     revoked: "解除済み",
   };
   return labels[status] ?? "未接続";
-}
-
-function googleWriteAuditMatches(log: AuditLogEntry, expected: { eventType: string; customerId: string; campaignId: string }) {
-  const payload = log.payload;
-  return (
-    log.event_type === expected.eventType &&
-    stringPayload(payload, "platform") === "google" &&
-    stringPayload(payload, "customerId") === expected.customerId &&
-    stringPayload(payload, "campaignId") === expected.campaignId &&
-    payload?.confirmed === true &&
-    stringPayload(payload, "approvalType") === "explicit_user_confirmation" &&
-    Boolean(stringPayload(payload, "approvedByUserId")) &&
-    timestampIsValid(stringPayload(payload, "approvedAt"))
-  );
-}
-
-function stringPayload(payload: Record<string, unknown> | undefined, key: string) {
-  const value = payload?.[key];
-  return typeof value === "string" || typeof value === "number" ? String(value) : "";
-}
-
-function auditApprovalStatus(payload: Record<string, unknown> | undefined) {
-  const approvedBy = stringPayload(payload, "approvedByUserId");
-  const approvedAt = stringPayload(payload, "approvedAt");
-  const complete =
-    payload?.confirmed === true &&
-    stringPayload(payload, "approvalType") === "explicit_user_confirmation" &&
-    approvedBy &&
-    timestampIsValid(approvedAt);
-  if (!complete) return "metadata未確認";
-  return `${approvedBy} / ${formatAuditTimestamp(approvedAt)}`;
-}
-
-function auditEventLabel(eventType: string) {
-  if (eventType === "google_ads.campaign_status_updated") return "Campaign status updated";
-  if (eventType === "google_ads.campaign_budget_updated") return "Campaign budget updated";
-  if (eventType.endsWith("_failed")) return "Write failed";
-  return eventType;
-}
-
-function formatAuditTimestamp(value: string | undefined) {
-  if (!value || !timestampIsValid(value)) return "時刻未確認";
-  return new Intl.DateTimeFormat("ja-JP", {
-    dateStyle: "short",
-    timeStyle: "short",
-  }).format(new Date(value));
 }
 
 function timestampIsValid(value: string) {
@@ -4186,10 +3926,6 @@ function severityChartData(data: DashboardResponse) {
 function formatMoney(value: number | null) {
   if (value === null) return "-";
   return `¥${Math.round(value).toLocaleString("ja-JP")}`;
-}
-
-function hasRollbackCondition(value: string) {
-  return /戻す|戻し|復元|ロールバック|rollback|restore|revert|元に/i.test(value);
 }
 
 function formatPercent(value: number | null, digits = 1) {

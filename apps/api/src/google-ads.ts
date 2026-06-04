@@ -132,10 +132,57 @@ export async function listAccessibleGoogleCustomers(auth: AuthContext) {
     throw new Error(`Google Ads customer list取得に失敗しました: ${redact(detail).slice(0, 240)}`);
   }
   const data = (await res.json()) as { resourceNames?: string[] };
-  return (data.resourceNames ?? []).map((resourceName) => ({
+  const accessibleCustomers = (data.resourceNames ?? []).map((resourceName) => ({
     resourceName,
     customerId: resourceName.replace("customers/", ""),
+    managerCustomerId: null as string | null,
+    descriptiveName: null as string | null,
+    manager: null as boolean | null,
   }));
+  const childCustomers = (await Promise.all(
+    accessibleCustomers.map((customer) => listGoogleCustomerClients(accessToken, customer.customerId)),
+  )).flat();
+  return dedupeGoogleCustomers([...accessibleCustomers, ...childCustomers]);
+}
+
+async function listGoogleCustomerClients(accessToken: string, managerCustomerId: string) {
+  const query = `
+    SELECT
+      customer_client.client_customer,
+      customer_client.descriptive_name,
+      customer_client.manager,
+      customer_client.hidden,
+      customer_client.status
+    FROM customer_client
+    WHERE customer_client.hidden = false
+  `;
+  try {
+    const payload = await postGoogleAdsSearch(accessToken, managerCustomerId, query, { omitLoginCustomerId: true });
+    return payload.flatMap((chunk) => chunk.results ?? []).map((item) => {
+      const resourceName = String(item.customerClient?.clientCustomer ?? item.customer_client?.client_customer ?? "");
+      return {
+        resourceName,
+        customerId: resourceName.replace("customers/", ""),
+        managerCustomerId,
+        descriptiveName: String(item.customerClient?.descriptiveName ?? item.customer_client?.descriptive_name ?? "") || null,
+        manager: Boolean(item.customerClient?.manager ?? item.customer_client?.manager ?? false),
+      };
+    }).filter((customer) => customer.customerId);
+  } catch {
+    return [];
+  }
+}
+
+function dedupeGoogleCustomers<T extends { customerId: string; managerCustomerId?: string | null }>(customers: T[]) {
+  const seen = new Set<string>();
+  const result: T[] = [];
+  for (const customer of customers) {
+    const key = `${customer.customerId}:${customer.managerCustomerId ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(customer);
+  }
+  return result;
 }
 
 export async function connectGoogleCustomer(auth: AuthContext, customerId: string) {
@@ -496,10 +543,10 @@ async function fetchCampaignBudgetResourceName(accessToken: string, customerId: 
   return String(budget);
 }
 
-async function postGoogleAdsSearch(accessToken: string, customerId: string, query: string) {
+async function postGoogleAdsSearch(accessToken: string, customerId: string, query: string, options: { omitLoginCustomerId?: boolean } = {}) {
   const res = await fetch(`https://googleads.googleapis.com/${googleAdsApiVersion}/customers/${customerId}/googleAds:searchStream`, {
     method: "POST",
-    headers: googleAdsHeaders(accessToken),
+    headers: googleAdsHeaders(accessToken, options),
     body: JSON.stringify({ query }),
   });
   if (!res.ok) {
@@ -562,12 +609,12 @@ function googleAccessTokenNeedsRefresh(expiresAt: string | null | undefined) {
   return expiresAtMs - Date.now() < 5 * 60 * 1000;
 }
 
-function googleAdsHeaders(accessToken: string) {
+function googleAdsHeaders(accessToken: string, options: { omitLoginCustomerId?: boolean } = {}) {
   return {
     Authorization: `Bearer ${accessToken}`,
     "developer-token": requiredEnv("GOOGLE_ADS_DEVELOPER_TOKEN"),
     "Content-Type": "application/json",
-    ...(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID ? { "login-customer-id": requireNormalizedCustomerId(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID) } : {}),
+    ...(!options.omitLoginCustomerId && process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID ? { "login-customer-id": requireNormalizedCustomerId(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID) } : {}),
   };
 }
 
