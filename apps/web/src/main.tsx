@@ -963,21 +963,27 @@ function App() {
     const controller = new AbortController();
     setDashboardLoading(true);
     setDashboardError("");
+    setDashboardData(null);
     fetch(
       `${apiBaseUrl}/dashboard?workspaceId=${activePayload.workspaceId}&range=${range}&platform=${platform}`,
       { headers: authHeaders(), signal: controller.signal },
     )
       .then(async (res) => {
         const data = await res.json();
+        if (!res.ok && data?.code === "ad_data_required") {
+          setDashboardData(null);
+          setUsingDemoData(false);
+          return;
+        }
         if (!res.ok) throw new Error(data?.error ?? "ダッシュボードデータの取得に失敗しました。");
         setDashboardData(data as DashboardResponse);
         setUsingDemoData(false);
       })
       .catch((caught) => {
         if (caught instanceof DOMException && caught.name === "AbortError") return;
-        setDashboardData(filterDemoDashboardData(range, platform));
-        setUsingDemoData(true);
-        setDashboardError("");
+        setDashboardData(null);
+        setUsingDemoData(false);
+        setDashboardError(caught instanceof Error ? caught.message : "ダッシュボードデータの取得に失敗しました。");
       })
       .finally(() => setDashboardLoading(false));
     return () => controller.abort();
@@ -1278,6 +1284,8 @@ function App() {
               setSelectedArticleId(null);
               setView("columns");
             }}
+            onOpenSetup={() => setView("setup")}
+            onOpenConnections={() => setView("connections")}
           />
         )}
         {view === "setup" && (
@@ -2330,6 +2338,8 @@ function DashboardPage({
   onPlatformChange,
   onOpenAi,
   onOpenColumns,
+  onOpenSetup,
+  onOpenConnections,
 }: {
   data: DashboardResponse | null;
   loading: boolean;
@@ -2342,15 +2352,20 @@ function DashboardPage({
   onPlatformChange: (platform: PlatformFilter) => void;
   onOpenAi: () => void;
   onOpenColumns: (tags: string[]) => void;
+  onOpenSetup: () => void;
+  onOpenConnections: () => void;
 }) {
+  const needsAdDataSetup = !loading && !data && !error;
+
   return (
     <div>
       <PageHeader title="ダッシュボード" description="AIに相談する前に、いま見るべきKPI、異常、優先キャンペーンを確認します。">
         <FilterControls range={range} platform={platform} onRangeChange={onRangeChange} onPlatformChange={onPlatformChange} />
       </PageHeader>
-      {usingDemoData && <MockDataBanner location="Dashboard" />}
       <StatusLine loading={loading} error={error} />
-      {data ? (
+      {needsAdDataSetup ? (
+        <DashboardDataGate onOpenSetup={onOpenSetup} onOpenConnections={onOpenConnections} />
+      ) : data && !usingDemoData ? (
         <>
           <KpiCards summary={data.summary} changes={data.changes} />
 
@@ -2421,6 +2436,39 @@ function DashboardPage({
       ) : (
         !loading && <EmptyState message="表示できる広告データがありません。" />
       )}
+    </div>
+  );
+}
+
+function DashboardDataGate({
+  onOpenSetup,
+  onOpenConnections,
+}: {
+  onOpenSetup: () => void;
+  onOpenConnections: () => void;
+}) {
+  return (
+    <div className="dashboard-data-gate-backdrop" role="presentation">
+      <section className="dashboard-data-gate-modal" role="dialog" aria-modal="true" aria-labelledby="dashboard-data-gate-title">
+        <p className="eyebrow">
+          <InlineIcon name="lock" />
+          data required
+        </p>
+        <h2 id="dashboard-data-gate-title">広告データ連携後にダッシュボードを表示します</h2>
+        <p>
+          Google Adsアカウントを接続して同期すると、KPI、キャンペーン、異常検知、AI相談の文脈が実データに切り替わります。
+        </p>
+        <div className="dashboard-data-gate-actions">
+          <button type="button" onClick={onOpenConnections}>
+            <InlineIcon name="plug" />
+            データ連携へ
+          </button>
+          <button type="button" className="secondary-button" onClick={onOpenSetup}>
+            <InlineIcon name="setup" />
+            広告準備へ
+          </button>
+        </div>
+      </section>
     </div>
   );
 }

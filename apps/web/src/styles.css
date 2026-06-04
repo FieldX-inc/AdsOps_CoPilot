@@ -2230,6 +2230,55 @@ th {
   font-size: 14px;
 }
 
+.dashboard-data-gate-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(247 251 245 / 0.72);
+  backdrop-filter: blur(4px);
+}
+
+.dashboard-data-gate-modal {
+  width: min(520px, 100%);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow-strong);
+  padding: 28px;
+}
+
+.dashboard-data-gate-modal h2 {
+  margin: 8px 0 12px;
+  color: var(--accent-ink);
+  font-size: 24px;
+  line-height: 1.35;
+}
+
+.dashboard-data-gate-modal p:not(.eyebrow) {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.8;
+}
+
+.dashboard-data-gate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 22px;
+}
+
+.dashboard-data-gate-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  border-radius: var(--radius-pill);
+  padding: 0 18px;
+}
+
 .badge {
   display: inline-flex;
   align-items: center;

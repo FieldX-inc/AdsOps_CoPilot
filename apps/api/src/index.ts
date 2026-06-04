@@ -576,6 +576,11 @@ app.get("/dashboard", async (c) => {
       if (billingGate) return billingGate;
       const data = await getDashboardDataFromDb(workspaceId, range, platform);
       if (data) return c.json(data);
+      return c.json({
+        error: "Google Ads連携と広告データ同期が必要です。",
+        code: "ad_data_required",
+        workspaceId,
+      }, 404);
     } catch (error) {
       if (isStrictProductionMode()) return handleAuthError(c, error);
     }
