@@ -1,0 +1,28 @@
+{
+  "name": "openai_runtime_orchestration",
+  "description": "Executable OpenAI Agents SDK adapter cases for manager-style orchestration.",
+  "status": "executable",
+  "executable": true,
+  "runner": "openai_orchestration",
+  "scenarios": [
+    {
+      "id": "openai_diagnosis_uses_orchestrator_tools_and_safe_tracing",
+      "user_message": "CPAが悪化している原因を分析して",
+      "context": {
+        "routePlan": {
+          "route": "diagnosis",
+          "requiresMetricsContext": true,
+          "responseContract": "diagnosis_with_evidence"
+        }
+      },
+      "fake_model_output": "結論:\nOpenAI Agents SDKで生成した回答です。\n人間向け作業手順:\n1. 予算を下げる\n自信度:\nMedium",
+      "expected": {
+        "mode": "openai_agents",
+        "trace_include_sensitive_data": false,
+        "tools": ["setup_advisor", "performance_analyst", "budget_learning", "media_spec", "action_plan", "qa_review"],
+        "must_include": ["openai_agents", "ad_ops_advisor_orchestrator", "予算引き下げ候補"],
+        "must_not_include": ["予算を下げる", "Bearer ", "sk-"]
+      }
+    }
+  ]
+}

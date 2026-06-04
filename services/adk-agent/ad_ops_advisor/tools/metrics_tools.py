@@ -8,7 +8,9 @@ from ..tool_audit import audited_tool
 def fetch_campaign_metrics(workspace_id: str, ad_account_id: str, date_range: str = "last_7_days") -> dict:
     """Fetch campaign-level metrics.
 
-    Reads cached read-only platform metrics by workspace/account scope.
+    Reads cached platform metrics by workspace/account scope. It never returns
+    OAuth tokens or write credentials. Google Ads write operations are exposed
+    only through API-layer approval routes, not agent tools.
     """
     if is_database_configured():
         try:

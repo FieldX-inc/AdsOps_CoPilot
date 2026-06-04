@@ -275,6 +275,29 @@ class PostgresRepository:
             connection.commit()
             return _json_safe(dict(row))
 
+    def ensure_agent_thread(
+        self,
+        workspace_id: str,
+        user_id: str,
+        thread_id: str,
+        title: str = "New conversation",
+    ) -> dict[str, Any]:
+        require_scope(workspace_id, user_id)
+        sql = """
+            insert into agent_threads (id, workspace_id, user_id, title)
+            values (%s, %s, %s, %s)
+            on conflict (id) do update
+              set updated_at = now()
+            returning id, title, updated_at
+        """
+        with get_connection() as connection:
+            row = connection.execute(
+                sql,
+                (thread_id, workspace_id, user_id, title or "New conversation"),
+            ).fetchone()
+            connection.commit()
+            return _json_safe(dict(row))
+
     def record_tool_call(
         self,
         workspace_id: str,

@@ -1,6 +1,8 @@
 type Platform = "google" | "meta" | "yahoo";
 type PlatformFilter = Platform | "all";
 type Confidence = "high" | "medium" | "low";
+type AdvisorMode = "beginner" | "experienced";
+type AdvisorEntry = "setup_advisor_beginner" | "performance_analyst_experienced";
 
 import {
   campaignProfiles,
@@ -20,6 +22,8 @@ export type ChatRequest = {
     comparisonRange?: string;
     range?: number;
     platform?: PlatformFilter;
+    advisorMode?: AdvisorMode | string;
+    agentEntry?: AdvisorEntry | string;
   };
 };
 
@@ -69,8 +73,8 @@ export type ConnectionStatusResponse = {
   workspaceId: string;
   mode: "mock";
   policy: {
-    access: "read-only";
-    mediaWriteEnabled: false;
+    access: "read-write-after-human-approval";
+    mediaWriteEnabled: boolean;
     note: string;
   };
   accounts: DashboardResponse["adAccounts"];
@@ -337,12 +341,12 @@ const helpArticles: HelpArticle[] = [
       "広告媒体APIのデータは当日分が遅れて反映されることがあります。午前中のCVが少ないからといって、すぐに広告の問題と決めつけないようにします。ダッシュボードでは最終取得時刻、媒体別の遅延、前日までの確定傾向を合わせて確認します。",
   },
   {
-    id: "oauth-read-only",
-    title: "OAuth連携はread-only権限から始める",
+    id: "oauth-approval-write",
+    title: "OAuth連携と承認付きwriteを分ける",
     difficulty: "初級",
-    tags: ["oauth", "read-only", "security"],
+    tags: ["oauth", "approval", "security"],
     body:
-      "広告データ連携では、まずread-only権限で費用、クリック、CV、キャンペーン情報を取得できる状態を作ります。MVPでは予算変更や停止などの媒体変更はAPIから実行せず、AIは分析と人間向け手順の作成に絞ります。権限範囲を小さく保つことで、導入時の心理的安全性も高まります。",
+      "広告データ連携では、OAuthで費用、クリック、CV、キャンペーン情報を取得します。Google Adsの予算変更や停止は、AIが勝手に実行せず、対象ID、理由、戻し条件を確認したうえで承認付きAPIだけが実行します。権限と承認を分けることで、導入時の安全性を保ちます。",
   },
   {
     id: "token-secret-handling",
@@ -409,12 +413,12 @@ const helpArticles: HelpArticle[] = [
       "AIが提案した作業を人間が実施したら、日付、対象、変更内容、理由、期待する変化を記録します。翌日以降のCPA、CVR、CPC、CV数を見るときに、どの変更が効いたのかを追いやすくなります。記録がないと、成功も失敗も再現しにくくなります。",
   },
   {
-    id: "read-only-action-plan",
-    title: "read-only運用でのAI提案の使い方",
+    id: "approval-gated-action-plan",
+    title: "承認付きwrite運用でのAI提案の使い方",
     difficulty: "初級",
-    tags: ["read-only", "human-review", "action-plan"],
+    tags: ["approval", "human-review", "action-plan"],
     body:
-      "read-only運用では、AIは媒体を直接変更せず、原因仮説と作業手順を整理します。担当者は管理画面で対象を確認し、必要なら除外、予算調整、広告差し替えを人間の判断で実施します。AIの価値は自動実行ではなく、見る順番と判断材料を短時間で揃えることにあります。",
+      "承認付きwrite運用では、AIは原因仮説、変更候補、戻し条件、観察計画を整理します。担当者は対象を確認し、必要ならGoogle Adsの予算変更や停止を承認付きAPIまたは管理画面で実施します。AIの価値は自動実行ではなく、見る順番と判断材料を短時間で揃えることにあります。",
   },
   {
     id: "ga4-crm-reconciliation",
@@ -499,9 +503,9 @@ export function getConnectionStatus(
     workspaceId,
     mode: "mock",
     policy: {
-      access: "read-only",
+      access: "read-write-after-human-approval",
       mediaWriteEnabled: false,
-      note: "MVPでは広告媒体APIへの変更操作は行わず、人間が管理画面で実行する手順だけを返します。",
+      note: "Google Ads writeは、対象と理由を確認したうえで承認付きAPIだけが実行します。AI単体では媒体変更しません。",
     },
     accounts,
     nextConnectors: [
@@ -566,6 +570,7 @@ export function getLatestAdData(workspaceId: string, range: number, platform: Pl
 }
 
 export function createMockChatResponse(request: ChatRequest, latestAdData: LatestAdData): ChatResponse {
+  const advisorMode = normalizeAdvisorMode(request.context?.advisorMode);
   const primaryCampaign = latestAdData.campaigns[0];
   const cpaChange = signedPercent(latestAdData.changes.cpa);
   const cvrChange = signedPercent(latestAdData.changes.cvr);
@@ -574,30 +579,55 @@ export function createMockChatResponse(request: ChatRequest, latestAdData: Lates
   const targetCampaign = primaryCampaign?.campaign ?? "主要キャンペーン";
   const confidence: Confidence = latestAdData.anomalies.some((anomaly) => anomaly.severity === "High") ? "high" : "medium";
 
+  const beginnerContent = [
+    `結論: ${platformLabel}の直近${latestAdData.range}日は、${targetCampaign}を最初に見てください。CPAは前期間比 ${cpaChange} です。CPAは「1件の成果を取るためにかかった広告費」です。`,
+    "",
+    `根拠: CVRは ${cvrChange}、CPCは ${cpcChange}。CVRは「クリックした人が成果につながった割合」、CPCは「1クリックあたりの費用」です。費用は¥${latestAdData.current.totals.cost.toLocaleString("ja-JP")}、CVは${latestAdData.current.totals.conversions}件です。`,
+    "",
+    "原因仮説: クリックは取れていても成果につながりにくくなっている、またはクリック単価が上がっている可能性があります。まずは広告の入口（検索語句・配信面・訴求）と、クリック後のページが合っているかを分けて見ます。",
+    "",
+    "推奨アクション: いきなり広告を止めず、悪化している場所を1つずつ確認してください。除外キーワード、配信面、クリエイティブ変更は候補として整理し、人間が管理画面で判断します。",
+    "",
+    "人間向け作業手順:",
+    "1. 対象キャンペーンを開き、直近期間と前期間のCPA/CVR/CPC/CTRを見る。",
+    "2. CVなしで費用が大きい検索語句、広告、配信面をメモする。",
+    "3. その候補をすぐ変更せず、なぜ悪そうかを1行で書く。",
+    "4. 担当者が確認して、必要なものだけ管理画面で手動操作する。",
+    "5. 翌日から3日間、CPAとCV数がどう変わったかを見る。",
+    "",
+    "実施前チェック: 計測タグ、LP変更、セールや在庫、媒体の学習状態に問題がないか確認してください。",
+    "",
+    "リスク: 急に止めると、将来CVする可能性がある流入まで止めることがあります。まずは小さく確認してください。",
+    "",
+    `実施後の観察: CPA、CVR、CPC、CV数を同じ期間幅で比較します。自信度: ${confidence}`,
+  ];
+  const experiencedContent = [
+    `結論: ${platformLabel} / 直近${latestAdData.range}日は ${targetCampaign} を優先診断対象にします。CPAは前期間比 ${cpaChange}。CVR悪化 ${cvrChange} とCPC変動 ${cpcChange} の寄与を先に分解してください。`,
+    "",
+    `根拠: cost=¥${latestAdData.current.totals.cost.toLocaleString("ja-JP")} / CV=${latestAdData.current.totals.conversions}。CVR ${cvrChange}、CPC ${cpcChange}。対象は ${latestAdData.generatedAt} 生成のread-only集計です。`,
+    "",
+    "原因仮説: 検索語句・配信面の拡張、オーディエンス品質低下、creative fatigue、LP/offer mismatch のいずれか。まずCVなし高costセグメントと、CVR低下セグメントを分けて見ます。",
+    "",
+    "推奨アクション: 除外/停止/予算変更を即実行せず、候補リストとして検索語句、配信面、広告単位、LP差分を並べて、影響額と戻し条件を添えてレビューしてください。",
+    "",
+    "人間向け作業手順:",
+    "1. campaign -> ad group/ad set -> ad/search term/placement の順にCPA, CVR, CPC, CTR, cost, CVを期間比較する。",
+    "2. cost上位かつCVなし/CPA高騰のセグメントを候補化する。",
+    "3. CVR低下が主因ならLP/offer/creative、CPC上昇が主因ならauction/query/audienceを確認する。",
+    "4. write操作は担当者レビュー後に管理画面で手動実行し、変更理由と戻し条件を記録する。",
+    "5. 24-72hでCPA/CV数/CVR/CPCを再評価する。",
+    "",
+    "実施前チェック: attribution window、CV定義、tag欠損、LP deploy、在庫/価格/キャンペーン外要因を確認してください。",
+    "",
+    "リスク: CV母数が小さい場合は過剰反応になります。cost impactと学習影響を見て、変更範囲を限定してください。",
+    "",
+    `実施後の観察: CPA, CV, CVR, CPC, spend paceを同一期間幅で比較。自信度: ${confidence}`,
+  ];
+
   return {
     message: {
       role: "assistant",
-      content: [
-        `結論: ${platformLabel}の直近${latestAdData.range}日は、${targetCampaign}を優先確認してください。CPAは前期間比 ${cpaChange} です。`,
-        "",
-        `根拠: CVRは ${cvrChange}、CPCは ${cpcChange}。費用は¥${latestAdData.current.totals.cost.toLocaleString("ja-JP")}、CVは${latestAdData.current.totals.conversions}件です。`,
-        "",
-        "原因仮説: 流入品質の低下、検索語句や配信面の広がり、Meta系では訴求疲弊が同時に起きている可能性があります。",
-        "",
-        "推奨アクション: まず管理画面でレポートを確認し、悪化要因を切り分けてから除外キーワード候補、配信面、クリエイティブ差し替え案を人間が判断してください。",
-        "",
-        "人間向け作業手順:",
-        "1. 対象キャンペーンを開き、直近期間と前期間のCPA/CVR/CPC/CTRを比較する。",
-        "2. CVなしで費用が大きい検索語句、広告、配信面を抽出する。",
-        "3. 除外・停止・予算変更はこのAPIから実行せず、管理画面でレビュー後に担当者が操作する。",
-        "4. 実施内容と理由をメモし、翌日から3日間はCPAとCV数を観察する。",
-        "",
-        "実施前チェック: CV計測の欠損、LP変更、セールや在庫影響、媒体側の学習状態を確認してください。",
-        "",
-        "リスク: 除外や停止を急ぐと、将来CVする可能性がある流入まで止める恐れがあります。",
-        "",
-        `実施後の観察: CPA、CVR、CPC、CV数を同じ期間幅で比較します。自信度: ${confidence}`,
-      ].join("\n"),
+      content: (advisorMode === "experienced" ? experiencedContent : beginnerContent).join("\n"),
     },
     recommendation: {
       title: `${targetCampaign}のCPA悪化要因を人間が確認する`,
@@ -615,6 +645,10 @@ export function createMockChatResponse(request: ChatRequest, latestAdData: Lates
       status: "suggested",
     },
   };
+}
+
+function normalizeAdvisorMode(value: unknown): AdvisorMode {
+  return value === "experienced" ? "experienced" : "beginner";
 }
 
 export function listChatThreads(workspaceId: string, userId: string): ChatThreadsResponse {

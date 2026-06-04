@@ -1,21 +1,30 @@
 [project]
 name = "adops-advisor-agent"
 version = "0.1.0"
-description = "ADK-based AI advertising advisor service."
+description = "OpenAI Agents SDK-based AI advertising advisor service."
 requires-python = ">=3.11"
 dependencies = [
-  "google-adk",
+  "openai-agents",
   "psycopg[binary]>=3.2",
   "pydantic>=2",
 ]
 
 [project.optional-dependencies]
+gemini = [
+  "google-adk",
+]
 dev = [
   "pytest>=8",
 ]
 
 [tool.setuptools.packages.find]
 include = ["ad_ops_advisor*"]
+
+[tool.setuptools.package-data]
+ad_ops_advisor = [
+  "prompts/*.md",
+  "evals/*.json",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

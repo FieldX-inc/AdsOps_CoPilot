@@ -1,0 +1,51 @@
+{
+  "name": "prompt_context_safety",
+  "description": "Executable prompt-building cases for feedback reflection and secret redaction.",
+  "status": "executable",
+  "executable": true,
+  "runner": "prompt_context",
+  "scenarios": [
+    {
+      "id": "operator_feedback_is_available_to_next_answer",
+      "user_message": "次の改善案を作って。前回の結果も踏まえて",
+      "context": {
+        "operatorFeedbackSummary": [
+          {
+            "outcome": "did_not_work",
+            "comment": "前回のP-MAX予算寄せ案はCV数が減ったので避けたい",
+            "recommendationId": "rec-previous"
+          },
+          {
+            "outcome": "worked",
+            "comment": "検索語句の確認手順は担当者が実行しやすかった",
+            "humanTaskId": "task-search-terms"
+          }
+        ]
+      },
+      "expected": {
+        "must_include": ["operatorFeedbackSummary", "did_not_work", "P-MAX予算寄せ案", "worked", "検索語句"],
+        "must_not_include": ["refresh_token", "access_token", "client_secret"]
+      }
+    },
+    {
+      "id": "secret_feedback_comment_is_redacted_before_prompt",
+      "user_message": "前回のfeedbackを踏まえて診断して",
+      "context": {
+        "operatorFeedbackSummary": [
+          {
+            "outcome": "unclear",
+            "comment": "refresh_token=raw-refresh-token-value-forbidden が混ざったコメント"
+          }
+        ],
+        "adAccount": {
+          "name": "Google Ads Demo",
+          "access_token_encrypted": "encrypted-token-value"
+        }
+      },
+      "expected": {
+        "must_include": ["operatorFeedbackSummary", "[REDACTED]", "Google Ads Demo"],
+        "must_not_include": ["raw-refresh-token-value-forbidden", "access_token_encrypted", "encrypted-token-value", "refresh_token"]
+      }
+    }
+  ]
+}

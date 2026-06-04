@@ -6,8 +6,10 @@
 
 - 1会社 = 1 workspace
 - Supabase Auth user
-- Google / Meta / Yahoo のread-only広告アカウント連携
-- ADK chat
+- Google Ads のread/write広告アカウント連携
+- Meta / Yahoo のread広告アカウント連携は後続
+- OpenAI agent chat
+- Stripe billing
 - user memory
 - recommendation
 - human task
@@ -53,6 +55,10 @@ Supabase Auth user と workspace の紐付け。
 
 tokenは必ず暗号化保存する。plaintext tokenを保存してはいけない。
 
+Google Ads OAuth callback encrypts provider tokens before storage and writes `google_ads.oauth_connected` to `audit_logs` with non-secret metadata only: platform, scopes, expiresAt, and `refreshIssued` as a boolean. Google Ads read/sync/write routes refresh expired access tokens with `refresh_token_encrypted` before provider calls, then store the new encrypted access token and `expires_at`. Refresh success writes `google_ads.oauth_token_refreshed` to `audit_logs` with non-secret metadata only. If a connected row has an expired access token but no refresh token, the user must reconnect OAuth.
+
+Google Ads OAuth token exchange, customer list, metrics, query, and write provider errors must redact `access_token`, `refresh_token`, `client_secret`, `Authorization: Bearer`, and `developer-token` values before they are returned by the API or stored in audit payloads.
+
 ### `ad_accounts`
 
 連携された広告アカウント。
@@ -91,11 +97,44 @@ AI提案から派生する、人間が実行する作業task。
 
 ### `agent_tool_calls`
 
-ADK agentがどのtoolを呼んだかを記録する。
+Agentがどのtoolを呼んだかを記録する。
 
 ### `audit_logs`
 
 監査ログ。
+
+Google Ads write実行時は、対象 `customerId` が同じworkspaceの `ad_accounts` に接続済みであることをprovider mutate前に確認する。未接続customerにはOAuth token取得やGoogle Ads mutateを行わず `400` を返す。`GOOGLE_ADS_WRITE_ENABLED=true` が未設定の環境では `503` を返す。実行時は、`google_ads.campaign_status_updated` / `google_ads.campaign_budget_updated` のようなevent_typeで、workspace_id、user_id、対象customer/campaign、変更内容、人間が入力した `approvalNote`（変更理由と戻し条件）、`confirmed=true`、`approvalType=explicit_user_confirmation`、`approvedByUserId`、`approvedAt` を記録する。`approvalNote` にsecret風の値、`Authorization: Bearer ...`、`client_secret=...`、`access_token=...` などが混入した場合は、監査payloadに保存する前に `[REDACTED]` へ置換する。provider mutateまたはbudget lookupが失敗した場合も `google_ads.campaign_status_update_failed` / `google_ads.campaign_budget_update_failed` を同じ承認metadata付きで記録し、承認済みwrite試行の対象と失敗stageを追跡できるようにする。期限切れaccess tokenを更新した場合は `google_ads.oauth_token_refreshed` も記録する。OAuth token、developer token、Authorization headerはpayloadに含めない。
+
+### `billing_customers`
+
+workspace と Stripe customer の紐付け。
+
+主なfield:
+
+- `workspace_id`
+- `user_id`
+- `stripe_customer_id`
+
+Checkout session作成時は、既存 `billing_customers.stripe_customer_id` があるworkspaceではStripe `customer` を指定して再利用し、`customer_email` は送らない。初回だけ `customer_email` を使い、webhookでworkspaceとcustomerを紐付ける。
+
+### `billing_subscriptions`
+
+Stripe subscription の状態をworkspace単位でmirrorする。
+
+主なfield:
+
+- `workspace_id`
+- `stripe_customer_id`
+- `stripe_subscription_id`
+- `stripe_price_id`
+- `status`
+- `current_period_end`
+- `cancel_at_period_end`
+- `raw`
+
+`stripe_subscription_id` はnullでない場合にpartial unique indexを持ち、Webhook再送や誤紐付けで同じsubscriptionを複数workspaceへmirrorしない。
+
+Stripe webhook は `metadata.workspace_id` と任意の `metadata.user_id` がUUID形式であることをDB書き込み前に検査する。Checkout webhookで `metadata.workspace_id` と `client_reference_id` の両方が存在する場合は一致を必須にし、不一致ならbilling rowを変更せず `400` で拒否する。`stripe_customer_id` が既に別workspaceの `billing_customers` に紐付いている場合も、metadata上のworkspaceへupsertせず `400` で拒否する。Checkoutやsubscription metadataを信頼する前に、customer/workspaceの既存対応を検査して誤紐付けを防ぐ。
 
 ## 3. Scope Rules
 
@@ -105,7 +144,7 @@ ADK agentがどのtoolを呼んだかを記録する。
 - clientからtoken columnを読ませない
 - Supabase Auth provider はMVPでは email + Google を前提にする
 - client sessionでは `workspace_members` によるmembership確認をRLSで強制する
-- ADK / OAuth callback / metrics sync などserver-side処理でも、DB操作前に `workspace_id` と `user_id` のscopeを検証する
+- Agent / OAuth callback / metrics sync / media write / billing などserver-side処理でも、DB操作前に `workspace_id` と `user_id` のscopeを検証する
 
 ## 4. RLS / Membership
 
@@ -121,7 +160,7 @@ ADK agentがどのtoolを呼んだかを記録する。
 - `agent_tool_calls` と `audit_logs` は owner / admin のreadに絞る
 - `ad_platform_connections` はtoken columnを含むため、authenticated clientにはtoken columnのselect権限を付けない。UIは `ad_platform_connection_statuses` view で連携状態だけ読む
 
-server-side service role はRLSをbypassできるため、OAuth callback、token refresh、metrics sync、ADK repositoryで使う場合も application layer でworkspace scopeを必ず検証する。
+server-side service role はRLSをbypassできるため、OAuth callback、token refresh、metrics sync、agent repositoryで使う場合も application layer でworkspace scopeを必ず検証する。
 
 運用注意:
 
@@ -161,7 +200,11 @@ OAuth tokenはDB関数ではなくapplication layerで envelope encryption し�
 - revoke: provider revoke後にtoken columnをnull化し、`status = 'revoked'` にする
 - refresh失敗: `status = 'expired'` または `error` にし、`last_error` にはsecretを含めない
 
-OAuth token / refresh token / API key / Supabase service role key は、AI prompt、ADK tool output、agent memory、application logに出してはいけない。`SUPABASE_SERVICE_ROLE_KEY` は通常のagent DBアクセスには使わず、必要なserver-side管理処理に限定する。
+OAuth token / refresh token / API key / Supabase service role key は、AI prompt、agent tool output、agent memory、application logに出してはいけない。`SUPABASE_SERVICE_ROLE_KEY` は通常のagent DBアクセスには使わず、必要なserver-side管理処理に限定する。
+
+Stripe secret key、webhook secret、checkout session raw secret、Google Ads developer token も同じくbrowser、AI prompt、agent memory、application logに出してはいけない。
+
+Stripe Checkout / Billing Portal provider errors must redact `sk_*`, `pk_*`, `rk_*`, `whsec_*`, `Authorization: Bearer`, and hosted Checkout/Portal URLs before API responses or audit payloads are produced.
 
 production前に詳細化するもの。
 

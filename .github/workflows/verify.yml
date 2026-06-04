@@ -1,0 +1,54 @@
+name: Verify
+
+on:
+  push:
+    branches:
+      - main
+      - "codex-*"
+      - "codex/**"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    name: Env, migrations, build, and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Install Agent Service dependencies
+        run: python -m pip install -e "services/adk-agent[dev]"
+
+      - name: Verify
+        env:
+          APP_ENV: local
+          USE_AGENT_SERVICE: "false"
+          ADOPS_AGENT_RUNTIME: mock
+        run: npm run verify
+
+      - name: Production goal audit
+        run: npm run check:goal
+
+      - name: Build API Docker image
+        run: docker build -f apps/api/Dockerfile -t adops-api:verify .
+
+      - name: Build Agent Docker image
+        run: docker build -f services/adk-agent/Dockerfile -t adops-agent:verify .

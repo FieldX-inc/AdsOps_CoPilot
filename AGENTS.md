@@ -6,7 +6,7 @@
 
 AdOps Advisor は、human-in-the-loop 前提の広告運用支援プロダクトです。
 
-Google Ads / Meta Ads / Yahoo Ads のAPIから read-only でデータを取得し、AIが分析・提案・人間向け作業手順を作ります。MVPでは媒体設定を直接変更しません。
+Google Ads から read/write API連携を開始し、AIが分析・提案・承認付きwrite候補・人間向け作業手順を作ります。AIが単独で媒体設定を変更してはいけません。実行は認証済みユーザーの明示承認つきAPI routeだけに限定します。Meta Ads / Yahoo Ads は後続でread連携から拡張します。
 
 ## 2. 現在の設計方針
 
@@ -15,7 +15,7 @@ Google Ads / Meta Ads / Yahoo Ads のAPIから read-only でデータを取得�
 - 1 workspace に複数広告アカウントを紐付け可能
 - 長期記憶: ログインユーザー単位
 - 会社・商材・広告アカウント文脈: workspace単位
-- AI runtime: Google Agent Development Kit（ADK）
+- AI runtime: OpenAI Agents SDK
 - Dashboard: AI Advisorの補助
 - 主データソース: 広告媒体API
 - 旧Google Sheets前提のMVPは廃止済み
@@ -31,7 +31,7 @@ Cloudflare Pages / Workers
   - OAuth callback
 
 Google Cloud Run
-  - ADK Agent Service
+  - OpenAI Agent Service
   - Python依存のagent処理
   - 重めの分析処理
 
@@ -41,12 +41,12 @@ Supabase
   - RLS
 ```
 
-Cloudflareにすべて寄せる判断はまだしません。ADK本体はPython/Google SDK/処理時間/運用監視の都合で Cloud Run の方が扱いやすい可能性が高いです。
+Cloudflareにすべて寄せる判断はまだしません。OpenAI Agent Service本体はPython SDK/処理時間/運用監視の都合で Cloud Run の方が扱いやすい可能性が高いです。
 
 ## 4. リポジトリ構成
 
 ```txt
-services/adk-agent/        # ADK Python agent service
+services/adk-agent/        # OpenAI Python agent service
 supabase/migrations/       # DB schema
 docs/                      # 設計メモ
 packages/shared-schemas/   # 将来の共通schema
@@ -69,7 +69,7 @@ packages/shared-schemas/   # 将来の共通schema
 - 小さい差分で進める
 - 仕様が曖昧なら先にdocs/requirementsを更新する
 - human-in-the-loop制約を守る
-- MVP中は媒体write toolを作らない
+- 媒体writeはGoogle Ads campaign status / budgetの承認付きAPI routeに限定する
 - AIに渡す文脈からsecret/tokenを除外する
 
 ## 7. コマンド実行ルール
@@ -97,7 +97,7 @@ packages/shared-schemas/   # 将来の共通schema
 - DB drop
 - production data削除
 - secret commit
-- 広告媒体write/execution tool追加
+- Google Ads campaign status / budget 以外の広告媒体write/execution tool追加
 
 ## 8. セキュリティルール
 
@@ -108,7 +108,7 @@ packages/shared-schemas/   # 将来の共通schema
 - data accessではworkspace scopeを必ず検証する
 - agent memoryにsecretや顧客リストを保存しない
 
-## 9. ADKルール
+## 9. OpenAI Agentルール
 
 初期agentは以下に絞る。
 
@@ -134,11 +134,11 @@ packages/shared-schemas/   # 将来の共通schema
 
 禁止tool:
 
-- budget変更
-- campaign停止
 - bid変更
 - ad作成
 - platform mutation
+
+Google Ads の budget変更 / campaign停止・有効化は、agent toolではなくAPI layerで実行する。条件は、認証済みユーザー、workspace scope確認、`confirmed=true`、`GOOGLE_ADS_WRITE_ENABLED=true`、監査ログ記録。
 
 ## 10. AI回答ルール
 
@@ -193,7 +193,8 @@ codex-<topic>
 
 1. requirements / architecture docsを固める
 2. DB schema方針を固める
-3. ADK service skeletonを育てる
+3. OpenAI Agent Service skeletonを育てる
 4. Supabase Auth / workspace基盤
-5. Google / Meta / Yahoo read-only OAuth
-6. 最初に価値が出るADK chat loop
+5. Google Ads read/write OAuth
+6. Stripe決済
+7. 最初に価値が出るOpenAI chat loop

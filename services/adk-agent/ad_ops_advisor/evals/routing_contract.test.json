@@ -1,0 +1,52 @@
+{
+  "name": "routing_contract",
+  "description": "Executable routePlan cases for intent, metrics prefetch, and specialist-agent routing.",
+  "status": "executable",
+  "executable": true,
+  "runner": "route_plan",
+  "scenarios": [
+    {
+      "id": "greeting_uses_light_router_without_metrics",
+      "user_message": "こんにちは、何ができますか？",
+      "expected": {
+        "route": "greeting_casual",
+        "requires_metrics_context": false,
+        "prefers_short_response": true,
+        "target_agents": ["router_agent"],
+        "response_contract": "light_assistant_response"
+      }
+    },
+    {
+      "id": "diagnosis_uses_context_analysis_action_and_qa",
+      "user_message": "CPAが悪化している原因を分析して、次の確認場所も教えて",
+      "expected": {
+        "route": "diagnosis",
+        "requires_metrics_context": true,
+        "target_agents": ["context_agent", "performance_analyst_agent", "action_plan_agent", "qa_agent"],
+        "response_contract": "diagnosis_with_evidence",
+        "context_contract_includes": ["campaignAdGroupMetricsSummary", "operatorFeedbackSummary"]
+      }
+    },
+    {
+      "id": "media_spec_does_not_prefetch_metrics",
+      "user_message": "Google広告のレスポンシブ検索広告の見出し文字数を教えて",
+      "expected": {
+        "route": "media_spec",
+        "requires_metrics_context": false,
+        "prefers_short_response": true,
+        "target_agents": ["media_spec_agent", "qa_agent"],
+        "response_contract": "media_spec_confirmation"
+      }
+    },
+    {
+      "id": "budget_learning_uses_budget_specialist",
+      "user_message": "予算が使いきれない理由と学習状態への影響を見て",
+      "expected": {
+        "route": "budget_delivery_learning",
+        "requires_metrics_context": true,
+        "target_agents": ["context_agent", "budget_learning_agent", "action_plan_agent", "qa_agent"],
+        "response_contract": "budget_delivery_learning_diagnosis"
+      }
+    }
+  ]
+}

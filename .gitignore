@@ -6,6 +6,10 @@ dist
 **/dist
 .env.local
 .env
+.env.staging.*
+.env.production.*
+.env.*.local
+supabase/.temp/
 .venv
 __pycache__
 *.pyc
