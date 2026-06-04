@@ -1166,8 +1166,9 @@ export async function serviceFetch<T>(config: SupabaseConfig, path: string, init
     const detail = await res.text();
     throw new AuthError(`Supabase request failed: ${detail.slice(0, 180)}`, res.status === 403 ? 403 : 500);
   }
-  if (res.status === 204) return undefined as T;
-  return (await res.json()) as T;
+  const text = await res.text();
+  if (!text) return undefined as T;
+  return JSON.parse(text) as T;
 }
 
 async function touchAgentThread(workspaceId: string, threadId: string) {
