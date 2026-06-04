@@ -2158,7 +2158,7 @@ function createProductionFetchMock(options: ProductionFetchMockOptions = {}) {
       return Response.json({ access_token: "google-access-token-refreshed", expires_in: 3600, scope: "https://www.googleapis.com/auth/adwords" });
     }
 
-    if (url === "https://googleads.googleapis.com/v18/customers:listAccessibleCustomers") {
+    if (url === "https://googleads.googleapis.com/v22/customers:listAccessibleCustomers") {
       calls.push({
         kind: "google.customers_list",
         url,
@@ -2219,7 +2219,7 @@ function createProductionFetchMock(options: ProductionFetchMockOptions = {}) {
       return Response.json({ id: "bps_test", url: "https://billing.stripe.test/session" });
     }
 
-    if (url === "https://googleads.googleapis.com/v18/customers/1234567890/campaigns:mutate") {
+    if (url === "https://googleads.googleapis.com/v22/customers/1234567890/campaigns:mutate") {
       const json = parseJsonBody(bodyText);
       calls.push({
         kind: "google.campaign_status_mutate",
@@ -2235,7 +2235,7 @@ function createProductionFetchMock(options: ProductionFetchMockOptions = {}) {
       return Response.json({ results: [{ resourceName: "customers/1234567890/campaigns/987654321" }] });
     }
 
-    if (url === "https://googleads.googleapis.com/v18/customers/1234567890/googleAds:searchStream") {
+    if (url === "https://googleads.googleapis.com/v22/customers/1234567890/googleAds:searchStream") {
       const json = parseJsonBody(bodyText);
       calls.push({
         kind: "google.campaign_budget_search",
@@ -2248,7 +2248,7 @@ function createProductionFetchMock(options: ProductionFetchMockOptions = {}) {
       return Response.json([{ results: [{ campaign: { campaignBudget: "customers/1234567890/campaignBudgets/555" } }] }]);
     }
 
-    if (url === "https://googleads.googleapis.com/v18/customers/1234567890/campaignBudgets:mutate") {
+    if (url === "https://googleads.googleapis.com/v22/customers/1234567890/campaignBudgets:mutate") {
       const json = parseJsonBody(bodyText);
       calls.push({
         kind: "google.campaign_budget_mutate",

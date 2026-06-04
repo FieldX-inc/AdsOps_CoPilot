@@ -23,7 +23,7 @@ const googleOAuthStates = new Map<string, {
 }>();
 
 const googleAdsScope = "https://www.googleapis.com/auth/adwords";
-const googleAdsApiVersion = "v18";
+const googleAdsApiVersion = "v22";
 const defaultGoogleAdsMaxBudgetAmount = 50_000;
 
 type GoogleCampaignStatus = "ENABLED" | "PAUSED";
@@ -121,7 +121,7 @@ export async function handleGoogleOAuthCallback(code: string | null, state: stri
 
 export async function listAccessibleGoogleCustomers(auth: AuthContext) {
   const accessToken = await readGoogleAccessToken(auth);
-  const res = await fetch("https://googleads.googleapis.com/v18/customers:listAccessibleCustomers", {
+  const res = await fetch(`https://googleads.googleapis.com/${googleAdsApiVersion}/customers:listAccessibleCustomers`, {
     headers: {
       Authorization: `Bearer ${accessToken}`,
       "developer-token": requiredEnv("GOOGLE_ADS_DEVELOPER_TOKEN"),
