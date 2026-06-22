@@ -2641,7 +2641,11 @@ function DashboardPage({
                   </p>
                 </>
               ) : (
-                <p>AIに渡せる検知タグ: {data.relatedTags.join(", ") || "monitoring"}</p>
+                <div className="recommended-action-list">
+                  {buildRecommendedActions(data).map((action) => (
+                    <p key={action}>{action}</p>
+                  ))}
+                </div>
               )}
               <div className="help-actions">
                 <button type="button" onClick={onOpenAi}>
@@ -4485,6 +4489,21 @@ function createDashboardComment(data: DashboardResponse) {
   if ((data.changes.cpa ?? 0) > 0.15) return "獲得単価が上がっています。CVRとCPCを分けて確認してください。";
   if ((data.changes.conversions ?? 0) < -0.08) return "コンバージョン数が減っています。計測と流入量を先に確認してください。";
   return "大きな異常はありません。費用とCVのバランスをこのまま観察できます。";
+}
+
+function buildRecommendedActions(data: DashboardResponse) {
+  const firstAnomaly = data.anomalies[0];
+  if (!firstAnomaly) return ["今日は大きな異常はありません。費用、CV、CPAの順で短く確認してください。"];
+  if (firstAnomaly.tags.includes("CPA")) {
+    return ["CPA悪化の要因を、CPCとCVRに分けて確認してください。", "対象キャンペーンの変更履歴と計測状態を先に見てください。"];
+  }
+  if (firstAnomaly.tags.includes("CTR")) {
+    return ["CTRが落ちている広告の訴求、検索語句、クリエイティブ疲れを確認してください。"];
+  }
+  if (firstAnomaly.tags.includes("ROAS")) {
+    return ["コンバージョン値が計測できているか確認し、未計測ならROAS判断を外してください。"];
+  }
+  return [`${firstAnomaly.type} の対象キャンペーンを開き、前期間との差分を確認してください。`];
 }
 
 function findAnomalousMetrics(data: DashboardResponse) {

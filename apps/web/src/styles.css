@@ -2006,6 +2006,21 @@ th {
   font-size: 14px;
 }
 
+.recommended-action-list {
+  display: grid;
+  gap: 8px;
+}
+
+.recommended-action-list p {
+  margin: 0;
+  border-radius: 18px;
+  background: var(--surface-container);
+  padding: 10px 12px;
+  color: var(--text);
+  font-weight: 800;
+  line-height: 1.55;
+}
+
 .help-actions {
   display: flex;
   flex-wrap: wrap;
