@@ -565,7 +565,7 @@ async function fetchGoogleAdGroupMetrics(accessToken: string, customerId: string
   });
   if (!res.ok) {
     const detail = await res.text();
-    throw new Error(`Google Ads metrics取得に失敗しました: ${redact(detail).slice(0, 240)}`);
+    throw new Error(`Google Ads metrics取得に失敗しました: ${googleAdsErrorSummary(detail)}`);
   }
   const payload = (await res.json()) as Array<{ results?: any[] }>;
   return payload.flatMap((chunk) => chunk.results ?? []).map((item) => ({
@@ -680,6 +680,36 @@ function googleAdsHeaders(accessToken: string, options: GoogleAdsRequestOptions 
 function isGoogleAdsPermissionError(error: unknown) {
   const message = errorMessage(error);
   return /\b403\b|PERMISSION_DENIED|does not have permission/i.test(message);
+}
+
+function googleAdsErrorSummary(detail: string) {
+  const redactedDetail = redact(detail);
+  try {
+    const parsed = JSON.parse(detail) as {
+      error?: {
+        code?: number;
+        message?: string;
+        status?: string;
+        details?: Array<{ errors?: Array<{ errorCode?: Record<string, string>; message?: string }> }>;
+      };
+    };
+    const error = parsed.error;
+    const googleAdsErrors = error?.details?.flatMap((item) => item.errors ?? []) ?? [];
+    const errorCodes = googleAdsErrors
+      .map((item) => item.errorCode ? Object.entries(item.errorCode).map(([key, value]) => `${key}.${value}`).join(",") : "")
+      .filter(Boolean);
+    const errorMessages = googleAdsErrors.map((item) => item.message).filter(Boolean);
+    const summary = [
+      error?.code ? `code=${error.code}` : "",
+      error?.status ? `status=${error.status}` : "",
+      error?.message ? `message=${error.message}` : "",
+      errorCodes.length ? `googleAdsErrorCode=${errorCodes.join(";")}` : "",
+      errorMessages.length ? `googleAdsErrorMessage=${errorMessages.join(";")}` : "",
+    ].filter(Boolean).join(" / ");
+    return redact(summary).slice(0, 1200) || redactedDetail.slice(0, 1200);
+  } catch {
+    return redactedDetail.slice(0, 1200);
+  }
 }
 
 function assertGoogleAdsWriteEnabled() {

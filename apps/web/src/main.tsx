@@ -18,12 +18,14 @@ import {
 } from "recharts";
 import "./styles.css";
 
-type View = "dashboard" | "setup" | "bi" | "columns" | "connections";
-type IconName = "dashboard" | "setup" | "chart" | "book" | "plug" | "ai" | "lock" | "check" | "arrow";
+type View = "dashboard" | "setup" | "bi" | "columns" | "connections" | "settings";
+type IconName = "dashboard" | "setup" | "chart" | "book" | "plug" | "ai" | "lock" | "check" | "arrow" | "settings" | "bell";
 type PlatformFilter = "all" | "google" | "meta" | "yahoo";
 type Confidence = "high" | "medium" | "low";
 type AdvisorMode = "beginner" | "experienced";
 type AdvisorEntry = "setup_advisor_beginner" | "performance_analyst_experienced";
+type MetricKey = "impressions" | "clicks" | "ctr" | "cpc" | "conversions" | "cvr" | "cpa" | "cost" | "revenue" | "roas";
+type TrendMetricKey = "cost" | "revenue" | "conversions" | "cpa";
 
 type ChatMessage = {
   id?: string;
@@ -260,6 +262,13 @@ type ColumnDetail = {
   related: HelpArticle[];
 };
 
+type GoogleWriteAuditLog = {
+  id?: string;
+  event_type?: string;
+  created_at?: string;
+  payload?: Record<string, unknown>;
+};
+
 const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8787";
 const appEnv = String(import.meta.env.VITE_APP_ENV ?? import.meta.env.MODE ?? "local").toLowerCase();
 const allowBillingDemoBypass = appEnv !== "production";
@@ -342,10 +351,105 @@ const brandChartColors = {
 const navItems: Array<{ key: View; label: string; icon: IconName }> = [
   { key: "dashboard", label: "ダッシュボード", icon: "dashboard" },
   { key: "setup", label: "広告準備", icon: "setup" },
-  { key: "bi", label: "BI分析", icon: "chart" },
   { key: "columns", label: "Adコラム", icon: "book" },
   { key: "connections", label: "データ連携", icon: "plug" },
 ];
+
+const defaultDashboardMetrics: MetricKey[] = ["impressions", "clicks", "ctr", "cpc", "conversions", "cvr", "cpa", "cost"];
+
+const metricCatalog: Record<MetricKey, {
+  label: string;
+  subLabel: string;
+  help: string;
+  tone: string;
+  value: (summary: MetricTotals) => string;
+  change?: keyof DashboardResponse["changes"];
+}> = {
+  impressions: {
+    label: "IMP",
+    subLabel: "表示回数",
+    help: "広告が表示された回数です。まず配信量の増減を見ます。",
+    tone: "neutral",
+    value: (summary) => summary.impressions.toLocaleString("ja-JP"),
+  },
+  clicks: {
+    label: "クリック",
+    subLabel: "クリック数",
+    help: "広告がクリックされた回数です。表示から興味に進んだ量を見ます。",
+    tone: "secondary",
+    value: (summary) => summary.clicks.toLocaleString("ja-JP"),
+  },
+  ctr: {
+    label: "CTR",
+    subLabel: "クリック率",
+    help: "表示された広告のうち、クリックされた割合です。訴求やクリエイティブの反応を見る指標です。",
+    tone: "primary",
+    value: (summary) => formatPercent(summary.ctr, 2),
+    change: "ctr",
+  },
+  cpc: {
+    label: "CPC",
+    subLabel: "平均クリック単価",
+    help: "1クリックにかかった平均費用です。競合性や配信面の変化を見る指標です。",
+    tone: "warning",
+    value: (summary) => formatMoney(summary.cpc),
+    change: "cpc",
+  },
+  conversions: {
+    label: "CV",
+    subLabel: "コンバージョン数",
+    help: "問い合わせや購入など、成果として数える行動の数です。",
+    tone: "tertiary",
+    value: (summary) => summary.conversions.toLocaleString("ja-JP"),
+    change: "conversions",
+  },
+  cvr: {
+    label: "CVR",
+    subLabel: "成約率",
+    help: "クリック後に成果につながった割合です。LPやフォーム、流入の質を見ます。",
+    tone: "secondary",
+    value: (summary) => formatPercent(summary.cvr, 2),
+    change: "cvr",
+  },
+  cpa: {
+    label: "CPA",
+    subLabel: "コンバージョン単価",
+    help: "1件の成果を獲得するのにかかった費用です。広告運用の優先確認指標です。",
+    tone: "warning",
+    value: (summary) => formatMoney(summary.cpa),
+    change: "cpa",
+  },
+  cost: {
+    label: "費用",
+    subLabel: "消化金額",
+    help: "広告で使った金額です。成果とセットで見ます。",
+    tone: "neutral",
+    value: (summary) => formatMoney(summary.cost),
+    change: "cost",
+  },
+  revenue: {
+    label: "売上",
+    subLabel: "コンバージョン値",
+    help: "広告成果に紐づく売上や価値です。未計測なら判断に使いません。",
+    tone: "success",
+    value: (summary) => formatMoney(summary.revenue),
+  },
+  roas: {
+    label: "ROAS",
+    subLabel: "広告費用対効果",
+    help: "広告費に対する売上の割合です。コンバージョン値を追えていない場合は非表示で構いません。",
+    tone: "success",
+    value: (summary) => summary.revenue > 0 ? formatPercent(summary.roas) : "未計測",
+    change: "roas",
+  },
+};
+
+const trendMetricCatalog: Record<TrendMetricKey, { label: string; color: string; format: (value: number) => string }> = {
+  cost: { label: "費用", color: "#6750a4", format: formatMoney },
+  revenue: { label: "売上", color: "#0b8043", format: formatMoney },
+  conversions: { label: "CV", color: "#b3261e", format: (value) => Math.round(value).toLocaleString("ja-JP") },
+  cpa: { label: "CPA", color: "#b06000", format: formatMoney },
+};
 
 const confidenceLabels: Record<Confidence, string> = {
   high: "高",
@@ -1132,6 +1236,19 @@ function App() {
     if (activeThreadId !== threadId) {
       setThreadId(activeThreadId);
     }
+    setThreads((prev) =>
+      prev.map((thread) =>
+        thread.id === activeThreadId || thread.id === threadId
+          ? {
+              ...thread,
+              id: activeThreadId,
+              title: summarizeQuestionTitle(text),
+              updatedAt: new Date().toISOString(),
+              lastMessagePreview: text,
+            }
+          : thread,
+      ),
+    );
 
     try {
       const res = await fetch(`${apiBaseUrl}/agent/chat/stream`, {
@@ -1323,6 +1440,9 @@ function App() {
             onOpenAi={() => setAiOpen(true)}
           />
         )}
+        {view === "settings" && (
+          <SettingsPage workspace={workspaceSession} onOpenConnections={() => setView("connections")} />
+        )}
       </main>
 
       <button
@@ -1419,6 +1539,10 @@ function Sidebar({
         <p>{workspace.workspaceName}</p>
         <strong>ちょこっとインハウス</strong>
         <span>{workspace.userEmail}</span>
+        <button type="button" className="brand-settings-button" onClick={() => onNavigate("settings")} aria-label="アカウント設定を開く">
+          <InlineIcon name="settings" />
+          設定
+        </button>
       </div>
       <nav aria-label="メインナビゲーション" className="nav">
         {navItems.map((item) => (
@@ -1545,6 +1669,24 @@ function InlineIcon({ name }: { name: IconName }) {
     return (
       <svg {...common}>
         <path d="m20 6-11 11-5-5" />
+      </svg>
+    );
+  }
+
+  if (name === "settings") {
+    return (
+      <svg {...common}>
+        <path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5z" />
+        <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.22.6.79 1 1.43 1H21a2 2 0 1 1 0 4h-.09c-.64 0-1.21.4-1.51 1z" />
+      </svg>
+    );
+  }
+
+  if (name === "bell") {
+    return (
+      <svg {...common}>
+        <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 7h18s-3 0-3-7" />
+        <path d="M13.73 21a2 2 0 0 1-3.46 0" />
       </svg>
     );
   }
@@ -1986,6 +2128,27 @@ function SetupWizardPage({
       </PageHeader>
 
       {error && <p className="error">{error}</p>}
+      <section className="setup-next-actions" aria-label="次にやること">
+        <article className={`setup-next-card ${intake?.readyForSetupSteps ? "ready" : ""}`}>
+          <span aria-hidden="true">{intake?.readyForSetupSteps ? "✓" : "1"}</span>
+          <div>
+            <strong>{intake?.readyForSetupSteps ? "出稿手順を確認できます" : "足りない項目だけ回答"}</strong>
+            <p>{intake?.readyForSetupSteps ? "AIが整理した操作手順を、人間が確認して進めます。" : "右の不足タグを見て、目的・商材・ターゲット・予算・媒体・計測を補います。"}</p>
+          </div>
+          {intake?.readyForSetupSteps && (
+            <button type="button" className="md3-filled-button" onClick={() => setShowSteps(true)}>
+              手順を見る
+            </button>
+          )}
+        </article>
+        <article className="setup-next-card">
+          <span aria-hidden="true">2</span>
+          <div>
+            <strong>ペルソナは保存内容を使う</strong>
+            <p>一度答えた内容は右側のカードに残し、不足している部分だけ追加で聞きます。</p>
+          </div>
+        </article>
+      </section>
       <section className="setup-intake-layout">
         <article className="card setup-intake-chat">
           <div className="section-header setup-chat-header">
@@ -2356,10 +2519,30 @@ function DashboardPage({
   onOpenConnections: () => void;
 }) {
   const needsAdDataSetup = !loading && !data && !error;
+  const [visibleMetrics, setVisibleMetrics] = useState<MetricKey[]>(defaultDashboardMetrics);
+  const [visibleTrendMetrics, setVisibleTrendMetrics] = useState<TrendMetricKey[]>(["cost", "conversions", "cpa"]);
+  const dashboardComment = data ? createDashboardComment(data) : "";
+  const anomalousMetrics = data ? findAnomalousMetrics(data) : new Set<MetricKey>();
+
+  function toggleMetric(metric: MetricKey) {
+    setVisibleMetrics((current) =>
+      current.includes(metric)
+        ? current.filter((item) => item !== metric)
+        : [...current, metric],
+    );
+  }
+
+  function toggleTrendMetric(metric: TrendMetricKey) {
+    setVisibleTrendMetrics((current) =>
+      current.includes(metric)
+        ? current.filter((item) => item !== metric)
+        : [...current, metric],
+    );
+  }
 
   return (
     <div>
-      <PageHeader title="ダッシュボード" description="AIに相談する前に、いま見るべきKPI、異常、優先キャンペーンを確認します。">
+      <PageHeader title="ダッシュボード" description="いま見るべき変化だけを先に出します。">
         <FilterControls range={range} platform={platform} onRangeChange={onRangeChange} onPlatformChange={onPlatformChange} />
       </PageHeader>
       <StatusLine loading={loading} error={error} />
@@ -2367,45 +2550,85 @@ function DashboardPage({
         <DashboardDataGate onOpenSetup={onOpenSetup} onOpenConnections={onOpenConnections} />
       ) : data && !usingDemoData ? (
         <>
-          <KpiCards summary={data.summary} changes={data.changes} />
+          <section className="dashboard-briefing">
+            <article className="situation-card md3-expressive-card">
+              <span className="situation-mark" aria-hidden="true">!</span>
+              <div>
+                <p className="eyebrow">一言コメント</p>
+                <h2>{dashboardComment}</h2>
+              </div>
+              <button type="button" className="md3-filled-button" onClick={onOpenAi}>
+                <InlineIcon name="ai" />
+                AIに確認
+              </button>
+            </article>
+            <MetricPicker selected={visibleMetrics} onToggle={toggleMetric} />
+          </section>
+
+          <KpiCards summary={data.summary} changes={data.changes} visibleMetrics={visibleMetrics} anomalousMetrics={anomalousMetrics} />
 
           <section className="dashboard-grid">
             <article className="card chart-card trend-card">
-              <h2>費用と売上トレンド</h2>
+              <div className="section-header chart-section-header">
+                <div>
+                  <h2>トレンド</h2>
+                  <p className="muted">見たい線だけ表示</p>
+                </div>
+                <TrendMetricPicker selected={visibleTrendMetrics} onToggle={toggleTrendMetric} />
+              </div>
               <ResponsiveContainer width="100%" height={288}>
-                <LineChart data={data.series} margin={{ top: 12, right: 16, left: 0, bottom: 4 }}>
+                <LineChart data={trendSeriesData(data)} margin={{ top: 12, right: 16, left: 0, bottom: 4 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke={brandChartColors.grid} />
                   <XAxis dataKey="date" tickLine={false} axisLine={false} />
-                  <YAxis tickLine={false} axisLine={false} width={72} tickFormatter={(value) => `¥${Math.round(Number(value) / 1000)}k`} />
-                  <Tooltip formatter={(value, name) => [name === "conversions" ? numericValue(value) : formatMoney(numericValue(value)), name]} />
+                  <YAxis tickLine={false} axisLine={false} width={72} tickFormatter={(value) => compactTrendTick(Number(value))} />
+                  <Tooltip formatter={(value, name) => {
+                    const key = String(name) as TrendMetricKey;
+                    return [trendMetricCatalog[key]?.format(numericValue(value)) ?? numericValue(value), trendMetricCatalog[key]?.label ?? name];
+                  }} />
                   <Legend />
-                  <Line type="monotone" dataKey="cost" stroke={brandChartColors.yellowDeep} strokeWidth={2} name="費用" dot={false} />
-                  <Line type="monotone" dataKey="revenue" stroke={brandChartColors.green} strokeWidth={2} name="売上" dot={false} />
+                  {visibleTrendMetrics.map((metric) => (
+                    <Line
+                      key={metric}
+                      type="monotone"
+                      dataKey={metric}
+                      stroke={trendMetricCatalog[metric].color}
+                      strokeWidth={3}
+                      name={metric}
+                      dot={false}
+                    />
+                  ))}
                 </LineChart>
               </ResponsiveContainer>
             </article>
 
-            <article className="card chart-card severity-card">
-              <h2>異常重要度サマリー</h2>
-              <ResponsiveContainer width="100%" height={288}>
-                <BarChart data={severityChartData(data)} margin={{ top: 12, right: 10, left: 0, bottom: 4 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke={brandChartColors.grid} />
-                  <XAxis dataKey="severity" tickLine={false} axisLine={false} />
-                  <YAxis allowDecimals={false} tickLine={false} axisLine={false} width={32} />
-                  <Tooltip />
-                  <Bar dataKey="count" radius={[8, 8, 0, 0]}>
-                    {severityChartData(data).map((entry) => (
-                      <Cell key={entry.severity} fill={entry.color} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
+            <article className="card chart-card severity-card expressive-alert-card">
+              <div className="section-header">
+                <div>
+                  <h2>今見るべき変化</h2>
+                  <p className="muted">重要 / 注意 / 様子見</p>
+                </div>
+              </div>
+              <div className="severity-stack">
+                {severityChartData(data).map((entry) => (
+                  <div key={entry.severity} className={`severity-pill severity-${entry.severity.toLowerCase()}`}>
+                    <span>{severityLabel(entry.severity)}</span>
+                    <strong>{entry.count}</strong>
+                  </div>
+                ))}
+              </div>
+              <div className="threshold-card">
+                <div>
+                  <strong>しきい値</strong>
+                  <span>CPA +20% / CTR -5% / CVR -8%</span>
+                </div>
+                <button type="button" className="md3-tonal-button">調整</button>
+              </div>
             </article>
           </section>
 
           <section className="lower-grid">
             <article className="card campaign-card">
-              <h2>上位キャンペーン（費用順）</h2>
+              <h2>費用が大きいキャンペーン</h2>
               <CampaignTable rows={data.campaigns} compact={false} />
             </article>
             <article className="card help-card">
@@ -2418,7 +2641,11 @@ function DashboardPage({
                   </p>
                 </>
               ) : (
-                <p>AIに渡せる検知タグ: {data.relatedTags.join(", ") || "monitoring"}</p>
+                <div className="recommended-action-list">
+                  {buildRecommendedActions(data).map((action) => (
+                    <p key={action}>{action}</p>
+                  ))}
+                </div>
               )}
               <div className="help-actions">
                 <button type="button" onClick={onOpenAi}>
@@ -3061,6 +3288,7 @@ function ConnectionsPage({
           </div>
         ))}
       </section>
+      <GoogleWriteAuditReviewPanel session={session} workspace={workspace} />
       <section className="connection-grid">
         {plannedConnections.map((connection) => {
           const connector = findPlannedConnector(connectionStatus, connection.platform);
@@ -3104,6 +3332,176 @@ function ConnectionsPage({
       </section>
     </div>
   );
+}
+
+function SettingsPage({
+  workspace,
+  onOpenConnections,
+}: {
+  workspace: WorkspaceSession;
+  onOpenConnections: () => void;
+}) {
+  return (
+    <div className="settings-page">
+      <PageHeader title="アカウント設定" description="通知、基本情報、プラン導線をまとめて確認します。" />
+      <section className="settings-grid">
+        <article className="card settings-card profile-settings-card">
+          <p className="eyebrow">Workspace</p>
+          <h2>{workspace.workspaceName}</h2>
+          <dl className="settings-list">
+            <div>
+              <dt>ログイン</dt>
+              <dd>{workspace.userEmail}</dd>
+            </div>
+            <div>
+              <dt>権限</dt>
+              <dd>広告データ確認 / AI相談</dd>
+            </div>
+          </dl>
+        </article>
+        <article className="card settings-card notification-card">
+          <p className="eyebrow">
+            <InlineIcon name="bell" />
+            Notification
+          </p>
+          <h2>確認リマインド</h2>
+          <div className="notification-options">
+            {[
+              "3日経ったのでCPAを確認",
+              "7日経ったので検索語句を確認",
+              "CVが急減したら通知",
+            ].map((label, index) => (
+              <label key={label} className="notification-toggle">
+                <input type="checkbox" defaultChecked={index < 2} />
+                <span>{label}</span>
+              </label>
+            ))}
+          </div>
+        </article>
+        <article className="card settings-card plan-card">
+          <p className="eyebrow">Plan / options</p>
+          <h2>オプション導線</h2>
+          <p className="muted">追加分析、通知、承認付き実行のオプション選択へ進める入口です。</p>
+          <div className="settings-actions">
+            <button type="button" className="md3-filled-button">プランを見る</button>
+            <button type="button" className="md3-tonal-button" onClick={onOpenConnections}>データ連携を確認</button>
+          </div>
+        </article>
+      </section>
+    </div>
+  );
+}
+
+function GoogleWriteAuditReviewPanel({
+  session,
+  workspace,
+}: {
+  session: Session;
+  workspace: WorkspaceSession;
+}) {
+  const [approvalNote, setApprovalNote] = useState("CPA改善のため一時停止し、24時間後にCPAが改善しなければ戻す。");
+  const [auditLogs, setAuditLogs] = useState<GoogleWriteAuditLog[]>([]);
+  const [auditNotice, setAuditNotice] = useState("");
+  const approvedByUserId = workspace.userId;
+  const approvalMetadata = {
+    approvalType: "explicit_user_confirmation",
+    approvedByUserId,
+    approvedByEmail: workspace.userEmail,
+  };
+  const canSubmitApproval = approvalNote.length >= 10 && hasRollbackCondition(approvalNote);
+  const latestMatchingAudit = auditLogs.find((log) => googleWriteAuditMatches(log, approvalMetadata));
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(`${apiBaseUrl}/audit-logs/recent?workspaceId=${workspace.workspaceId}&eventTypePrefix=google_ads.&limit=8`, {
+      headers: { Authorization: `Bearer ${session.access_token}` },
+      signal: controller.signal,
+    })
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.error ?? "監査ログを取得できませんでした。");
+        setAuditLogs((data.logs as GoogleWriteAuditLog[]) ?? []);
+      })
+      .catch((caught) => {
+        if (caught instanceof DOMException && caught.name === "AbortError") return;
+        setAuditNotice(caught instanceof Error ? caught.message : "監査ログを取得できませんでした。");
+      });
+    return () => controller.abort();
+  }, [session.access_token, workspace.workspaceId]);
+
+  async function submitApprovalCandidate() {
+    if (approvalNote.length < 10 || !hasRollbackCondition(approvalNote)) {
+      setAuditNotice("理由と戻し条件を10文字以上で入力してください。");
+      return;
+    }
+    const payload = { confirmed: true, approvalNote };
+    setAuditNotice(`承認メモを確認しました。実行APIへ送る場合は ${JSON.stringify(payload)} を使います。`);
+  }
+
+  return (
+    <section className="card google-write-audit-card" aria-label="audit review">
+      <div className="section-header">
+        <div>
+          <p className="eyebrow">audit review</p>
+          <h2>承認付きwrite候補</h2>
+          <p className="muted">Google Adsの停止/予算変更は、理由・戻し条件・承認者・監査ログを確認してから実行します。</p>
+        </div>
+        <span className={`status-chip ${canSubmitApproval ? "status-accepted" : "status-suggested"}`}>
+          {canSubmitApproval ? "承認条件OK" : "戻し条件が必要"}
+        </span>
+      </div>
+      <div className="google-write-grid">
+        <label className="approval-note-field">
+          変更理由と戻し条件
+          <textarea value={approvalNote} onChange={(event) => setApprovalNote(event.target.value)} rows={3} />
+        </label>
+        <div className="approval-metadata">
+          <strong>承認メタデータ</strong>
+          <span>approvalType: {approvalMetadata.approvalType}</span>
+          <span>approvedByUserId: {approvedByUserId}</span>
+          <span>{workspace.userEmail}</span>
+        </div>
+      </div>
+      <div className="inline-actions">
+        <button type="button" onClick={() => void submitApprovalCandidate()} disabled={!canSubmitApproval}>
+          明示承認として確認
+        </button>
+        <button type="button" className="secondary-button" disabled>
+          API実行は対象ID選択後
+        </button>
+      </div>
+      {auditNotice && <p className="muted connection-fallback">{auditNotice}</p>}
+      <div className="audit-log-list">
+        <strong>最近のGoogle Ads監査ログ</strong>
+        {latestMatchingAudit ? (
+          <p className="audit-match">この承認者メタデータに一致する監査ログがあります。</p>
+        ) : (
+          <p className="muted">対象の実行後、ここで監査ログ一致を確認します。</p>
+        )}
+        {auditLogs.slice(0, 4).map((log) => (
+          <article key={log.id ?? `${log.event_type}-${log.created_at}`} className="audit-log-row">
+            <span>{log.event_type ?? "google_ads.audit"}</span>
+            <small>{log.created_at ? formatDateTime(log.created_at) : "日時未取得"}</small>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function hasRollbackCondition(approvalNote: string) {
+  return /(戻|復元|restore|rollback|悪化|改善しなければ|24時間後|翌日)/i.test(approvalNote);
+}
+
+function googleWriteAuditMatches(log: GoogleWriteAuditLog, approvalMetadata: { approvalType: string; approvedByUserId: string }) {
+  return (
+    getAuditMetadata(log, "approvalType") === "explicit_user_confirmation" &&
+    getAuditMetadata(log, "approvedByUserId") === approvalMetadata.approvedByUserId
+  );
+}
+
+function getAuditMetadata(log: GoogleWriteAuditLog, key: string) {
+  return String(log.payload?.[key] ?? "");
 }
 
 function statusLabel(status: string) {
@@ -3505,6 +3903,13 @@ function uniqueTodos(items: string[]) {
   return [...new Set(items.map((item) => item.trim()).filter(Boolean))];
 }
 
+function summarizeQuestionTitle(text: string) {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return "新しい相談";
+  const withoutPoliteEnding = normalized.replace(/[。！？!?]+$/g, "");
+  return withoutPoliteEnding.length > 22 ? `${withoutPoliteEnding.slice(0, 22)}...` : withoutPoliteEnding;
+}
+
 async function readChatStream(response: Response, onStatus: (status: string) => void) {
   const reader = response.body?.getReader();
   if (!reader) return null;
@@ -3579,22 +3984,88 @@ function FilterControls({
   );
 }
 
-function KpiCards({ summary, changes }: { summary: MetricTotals; changes: DashboardResponse["changes"] }) {
-  const cards = [
-    { label: "CTR", value: formatPercent(summary.ctr, 2), change: changes.ctr, tone: "primary" },
-    { label: "CVR", value: formatPercent(summary.cvr, 2), change: changes.cvr, tone: "secondary" },
-    { label: "CPA", value: formatMoney(summary.cpa), change: changes.cpa, tone: "warning" },
-    { label: "ROAS", value: formatPercent(summary.roas), change: changes.roas, tone: "success" },
-    { label: "費用", value: formatMoney(summary.cost), change: changes.cost, tone: "neutral" },
-    { label: "CV", value: summary.conversions.toLocaleString("ja-JP"), change: changes.conversions, tone: "tertiary" },
-  ];
+function MetricPicker({ selected, onToggle }: { selected: MetricKey[]; onToggle: (metric: MetricKey) => void }) {
+  return (
+    <article className="metric-picker md3-expressive-card" aria-label="表示する指標">
+      <div>
+        <p className="eyebrow">表示指標</p>
+        <strong>{selected.length}個を表示中</strong>
+      </div>
+      <div className="metric-chip-grid">
+        {(Object.keys(metricCatalog) as MetricKey[]).map((metric) => (
+          <button
+            key={metric}
+            type="button"
+            className={selected.includes(metric) ? "selected" : ""}
+            onClick={() => onToggle(metric)}
+            aria-pressed={selected.includes(metric)}
+          >
+            {metricCatalog[metric].subLabel}
+          </button>
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function TrendMetricPicker({ selected, onToggle }: { selected: TrendMetricKey[]; onToggle: (metric: TrendMetricKey) => void }) {
+  return (
+    <div className="trend-picker" aria-label="グラフ表示指標">
+      {(Object.keys(trendMetricCatalog) as TrendMetricKey[]).map((metric) => (
+        <button
+          key={metric}
+          type="button"
+          className={selected.includes(metric) ? "selected" : ""}
+          onClick={() => onToggle(metric)}
+          aria-pressed={selected.includes(metric)}
+        >
+          {trendMetricCatalog[metric].label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function KpiCards({
+  summary,
+  changes,
+  visibleMetrics,
+  anomalousMetrics,
+}: {
+  summary: MetricTotals;
+  changes: DashboardResponse["changes"];
+  visibleMetrics: MetricKey[];
+  anomalousMetrics: Set<MetricKey>;
+}) {
+  const cards = visibleMetrics.map((metric) => {
+    const definition = metricCatalog[metric];
+    const change = definition.change ? changes[definition.change] : null;
+    return {
+      key: metric,
+      label: definition.label,
+      subLabel: definition.subLabel,
+      help: definition.help,
+      value: definition.value(summary),
+      change,
+      tone: definition.tone,
+      anomalous: anomalousMetrics.has(metric),
+    };
+  });
   return (
     <section aria-label="KPIサマリー" className="kpi-grid">
       {cards.map((card) => (
-        <article key={card.label} className={`card kpi-card kpi-card-${card.tone}`}>
-          <p>{card.label}</p>
+        <article key={card.key} className={`card kpi-card kpi-card-${card.tone}${card.anomalous ? " is-alert" : ""}`}>
+          <div className="kpi-card-label-row">
+            <p>{card.label}</p>
+            <span className="kpi-help" tabIndex={0} aria-label={`${card.subLabel}: ${card.help}`}>
+              ?
+              <span role="tooltip">{card.help}</span>
+            </span>
+          </div>
+          <span className="kpi-sub-label">{card.subLabel}</span>
           <strong>{card.value}</strong>
           <span className={changeClass(card.change)}>{formatChange(card.change)}</span>
+          {card.anomalous && <em>要確認</em>}
         </article>
       ))}
     </section>
@@ -3618,12 +4089,33 @@ function CampaignTable({ rows, compact }: { rows: Campaign[]; compact: boolean }
 
 function AnomalyTable({ anomalies }: { anomalies: DashboardResponse["anomalies"] }) {
   return (
-    <section className="card anomaly-card">
-      <h2>異常一覧</h2>
+    <section className="card anomaly-card anomaly-alert-surface">
+      <div className="section-header">
+        <div>
+          <h2>注意アラート</h2>
+          <p className="muted">赤=重要 / 黄=注意 / 青=様子見</p>
+        </div>
+        <button type="button" className="md3-tonal-button">しきい値を調整</button>
+      </div>
       <div className="table-wrap">
         <table>
-          <thead><tr><th>日付</th><th>媒体</th><th>種別</th><th>重要度</th><th>詳細</th></tr></thead>
-          <tbody>{anomalies.map((item) => <tr key={`${item.date}-${item.type}-${item.detail}`}><td>{item.date}</td><td>{item.platform}</td><td>{item.type}</td><td>{item.severity}</td><td>{item.detail}</td></tr>)}</tbody>
+          <thead><tr><th>日付</th><th>媒体</th><th>変化</th><th>状態</th><th>詳細</th></tr></thead>
+          <tbody>
+            {anomalies.map((item) => (
+              <tr key={`${item.date}-${item.type}-${item.detail}`} className={`anomaly-row anomaly-${item.severity.toLowerCase()}`}>
+                <td>{item.date}</td>
+                <td>{item.platform}</td>
+                <td>
+                  <span className="anomaly-type">
+                    <span aria-hidden="true">!</span>
+                    {item.type}
+                  </span>
+                </td>
+                <td><span className={`severity-badge severity-${item.severity.toLowerCase()}`}>{severityLabel(item.severity)}</span></td>
+                <td>{item.detail}</td>
+              </tr>
+            ))}
+          </tbody>
         </table>
       </div>
     </section>
@@ -3976,10 +4468,74 @@ function countSeverity(anomalies: DashboardResponse["anomalies"]) {
 
 function severityChartData(data: DashboardResponse) {
   return [
-    { severity: "High", count: data.severityCounts.High, color: brandChartColors.green },
-    { severity: "Medium", count: data.severityCounts.Medium, color: brandChartColors.yellowDeep },
-    { severity: "Low", count: data.severityCounts.Low, color: brandChartColors.greenSoft },
+    { severity: "High", count: data.severityCounts.High, color: "#b3261e" },
+    { severity: "Medium", count: data.severityCounts.Medium, color: "#b06000" },
+    { severity: "Low", count: data.severityCounts.Low, color: "#0b8043" },
   ];
+}
+
+function severityLabel(severity: string) {
+  if (severity === "High") return "重要";
+  if (severity === "Medium") return "注意";
+  return "様子見";
+}
+
+function createDashboardComment(data: DashboardResponse) {
+  const highAnomaly = data.anomalies.find((item) => item.severity === "High") ?? data.anomalies[0];
+  if (highAnomaly) {
+    const tag = highAnomaly.tags[0] ? `${highAnomaly.tags[0]}が` : "";
+    return `${tag}動いています。まず「${highAnomaly.type}」を確認してください。`;
+  }
+  if ((data.changes.cpa ?? 0) > 0.15) return "獲得単価が上がっています。CVRとCPCを分けて確認してください。";
+  if ((data.changes.conversions ?? 0) < -0.08) return "コンバージョン数が減っています。計測と流入量を先に確認してください。";
+  return "大きな異常はありません。費用とCVのバランスをこのまま観察できます。";
+}
+
+function buildRecommendedActions(data: DashboardResponse) {
+  const firstAnomaly = data.anomalies[0];
+  if (!firstAnomaly) return ["今日は大きな異常はありません。費用、CV、CPAの順で短く確認してください。"];
+  if (firstAnomaly.tags.includes("CPA")) {
+    return ["CPA悪化の要因を、CPCとCVRに分けて確認してください。", "対象キャンペーンの変更履歴と計測状態を先に見てください。"];
+  }
+  if (firstAnomaly.tags.includes("CTR")) {
+    return ["CTRが落ちている広告の訴求、検索語句、クリエイティブ疲れを確認してください。"];
+  }
+  if (firstAnomaly.tags.includes("ROAS")) {
+    return ["コンバージョン値が計測できているか確認し、未計測ならROAS判断を外してください。"];
+  }
+  return [`${firstAnomaly.type} の対象キャンペーンを開き、前期間との差分を確認してください。`];
+}
+
+function findAnomalousMetrics(data: DashboardResponse) {
+  const result = new Set<MetricKey>();
+  for (const anomaly of data.anomalies) {
+    for (const tag of anomaly.tags) {
+      const normalized = tag.toLowerCase();
+      if (normalized === "imp" || normalized === "impressions") result.add("impressions");
+      if (normalized === "click" || normalized === "clicks") result.add("clicks");
+      if (normalized in metricCatalog) result.add(normalized as MetricKey);
+    }
+  }
+  if ((data.changes.ctr ?? 0) < -0.05) result.add("ctr");
+  if ((data.changes.cvr ?? 0) < -0.08) result.add("cvr");
+  if ((data.changes.cpc ?? 0) > 0.1) result.add("cpc");
+  if ((data.changes.cpa ?? 0) > 0.15) result.add("cpa");
+  if ((data.changes.roas ?? 0) < -0.1) result.add("roas");
+  if ((data.changes.cost ?? 0) > 0.15) result.add("cost");
+  if ((data.changes.conversions ?? 0) < -0.08) result.add("conversions");
+  return result;
+}
+
+function trendSeriesData(data: DashboardResponse) {
+  return data.series.map((item) => ({
+    ...item,
+    cpa: item.conversions ? item.cost / item.conversions : null,
+  }));
+}
+
+function compactTrendTick(value: number) {
+  if (Math.abs(value) >= 100000) return `¥${Math.round(value / 1000)}k`;
+  return Math.round(value).toLocaleString("ja-JP");
 }
 
 function formatMoney(value: number | null) {
@@ -4024,4 +4580,14 @@ function formatDateTime(value: string) {
   }).format(new Date(value));
 }
 
-createRoot(document.getElementById("root")!).render(<StrictMode><App /></StrictMode>);
+declare global {
+  interface Window {
+    __adopsAdvisorRoot?: ReturnType<typeof createRoot>;
+  }
+}
+
+const rootElement = document.getElementById("root");
+if (!rootElement) throw new Error("Root element #root was not found.");
+const root = window.__adopsAdvisorRoot ?? createRoot(rootElement);
+window.__adopsAdvisorRoot = root;
+root.render(<StrictMode><App /></StrictMode>);
