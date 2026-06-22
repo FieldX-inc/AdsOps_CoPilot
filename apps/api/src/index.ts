@@ -2246,7 +2246,7 @@ function detectMediaWriteRequest(message: string): MediaWriteOperation[] {
 }
 
 function processMediaWriteRequest(body: ChatRequest, operations: MediaWriteOperation[]) {
-  const data = createMediaWritePolicyResponse(operations);
+  const data = createMediaWritePolicyResponse(operations, advisorModeFromContext(body.context));
   const thread = appendChatExchange(body, data);
   storeAdvisorArtifacts(body, data);
   return {
@@ -3000,25 +3000,38 @@ function advisorEntryFromContext(context: ChatRequest["context"] | undefined) {
   return mode === "experienced" ? "performance_analyst_experienced" : "setup_advisor_beginner";
 }
 
-function createMediaWritePolicyResponse(operations: MediaWriteOperation[]): ChatResponse {
+function createMediaWritePolicyResponse(operations: MediaWriteOperation[], advisorMode: "beginner" | "experienced" = "beginner"): ChatResponse {
   const labels = operationLabels(operations);
   const target = labels.length > 0 ? labels.join(" / ") : "媒体設定変更";
+  const isBeginner = advisorMode === "beginner";
+  const conclusion = isBeginner
+    ? `結論: ${target} は、すぐ変更する前に「何が悪化したか」と「戻す条件」を確認しましょう。必要なら担当者が承認してから反映します。`
+    : `結論: ${target} はAIチャットからは実行しません。対象campaign、数値根拠、戻し条件を確認し、承認付きwrite APIに confirmed=true を渡した場合だけ反映します。`;
+  const evidence = isBeginner
+    ? "根拠: 予算や停止は成果数、1件あたりの費用、クリック後の成約率に影響します。先に対象キャンペーンと比較期間をそろえると、戻す判断もしやすくなります。"
+    : `根拠: AdOps Advisorはhuman-in-the-loopを前提にしています。Google Adsはread/write接続へ移行しますが、mediaWriteEnabled=${isGoogleAdsWriteConfigured() ? "true" : "false"} で、AIが単独でplatform mutationを呼ぶ設計にはしません。`;
 
   return {
     message: {
       role: "assistant",
       content: [
-        `結論: ${target} はAIチャットからは実行しません。実行する場合は、対象campaignと数値根拠を確認したうえで、承認付きwrite APIに confirmed=true を渡したときだけ反映します。`,
+        conclusion,
         "",
-        `根拠: AdOps Advisorはhuman-in-the-loopを前提にしています。Google Adsはread/write接続へ移行しますが、mediaWriteEnabled=${isGoogleAdsWriteConfigured() ? "true" : "false"} で、AIが単独でplatform mutationを呼ぶ設計にはしません。`,
+        evidence,
         "",
-        "原因仮説: 直接変更したい背景には、CPA悪化、消化ペースのズレ、CTR/CVR低下、配信対象の広がりなどがある可能性があります。ただし、実行前に対象キャンペーンと数値根拠の確認が必要です。",
+        isBeginner
+          ? "原因仮説: 予算変更後に悪化した場合、配信対象が広がった、クリック単価が上がった、クリック後に成果へつながりにくくなった、計測がずれた、などが考えられます。"
+          : "原因仮説: 直接変更したい背景には、CPA悪化、消化ペースのズレ、CTR/CVR低下、配信対象の広がりなどがある可能性があります。ただし、実行前に対象キャンペーンと数値根拠の確認が必要です。",
         "",
-        "推奨アクション: まず対象、期間、KPI変化、計測状態、戻し条件を確認し、承認者が実行可否を判断してください。",
+        isBeginner
+          ? "推奨アクション: まず「どのキャンペーンで、いつから、1件あたりの費用がどれくらい悪化したか」を確認してください。"
+          : "推奨アクション: まず対象、期間、KPI変化、計測状態、戻し条件を確認し、承認者が実行可否を判断してください。",
         "",
         "人間向け作業手順:",
         "1. 媒体管理画面で対象アカウント、キャンペーン、広告セット、広告を開く。",
-        "2. 直近期間と比較期間のCPA/CVR/CPC/CTR、費用、CV数を確認する。",
+        isBeginner
+          ? "2. 直近期間と比較期間で、費用、成果数、1件あたりの費用、クリック単価、成約率を確認する。"
+          : "2. 直近期間と比較期間のCPA/CVR/CPC/CTR、費用、CV数を確認する。",
         "3. 実施したい変更内容、理由、期待する変化、戻し条件をメモする。",
         "4. 担当者がレビューし、必要と判断した場合だけ承認付きwrite APIまたは媒体管理画面で実行する。",
         "5. 実施後は翌日から3日間、同じKPIを観察して影響を記録する。",
