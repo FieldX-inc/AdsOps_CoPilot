@@ -129,6 +129,7 @@ def test_openai_agents_configuration_status_names_missing_sdk_symbols(monkeypatc
     fake_agents_module.Agent = FakeToolAgent
     fake_agents_module.RunConfig = FakeRunConfig
     monkeypatch.setitem(sys.modules, "agents", fake_agents_module)
+    monkeypatch.setenv("ADOPS_AGENT_RUNTIME", "openai")
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
 
     status = openai_agents_configuration_status()
