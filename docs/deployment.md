@@ -9,7 +9,7 @@ External changes are approval-gated. Reading status and generating local plans i
 ```bash
 npm run verify
 docker build -f apps/api/Dockerfile .
-docker build -f services/adk-agent/Dockerfile services/adk-agent
+docker build -f services/adk-agent/Dockerfile .
 ```
 
 The API image contains both `dist/index.js` and `dist/report-job.js`. Run the latter as the Cloud Run Job command. Build the web app with production browser-safe variables and verify `dist/_redirects` exists.

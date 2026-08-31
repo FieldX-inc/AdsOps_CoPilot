@@ -19,5 +19,6 @@ __pycache__
 coverage
 npm-debug.log*
 tmp/
+outputs/
 playwright-report/
 test-results/
