@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from typing import Any, Iterator
 
+from .policies.memory_policy import memory_rejection_reason
 from .policies.no_write_policy import looks_secret
 
 try:
@@ -213,8 +214,9 @@ class PostgresRepository:
         content: str,
     ) -> dict[str, Any]:
         require_scope(workspace_id, user_id)
-        if _looks_secret(content):
-            raise RepositoryError("memory content must not contain secrets")
+        rejection_reason = memory_rejection_reason(memory_type, content)
+        if rejection_reason:
+            raise RepositoryError(rejection_reason)
         sql = """
             insert into user_memories (workspace_id, user_id, memory_type, content)
             values (%s, %s, %s, %s)
@@ -338,10 +340,6 @@ class PostgresRepository:
 
 def get_repository() -> PostgresRepository:
     return PostgresRepository()
-
-
-def _looks_secret(value: str) -> bool:
-    return looks_secret(value)
 
 
 def _sanitize(value: Any) -> Any:

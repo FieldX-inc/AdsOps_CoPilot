@@ -15,6 +15,35 @@ try {
     issues.push(`valid production env should pass: ${valid.stderr || valid.stdout}`);
   }
 
+  const enabledAtInitialGoPath = writeEnvFile(
+    "enabled-at-initial-go-production.env",
+    validProductionEnv({ GOOGLE_ADS_WRITE_ENABLED: "true" }),
+  );
+  const enabledAtInitialGo = runCheckEnv(enabledAtInitialGoPath);
+  if (enabledAtInitialGo.status === 0) {
+    issues.push("initial production Go env with Google Ads writes enabled should fail");
+  }
+  if (!enabledAtInitialGo.stderr.includes("must be false for the initial production Go gate")) {
+    issues.push("initial production Go write failure should name the disabled-write contract");
+  }
+
+  const activationPath = writeEnvFile(
+    "google-write-activation-production.env",
+    validProductionEnv({ GOOGLE_ADS_WRITE_ENABLED: "true" }),
+  );
+  const activation = runCheckEnv(activationPath, { EXPECT_GOOGLE_ADS_WRITE_ACTIVATION: "true" });
+  if (activation.status !== 0) {
+    issues.push(`separately approved Google Ads write activation env should pass: ${activation.stderr || activation.stdout}`);
+  }
+
+  const disabledActivation = runCheckEnv(validPath, { EXPECT_GOOGLE_ADS_WRITE_ACTIVATION: "true" });
+  if (disabledActivation.status === 0) {
+    issues.push("Google Ads write activation env with writes disabled should fail");
+  }
+  if (!disabledActivation.stderr.includes("must be true only for the separately approved Google Ads write activation gate")) {
+    issues.push("write activation failure should name the separate activation contract");
+  }
+
   const missingAuthPath = writeEnvFile(
     "missing-auth-production.env",
     validProductionEnv({
@@ -93,7 +122,7 @@ try {
     validAgentProductionEnv({
       SUPABASE_SERVICE_ROLE_KEY: "service-role-key",
       GOOGLE_ADS_CLIENT_SECRET: "google-ads-client-secret",
-      STRIPE_SECRET_KEY: "sk_live_contract",
+      STRIPE_API_KEY: "rk_live_contract",
     }),
   );
   const agentWithApiSecrets = runCheckEnv(agentWithApiSecretsPath);
@@ -103,7 +132,7 @@ try {
   if (
     !agentWithApiSecrets.stderr.includes("SUPABASE_SERVICE_ROLE_KEY must not be set on production Agent env") ||
     !agentWithApiSecrets.stderr.includes("GOOGLE_ADS_CLIENT_SECRET must not be set on production Agent env") ||
-    !agentWithApiSecrets.stderr.includes("STRIPE_SECRET_KEY must not be set on production Agent env")
+    !agentWithApiSecrets.stderr.includes("STRIPE_API_KEY must not be set on production Agent env")
   ) {
     issues.push("Agent env API secret failure should name API service ownership");
   }
@@ -274,7 +303,7 @@ try {
     "stripe-test-key-production.env",
     validProductionEnv({
       DEPLOY_SURFACE: "api",
-      STRIPE_SECRET_KEY: "sk_test_contract",
+      STRIPE_API_KEY: "rk_test_contract",
       ADOPS_AGENT_RUNTIME: "",
       OPENAI_API_KEY: "",
       OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA: "",
@@ -286,7 +315,7 @@ try {
   if (stripeTestKey.status === 0) {
     issues.push("API production env with a Stripe test secret key should fail");
   }
-  if (!stripeTestKey.stderr.includes("STRIPE_SECRET_KEY must not be a Stripe test key")) {
+  if (!stripeTestKey.stderr.includes("STRIPE_API_KEY must be a live Restricted API Key")) {
     issues.push("Stripe test key failure should name the live-key contract");
   }
 
@@ -468,7 +497,7 @@ try {
     "placeholder-production.env",
     validProductionEnv({
       DEPLOY_SURFACE: "api",
-      STRIPE_SECRET_KEY: "replace-with-production-stripe-secret-key",
+      STRIPE_API_KEY: "replace-with-production-restricted-key",
       ADOPS_AGENT_RUNTIME: "",
       OPENAI_API_KEY: "",
       OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA: "",
@@ -480,7 +509,7 @@ try {
   if (placeholder.status === 0) {
     issues.push("API production env with an unreplaced placeholder should fail");
   }
-  if (!placeholder.stderr.includes("STRIPE_SECRET_KEY still contains a placeholder value")) {
+  if (!placeholder.stderr.includes("STRIPE_API_KEY still contains a placeholder value")) {
     issues.push("placeholder failure should name the unreplaced production key");
   }
 } finally {
@@ -504,11 +533,11 @@ function writeEnvFile(name, values) {
   return path;
 }
 
-function runCheckEnv(path) {
+function runCheckEnv(path, extraEnv = {}) {
   return spawnSync(process.execPath, ["scripts/check-env.mjs", path], {
     cwd: process.cwd(),
     encoding: "utf8",
-    env: cleanProcessEnv(),
+    env: { ...cleanProcessEnv(), ...extraEnv },
   });
 }
 
@@ -540,11 +569,17 @@ function validProductionEnv(overrides = {}) {
     GOOGLE_ADS_DEVELOPER_TOKEN: "developer-token",
     GOOGLE_ADS_REDIRECT_URI: "https://api.example.test/oauth/google/callback",
     GOOGLE_OAUTH_STATE_STORE: "db",
-    GOOGLE_ADS_WRITE_ENABLED: "true",
+    GOOGLE_ADS_WRITE_ENABLED: "false",
     GOOGLE_ADS_MAX_BUDGET_AMOUNT: "50000",
-    STRIPE_SECRET_KEY: "sk_live_contract",
-    STRIPE_PRICE_ID: "price_contract",
+    STRIPE_API_KEY: "rk_live_contract",
+    BILLING_PLANS_JSON: approvedBillingCatalog(),
     STRIPE_WEBHOOK_SECRET: "whsec_contract",
+    PREMIUM_ONBOARDING_BOOKING_URL: "https://booking.example.test/premium",
+    MODEL_COST_CATALOG_JSON: JSON.stringify({ version: "2026-07-15", currency: "usd", models: { "gpt-5.2": { inputPerMillion: 1, cachedInputPerMillion: 0.1, outputPerMillion: 2, reasoningPerMillion: 2 } } }),
+    CLOUDFLARE_ACCOUNT_ID: "cloudflare-account-id",
+    CLOUDFLARE_EMAIL_API_TOKEN: "cloudflare-email-token",
+    REPORT_EMAIL_DOMAIN: "mail.example.test",
+    NOTIFICATION_SIGNING_SECRET: "0123456789abcdef0123456789abcdef",
     AGENT_SERVICE_URL: "https://agent.example.test",
     AGENT_SERVICE_AUTH_MODE: "google_id_token",
     AGENT_SERVICE_AUDIENCE: "https://agent.example.test",
@@ -557,9 +592,28 @@ function validProductionEnv(overrides = {}) {
     OPENAI_AGENT_STAGING_E2E_PASSED_AT: now,
     GOOGLE_ADS_STAGING_E2E_PASSED_AT: now,
     STRIPE_STAGING_E2E_PASSED_AT: now,
+    SUPABASE_STAGING_E2E_PASSED_AT: now,
+    REPORT_EMAIL_STAGING_E2E_PASSED_AT: now,
     DEPLOYMENT_RUNBOOK_ACK: "true",
     ...overrides,
   };
+}
+
+function approvedBillingCatalog() {
+  const pricing = {
+    minimum: { month: 9800, setupFee: 50000 },
+    standard: { month: 49800, setupFee: 70000 },
+    premium: { month: 69800, setupFee: 70000 },
+  };
+  return JSON.stringify(["minimum", "standard", "premium"].map((id, index) => ({
+    id,
+    estimatedConsultations: id === "minimum" ? 0 : 30 + index * 20,
+    chatCreditLimit: id === "minimum" ? 0 : 100 + index * 100,
+    setupFee: { stripePriceId: `price_${id}_setup`, amount: pricing[id].setupFee, currency: "jpy" },
+    prices: {
+      month: { stripePriceId: `price_${id}_month`, amount: pricing[id].month, currency: "jpy" },
+    },
+  })));
 }
 
 function validAgentProductionEnv(overrides = {}) {

@@ -63,6 +63,30 @@ const requirements = [
     nextActions: repositoryStatus === "proven" ? [] : ["npm run check:goal"],
   },
   {
+    id: "workspace_auth_and_entitlements",
+    requirement: "Supabase Auth, workspace RLS, pending-payment gates, membership limits, and plan entitlements are enforced server-side.",
+    status: repositoryStatus,
+    evidence: [
+      "scripts/check-production-goal.mjs",
+      "apps/api/src/supabase.ts",
+      "apps/api/src/index.test.ts",
+      "supabase/migrations/20260715_pricing_usage_reports.sql",
+    ],
+    nextActions: repositoryStatus === "proven" ? [] : ["npm run check:goal"],
+  },
+  {
+    id: "usage_reports_and_notifications",
+    requirement: "AI usage/cost ledger, separate report credits, three-day report Job, preferences, and Cloudflare Email delivery are implemented.",
+    status: repositoryStatus,
+    evidence: [
+      "apps/api/src/usage.ts",
+      "apps/api/src/report-job.ts",
+      "apps/api/src/email.ts",
+      "apps/api/src/report-job.test.ts",
+    ],
+    nextActions: repositoryStatus === "proven" ? [] : ["npm run check:goal"],
+  },
+  {
     id: "local_repository_verification",
     requirement: "Local repository verification passes after the production changes.",
     status: verifyStatus,
@@ -79,12 +103,14 @@ const requirements = [
   },
   {
     id: "staging_provider_evidence",
-    requirement: "Staging evidence proves OpenAI Agent, Google Ads read/write/restore/audit, Stripe checkout/webhook/gate, and production env readiness.",
+    requirement: "Staging evidence proves Supabase Auth/RLS, OpenAI Agent, Google Ads read/write/restore/audit, Stripe checkout/webhook/gate, report/email delivery, and production env readiness.",
     status: stagingEvidenceStatus,
     evidence: [
       "OPENAI_AGENT_STAGING_E2E_PASSED_AT",
       "GOOGLE_ADS_STAGING_E2E_PASSED_AT",
       "STRIPE_STAGING_E2E_PASSED_AT",
+      "SUPABASE_STAGING_E2E_PASSED_AT",
+      "REPORT_EMAIL_STAGING_E2E_PASSED_AT",
       "DEPLOYMENT_RUNBOOK_ACK=true",
     ],
     missing: missingStagingEvidence(),
@@ -172,6 +198,8 @@ function stagingEvidenceEntries() {
     timestampEntry("OPENAI_AGENT_STAGING_E2E_PASSED_AT"),
     timestampEntry("GOOGLE_ADS_STAGING_E2E_PASSED_AT"),
     timestampEntry("STRIPE_STAGING_E2E_PASSED_AT"),
+    timestampEntry("SUPABASE_STAGING_E2E_PASSED_AT"),
+    timestampEntry("REPORT_EMAIL_STAGING_E2E_PASSED_AT"),
   ];
 }
 
@@ -180,6 +208,8 @@ function missingStagingEvidence() {
   if (!process.env.OPENAI_AGENT_STAGING_E2E_PASSED_AT) missing.push("OPENAI_AGENT_STAGING_E2E_PASSED_AT");
   if (!process.env.GOOGLE_ADS_STAGING_E2E_PASSED_AT) missing.push("GOOGLE_ADS_STAGING_E2E_PASSED_AT");
   if (!process.env.STRIPE_STAGING_E2E_PASSED_AT) missing.push("STRIPE_STAGING_E2E_PASSED_AT");
+  if (!process.env.SUPABASE_STAGING_E2E_PASSED_AT) missing.push("SUPABASE_STAGING_E2E_PASSED_AT");
+  if (!process.env.REPORT_EMAIL_STAGING_E2E_PASSED_AT) missing.push("REPORT_EMAIL_STAGING_E2E_PASSED_AT");
   if (process.env.DEPLOYMENT_RUNBOOK_ACK !== "true") missing.push("DEPLOYMENT_RUNBOOK_ACK=true");
   if (!missing.length) {
     missing.push(
@@ -244,6 +274,7 @@ function releaseEvidenceNoteIssues() {
     "npm run collect:release-evidence",
     "WEB_ORIGIN",
     "API `/readiness` production decision was `Go`",
+    "User-approved 3 monthly prices + 3 setup fees, plus separately approved AI limits and consultation estimates, are recorded",
   ];
   for (const snippet of requiredSnippets) {
     if (!content.includes(snippet)) issues.push(`release evidence note must include ${snippet}`);
@@ -333,8 +364,10 @@ function stagingEvidenceNextActions() {
     "Confirm the web Data Connection audit review panel shows the Google write and restore rows with approval metadata before setting GOOGLE_ADS_STAGING_E2E_PASSED_AT",
     "CONFIRM_STRIPE_WEBHOOK_TEST=true npm run e2e:stripe-webhook # requires STRIPE_WEBHOOK_SECRET and AUTH_TOKEN in operator env",
     "CONFIRM_STRIPE_FULL_E2E=true STRIPE_FULL_E2E_CONFIRMATION=\"checkout existing customer reuse webhook billing gate customer/workspace mismatch rejection confirmed\" API_ORIGIN=https://api.staging.example.com AGENT_SERVICE_URL=https://agent.staging.example.com WORKSPACE_ID=<workspace-id> npm run e2e:staging # set only after hosted Stripe evidence is recorded; requires AUTH_TOKEN and UNPAID_AUTH_TOKEN in operator env",
+    "Run Supabase Email/Google login, RLS owner/member/nonmember/cross-workspace, invitation, and plan-limit E2E before setting SUPABASE_STAGING_E2E_PASSED_AT",
+    "Run the report Job and verify duplicate claim, reconnect, HTML/plain delivery, unsubscribe, queue, and bounce evidence before setting REPORT_EMAIL_STAGING_E2E_PASSED_AT",
     "node scripts/check-env.mjs .env.production.api .env.production.agent .env.production.web",
-    "Set OPENAI_AGENT_STAGING_E2E_PASSED_AT, GOOGLE_ADS_STAGING_E2E_PASSED_AT, STRIPE_STAGING_E2E_PASSED_AT, and DEPLOYMENT_RUNBOOK_ACK=true only after evidence is complete",
+    "Set all five staging E2E timestamps and DEPLOYMENT_RUNBOOK_ACK=true only after evidence is complete",
     "npm run audit:completion -- --with-verify",
   ];
 }

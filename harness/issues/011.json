@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "manifestVersion": 2,
+  "issue": {"number": 11, "url": "https://github.com/FieldX-inc/AdsOps_CoPilot/issues/11", "title": "決済を先にし、決済完了後にアカウント登録する導線", "slug": "plan-first-checkout-flow"},
+  "state": "browser_verified",
+  "wave": "wave-5-onboarding-billing",
+  "summary": "Implement plan selection before authentication, then resume the selected plan through signup/login into authenticated Stripe Checkout and activate only on verified webhook.",
+  "decisions": ["Use plan selection -> signup/login -> pending workspace -> Stripe Checkout, not anonymous payment.", "Authentication remains before payment so Checkout can bind a workspace and existing Stripe customer safely.", "Product APIs remain fail closed until the verified webhook marks billing active."],
+  "scope": {"in": ["Pre-auth plan selection", "Safe selected-plan continuation", "Signup/login", "Pending workspace", "Authenticated Checkout", "Verified webhook activation", "Abandon/resume behavior"], "out": ["Anonymous payment before identity", "Client-supplied Price ID", "Activation from browser redirect alone"]},
+  "requirementRefs": ["REQUIREMENTS.md#4-authworkspace課金導線", "REQUIREMENTS.md#5-stripe-billing", "docs/architecture.md#product-state-flow", "docs/database.md#billing-constraints"],
+  "dependencies": [3],
+  "blockers": [],
+  "risks": [
+    {"id": "orphan-payment", "level": "critical", "description": "Payment without a bound identity/workspace could be unrecoverable.", "mitigation": "Require auth and pending workspace before creating Checkout."},
+    {"id": "selection-tampering", "level": "high", "description": "Client state could select an unapproved Price.", "mitigation": "Persist only plan/interval identifiers and map to approved Price server-side."},
+    {"id": "redirect-activation", "level": "high", "description": "A success redirect may be treated as proof of payment.", "mitigation": "Activate only from a signature-verified idempotent webhook."}
+  ],
+  "gates": [
+    {"id": "authenticated-payment-flow", "type": "product_decision", "requiredAt": "before_implementation", "status": "satisfied", "owner": "user", "description": "The accepted flow starts with plan choice but authenticates before Checkout."},
+    {"id": "stripe-hosted-e2e", "type": "staging_evidence", "requiredAt": "before_staging_verification", "status": "pending", "owner": "qa-release-agent", "description": "Verify hosted Checkout, customer reuse, webhook, billing gate, and customer/workspace mismatch rejection."}
+  ],
+  "ownership": {"primaryAgent": "product-ui-agent", "reviewAgents": ["contract-guard", "api-db-provider-agent", "qa-release-agent"], "allowedPaths": ["apps/web/src/main.tsx", "apps/web/src/styles.css", "apps/api/src/billing.ts", "apps/api/src/billing.test.ts", "apps/api/src/index.ts", "supabase/migrations/*.sql", "docs/billing.md", "REQUIREMENTS.md", "docs/architecture.md"], "forbiddenPaths": ["services/adk-agent/**", ".env*", "deploy/production-*.env*"]},
+  "acceptanceCriteria": ["A visitor chooses plan and interval before auth, and the choice resumes after signup/login without trusting a Price ID.", "Checkout is created only for an authenticated member of the pending workspace.", "Existing Stripe customers are reused.", "Success redirect alone does not activate the workspace.", "Pending, abandoned, unpaid, cancelled, and unknown Price states remain fail closed.", "Signed idempotent webhook activation and mismatch rejection are covered."],
+  "verification": {"commands": ["npm --workspace @adops/api test", "npm run e2e:browser", "npm run e2e:stripe-webhook", "npm run e2e:staging"], "scenarioIds": ["billing-entry", "release-read-only-smoke"]},
+  "evidence": {"requiredArtifacts": ["test-log", "api-contract", "screenshot", "playwright-trace", "provider-confirmation", "audit-record"], "retention": "release-lifetime"},
+  "rollback": {"strategy": "Disable new pre-auth continuation and return to authenticated plan selection while keeping pending workspaces and Stripe records intact.", "verification": "Existing customer reuse, webhook activation, and billing fail-closed tests still pass."}
+}

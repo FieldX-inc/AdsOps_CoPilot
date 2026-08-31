@@ -18,8 +18,8 @@ def test_setup_intake_runtime_scores_dimensions_and_gates_steps() -> None:
         }
     )
 
-    assert result["score"] == sum(result["dimensionScores"].values())
-    assert result["score"] >= 80
+    assert result["score"] == min(10, round(sum(result["dimensionScores"].values()) / 10))
+    assert result["score"] >= 8
     assert result["readyForSetupSteps"] is True
     assert result["missingFields"] == []
     assert result["setupSteps"]
@@ -35,7 +35,7 @@ def test_setup_intake_runtime_asks_three_or_fewer_questions_when_not_ready() -> 
         }
     )
 
-    assert result["score"] < 80
+    assert result["score"] < 8
     assert result["readyForSetupSteps"] is False
     assert result["setupSteps"] == []
     assert result["assistantMessage"].count("\n1.") <= 1

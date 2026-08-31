@@ -19,9 +19,50 @@
       "expected": {
         "mode": "openai_agents",
         "trace_include_sensitive_data": false,
-        "tools": ["setup_advisor", "performance_analyst", "budget_learning", "media_spec", "action_plan", "qa_review"],
-        "must_include": ["openai_agents", "ad_ops_advisor_orchestrator", "予算引き下げ候補"],
+        "tools": ["setup_advisor", "performance_analyst", "action_plan", "qa_review"],
+        "agent_names": ["root_agent", "setup_advisor_agent", "performance_analyst_agent", "action_plan_agent", "qa_agent"],
+        "must_include": ["openai_agents", "root_agent", "予算引き下げ候補"],
         "must_not_include": ["予算を下げる", "Bearer ", "sk-"]
+      }
+    },
+    {
+      "id": "issue_6_history_produces_checkpoint_not_duplicate_or_failed_repeat",
+      "user_message": "過去の結果を踏まえて、次のタスクと確認ポイントを提案して",
+      "context": {
+        "recentTasks": [
+          {
+            "id": "task-search-terms",
+            "title": "検索語句を確認する",
+            "status": "doing"
+          }
+        ],
+        "operatorFeedbackSummary": [
+          {
+            "outcome": "did_not_work",
+            "comment": "P-MAXへの予算寄せでCV数が減った"
+          }
+        ]
+      },
+      "fake_model_output": {
+        "conclusion": "新規の重複タスクは作らず、既存タスクに確認ポイントを追加します。",
+        "evidence": ["task-search-termsがdoing", "P-MAX予算寄せはdid_not_work"],
+        "hypotheses": ["検索語句の中間確認が不足している可能性"],
+        "recommended_actions": ["既存タスクの再検証チェックポイントを確認する"],
+        "operator_steps": ["task-search-termsの進捗と検索語句を確認する"],
+        "preflight_checks": ["P-MAX予算変更は行わない"],
+        "risks": ["過去の失敗方針を繰り返すリスク"],
+        "observation_plan": ["CV数とCPAを確認する"],
+        "confidence": "medium"
+      },
+      "expected": {
+        "mode": "openai_agents",
+        "trace_include_sensitive_data": false,
+        "tools": ["setup_advisor", "performance_analyst", "action_plan", "qa_review"],
+        "agent_names": ["root_agent", "setup_advisor_agent", "performance_analyst_agent", "action_plan_agent", "qa_agent"],
+        "must_include": ["task-search-terms", "did_not_work", "重複タスク", "再検証チェックポイント"],
+        "must_not_include": ["setup_intake_agent", "create_campaign", "campaign_create"],
+        "root_instruction_includes": ["既存タスクと重複する新規タスクを作らない", "did_not_work / rejected", "人間に確認するチェックポイント"],
+        "input_prompt_includes": ["recentTasks", "operatorFeedbackSummary", "task-search-terms", "did_not_work"]
       }
     }
   ]

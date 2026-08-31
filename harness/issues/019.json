@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "manifestVersion": 2,
+  "issue": {"number": 19, "url": "https://github.com/FieldX-inc/AdsOps_CoPilot/issues/19", "title": "BI分析を削除し、関連導線を整理する", "slug": "remove-bi-analysis"},
+  "state": "browser_verified",
+  "wave": "wave-3-information-architecture",
+  "summary": "Remove BI analysis as a primary surface and intentionally redirect useful metric entry points to Dashboard/AI without deleting underlying data capability.",
+  "decisions": ["Issue #19 supersedes the current BI navigation requirement in REQUIREMENTS.md and DESIGN.md.", "Remove the product route/navigation/CTA, not historical metrics storage needed by Dashboard, Agent, or reports.", "Every old internal path has an explicit replacement or retirement behavior."],
+  "scope": {"in": ["BI navigation removal", "Route redirect/retirement", "CTA/link inventory", "Dashboard/AI destination mapping", "Source-document update"], "out": ["Metrics table deletion", "Dashboard KPI removal", "Agent/report analysis removal", "Database destructive migration"]},
+  "requirementRefs": ["REQUIREMENTS.md#8-広告データとui", "DESIGN.md#2-アプリケーション構成", "docs/architecture.md#data-path"],
+  "dependencies": [],
+  "blockers": [],
+  "risks": [
+    {"id": "data-deletion", "level": "critical", "description": "Removing a screen could be mistaken for removing shared metric storage.", "mitigation": "Prohibit destructive migration and retain Dashboard/Agent/report data paths."},
+    {"id": "orphaned-links", "level": "medium", "description": "Help, chat, email, or bookmarks may still point at BI.", "mitigation": "Inventory internal destinations and test redirect/retirement behavior."}
+  ],
+  "gates": [
+    {"id": "remove-bi-source-of-truth", "type": "product_decision", "requiredAt": "before_implementation", "status": "satisfied", "owner": "user", "description": "The issue is accepted as the new source of truth for main navigation."}
+  ],
+  "ownership": {"primaryAgent": "product-ui-agent", "reviewAgents": ["contract-guard", "qa-release-agent"], "allowedPaths": ["apps/web/src/**", "REQUIREMENTS.md", "DESIGN.md", "docs/**", "tests/e2e/**"], "forbiddenPaths": ["supabase/migrations/**", "apps/api/src/supabase.ts", "services/adk-agent/**", ".env*"]},
+  "acceptanceCriteria": ["BI analysis is absent from primary navigation and active product routes.", "Useful BI entry points intentionally lead to Dashboard filters or contextual AI consultation.", "Legacy links do not produce a blank or broken screen.", "Metrics storage and Dashboard/Agent/report analysis continue unchanged.", "REQUIREMENTS.md and DESIGN.md no longer require BI analysis."],
+  "verification": {"commands": ["npm --workspace @adops/web run typecheck", "npm --workspace @adops/web run build", "npm run e2e:browser"], "scenarioIds": ["help-navigation", "release-read-only-smoke"]},
+  "evidence": {"requiredArtifacts": ["test-log", "screenshot", "playwright-trace", "decision-record"], "retention": "release-lifetime"},
+  "rollback": {"strategy": "Restore the prior route/navigation without changing metric storage.", "verification": "Dashboard, Agent, report, and legacy-link browser scenarios remain functional."}
+}

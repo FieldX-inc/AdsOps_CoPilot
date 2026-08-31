@@ -6,6 +6,7 @@ FORBIDDEN_TOOL_PREFIXES = (
     "pause_",
     "enable_",
     "create_ad",
+    "create_campaign",
     "apply_",
     "mutate_",
 )
@@ -14,6 +15,8 @@ FORBIDDEN_TOOL_MARKERS = (
     "_budget",
     "_bid",
     "_campaign_status",
+    "_campaign_create",
+    "_campaign_creation",
     "_ad_status",
     "_targeting",
 )

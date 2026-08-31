@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "manifestVersion": 2,
+  "issue": {"number": 18, "url": "https://github.com/FieldX-inc/AdsOps_CoPilot/issues/18", "title": "3日ごとの定期改善レポートメールを本稼働設定", "slug": "scheduled-improvement-report"},
+  "state": "local_verified",
+  "wave": "wave-7-reports-demo-release",
+  "summary": "Complete the timezone-aware three-day report claim, Agent analysis, customer UI, Cloudflare email delivery, retry, subscription, and staging evidence flow.",
+  "decisions": ["Cloud Scheduler starts the hourly Cloud Run Job; DB next_run_at and idempotent claim determine due workspaces.", "Missing/expired Google data produces a reconnect notice, not fabricated analysis.", "Email contains a summary and product link; detailed report stays in the authenticated application."],
+  "scope": {"in": ["Due-workspace claim", "Idempotent report run", "Retry policy", "Structured Agent report", "HTML/plain email", "Subscription preference", "Report list/detail", "Staging Job evidence"], "out": ["Daily report", "Emailing full sensitive account detail", "Automatic write execution", "Unbounded retries"]},
+  "requirementRefs": ["REQUIREMENTS.md#7-3日ごとの改善レポート", "docs/architecture.md#scheduled-reports", "docs/database.md#report-claim-and-retry", "docs/adk-design.md"],
+  "dependencies": [6],
+  "blockers": [],
+  "risks": [
+    {"id": "duplicate-email", "level": "high", "description": "Concurrent jobs may deliver the same period more than once.", "mitigation": "Use unique idempotency key plus conditional claim and delivery state tests."},
+    {"id": "fabricated-report", "level": "critical", "description": "The Agent may analyze unavailable data.", "mitigation": "Gate generation on scoped provider data and switch to reconnect/data-insufficient content."},
+    {"id": "email-delivery-loop", "level": "high", "description": "Permanent 4xx errors may retry indefinitely.", "mitigation": "Retry only 429/5xx with a maximum; record 4xx as terminal."}
+  ],
+  "gates": [
+    {"id": "email-domain", "type": "external_prerequisite", "requiredAt": "before_staging_verification", "status": "pending", "owner": "user", "description": "Approve and configure the dedicated sending domain and reports sender."},
+    {"id": "scheduler-job-staging", "type": "human_approval", "requiredAt": "before_staging_verification", "status": "pending", "owner": "user", "description": "Approve staging Scheduler/Job and external email execution."}
+  ],
+  "ownership": {"primaryAgent": "api-db-provider-agent", "reviewAgents": ["runtime-agent-engineer", "contract-guard", "product-ui-agent", "qa-release-agent"], "allowedPaths": ["apps/api/src/report-job.ts", "apps/api/src/report-job.test.ts", "apps/api/src/email.ts", "apps/api/src/index.ts", "apps/api/src/index.test.ts", "apps/api/src/usage.ts", "apps/web/src/**", "services/adk-agent/**", "supabase/migrations/*.sql", "docs/notifications.md", "docs/deployment.md", "deploy/**", "scripts/staging-e2e.mjs"], "forbiddenPaths": [".env*", "**/*secret*", "apps/api/src/google-ads.ts"]},
+  "acceptanceCriteria": ["A workspace is claimed once per three-day period at 09:00 in its timezone.", "Retries are bounded; only 429/5xx retry and 4xx becomes terminal.", "Data insufficiency/auth expiry produces reconnect content with no invented KPI.", "Minimum report includes human procedure and locked write/chat CTA; other plans use their entitlements.", "HTML/plain delivery, per-user unsubscribe, queue, and bounce evidence pass staging.", "Report usage is separate from chat quota."],
+  "verification": {"commands": ["npm --workspace @adops/api test", "python3.11 -m pytest services/adk-agent/tests", "npm run e2e:browser", "npm run e2e:staging"], "scenarioIds": ["scheduled-report", "release-read-only-smoke"]},
+  "evidence": {"requiredArtifacts": ["test-log", "agent-eval", "screenshot", "provider-confirmation", "audit-record", "release-note"], "retention": "release-lifetime"},
+  "rollback": {"strategy": "Pause Scheduler/Job, retain report rows, disable sends, and keep the authenticated report history readable.", "verification": "No new claims or email attempts occur after pause and existing report/audit rows remain intact."}
+}

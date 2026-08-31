@@ -1,516 +1,179 @@
-# AdOps Advisor - REQUIREMENTS.md v0.3
+# AdOps Advisor 要件定義
+
+Version: 1.0
+Updated: 2026-07-21
+Pricing and entitlement source: Codex session `019f6426-50d9-73b1-846d-a805f7cdb914`
 
 ## 1. プロダクト定義
 
-AdOps Advisor は、自社で広告運用を行う中小企業の担当者向けの **AI広告コンサルタント** である。
+AdOps Advisor（顧客向け名称「ちょこっとインハウス」）は、自社で広告運用を行う中小企業向けのhuman-in-the-loop型AI広告コンサルタントである。AIは分析・提案・承認候補・人間向け作業手順までを作成し、広告媒体の設定を単独で変更しない。
+
+現在の正本構成は次のとおり。
+
+- Web: React + Vite、Cloudflare Pages
+- Public API / OAuth callback: Node.js + Hono、Google Cloud Run
+- Private Agent Service: Python + OpenAI Agents SDK、Google Cloud Run
+- Scheduled report: Public APIと同一イメージのCloud Run Job
+- Auth / Postgres / RLS: Supabase
+- Billing: Stripe Checkout / Customer Portal / Webhook
+- Email: Cloudflare Email Service REST API
+
+Google Sheetsを主データソースとする旧MVP、TikTok、Gemini、Next.js、Vercel前提は廃止済みである。Meta Ads / Yahoo Ads、Cloud SQL、BigQuery、ユーザーKPI閾値設定、BI専用画面は本番Go後の別フェーズとする。
+
+## 2. 完了定義
+
+「全部完了」は、コード完成だけでなく次のすべてを満たす状態を指す。
+
+1. local quality gateとコンテナbuildが成功する
+2. stagingでSupabase、Google Ads、Stripe test mode、OpenAI、Cloudflare EmailのE2Eが成功する
+3. 3プランの初期費用・月額料金と、実測原価をもとにしたAI利用枠がユーザー承認済みである
+4. Stripe test/live catalog、Portal、Webhookが承認済み設定で動作する
+5. 本番デプロイ、スモーク、ロールバック確認、リリース証跡が完了する
+6. `/readiness`の実プロバイダ疎通とcompletion auditがGoになる。ただし初回本番Goは`GOOGLE_ADS_WRITE_ENABLED=false`を正常状態とし、write機能の開放判定と分離する
+
+## 3. プランと権限
+
+| 項目 | ミニマム | スタンダード | プレミアム |
+|---|---:|---:|---:|
+| ユーザー数 | 2名 | 2名 | 5名 |
+| Google Adsアカウント数 | 1件 | 3件 | 10件 |
+| AI初期設定 | あり | あり | あり |
+| AI改善レポート | 3日ごと | 3日ごと | 3日ごと |
+| 通常AIチャット | 利用不可・ロック表示 | あり | あり・大きい利用枠 |
+| Google Ads承認付きwrite | 利用不可 | あり | あり |
+| 初期有人支援 | なし | なし | 予約制で含む |
+| 初期費用 | 50,000円 | 70,000円 | 70,000円 |
+| 月額料金 | 9,800円/月 | 49,800円/月 | 69,800円/月 |
+| 請求周期 | 月額 | 月額 | 月額 |
+| 無料トライアル | なし | なし | なし |
+
+スタンダードを主力とする。スタンダードとプレミアムの基本機能は共通とし、AI利用量、人数、広告アカウント数、有人支援で差を作る。初期費用と月額料金は2026-07-24承認済み。Standard/PremiumのAI利用枠と顧客向け相談回数目安は原価実測後の承認ゲートとする。年額販売は現時点で行わない。
+
+## 4. Auth・workspace・課金導線
+
+- Supabase Email認証とGoogleログインを使う
+- 1 workspace = 1会社。1ユーザーは複数workspaceに所属できる
+- 初回導線は「プラン選択 → 登録/ログイン → pending workspace作成 → Stripe Checkout → active化」
+- 未認証ユーザーはsecretを含まない公開プラン一覧のみ閲覧できる。選択した`planId` / `interval`は認証後にサーバーで再検証し、pending workspaceとCheckout Sessionに紐付ける
+- pending payment時は認証、workspace基本設定、プラン一覧、Checkout、ログアウトだけを許可する
+- その他の製品APIは`402 billing_required`でfail closedする
+- Checkoutと署名検証済みWebhook反映後にactiveにする
+- owner/adminがメンバーを招待し、サーバー側とDB triggerの両方でプラン上限を強制する
+- 最後のownerの削除は拒否する
+- Premium初期支援は`PREMIUM_ONBOARDING_BOOKING_URL`へのボタン導線とし、予約管理システムは作らない。未設定時もボタンを表示し、`https://example.com`へ遷移する
+
+## 5. Stripe Billing
+
+- plan IDは`minimum` / `standard` / `premium`で固定する
+- `BILLING_PLANS_JSON`に各プランの月額Priceと一回払いの初期費用Price、表示額、通貨、AI枠、相談回数目安を持たせる
+- `GET /billing/plans`はPrice IDやsecretを返さない
+- Checkout入力は`{ planId, interval: "month" }`とし、サーバーが承認済みの月額Priceと初期費用Priceへ変換する
+- subscription modeのCheckoutに月額Priceと一回払いPriceを同梱し、初期費用は初回invoiceだけに載せる。trialは設定しない
+- Customer Portalでプラン/周期変更、キャンセルを行う
+- 既存Stripe Customerを再利用する
+- Webhookは署名、workspace/customer一致、Price一致を検証する
+- 未払い、解約、不明Priceはfail closedする
+- downgradeで上限超過した既存データは消さず、新規追加だけを停止する
+- 本番は必要最小限のRestricted API Keyを使う
+
+## 6. AI利用量と原価
+
+- Agents SDKの実行結果からrequests、input/cached input/output/reasoning/total tokensを取得する
+- `ai_usage_events`にworkspace/user、`setup|chat|scheduled_report`、source ID、model、token内訳、実行時点の推定原価、credit、rate version、idempotency keyを保存する
+- model別原価表は`MODEL_COST_CATALOG_JSON`でversion管理する
+- chat creditとscheduled report creditは分離する
+- ミニマムのchat creditは0、Standard/Premiumの上限は設定駆動とする
+- 顧客UIはtoken数と原価を出さず、月間利用率、残り相談量の目安、リセット日、アップグレード導線だけを表示する
+- chat上限後も履歴閲覧、定期レポート、設定を止めない
+
+## 7. 3日ごとの改善レポート
+
+- workspace timezoneの9:00を基準に3日ごと。未設定時は`Asia/Tokyo`
+- Cloud Schedulerは1時間ごとにCloud Run Jobを起動し、Jobが`next_run_at`以前のworkspaceをDB上でclaimする
+- 同一期間はidempotency keyで重複生成しない。失敗時は上限付き再試行する
+- レポートはKPI比較、変化、原因仮説、改善候補、優先度、手順、リスク、観察、自信度を含む
+- ミニマムは手順まで。write CTAと通常chat CTAはロック表示にする
+- メールは概要だけをHTML/plain textで送り、詳細は管理画面へ誘導する
+- owner/adminは初期購読ON。各ユーザーが自分の購読をON/OFFできる
+- Cloudflare Email Service REST APIで`reports@<専用ドメイン>`、表示名「ちょこっとインハウス」から送る
+- 429/5xxだけ指数バックオフし、4xxは自動再送しない
+- Google認証切れ/データ不足時は分析を捗造せず再接続通知に切り替える
+
+## 8. 広告データとUI
+
+メインナビは「ダッシュボード / 広告準備 / ヘルプ / データ連携」とする。BI分析とAdコラムの独立ページは設けない。AIチャットは独立ページではなく右サイドドロワーとする。Human Tasksは独立ナビにせずAI回答内の作業手順として扱う。
+
+- Dashboard / AI / reportの全てに同じ`platform?` / `adAccountId?`フィルタを適用する
+- 不正なアカウント値は400、workspace越境は403、platform不一致は400
+- accountにexternal ID/currency/timezone/status/last sync、campaignにad account ID/customer ID/statusを含める
+- account接続時に1/3/10件のプラン上限をサーバーとDBで強制する
+- setup scoreはサーバー/UIとも`0〜10`にclampする
+- loading、空データ、同期失敗、部分データを明示する
+- 利用不可機能は非表示にせずロックとアップグレード導線を表示する
+- `?preview=setup`とモックダッシュボード切替はlocal/stagingの確認用とし、productionで強制無効化する
 
-主役はダッシュボードではない。ダッシュボードはAIが判断するための補助情報であり、プロダクト価値の中心は「広告運用に詳しくない担当者が、AIに相談しながら広告設計・分析・改善判断を進められること」にある。
+### 広告準備とキャンペーン作成案
 
-旧MVPの Google Sheets 手動取り込み前提は廃止する。今後は Google Ads から広告API連携を開始し、Meta Ads / Yahoo Ads は後続で拡張する。
+- 広告準備はチャットではなく、schema-drivenな一問一答の質問票として提供する。会話履歴、吹き出し、チャット入力欄は置かない
+- 初期質問票はラジオボタンを中心とし、必須回答、戻る、回答ごとの途中保存、再開、回答一覧での確認と編集を提供する
+- 選択肢にない情報は各質問の任意補足としてだけ自由入力で受ける
+- 質問票の主画面は罫線と余白で階層化し、質問や回答項目をカードの集合として並べない
+- AIは回答からキャンペーン作成案、根拠、実施前チェック、Google Ads管理画面で人が行う手順を作る
+- キャンペーン作成APIとAgentの作成toolは実装しない。作成案は実行済みと扱わず、人間が媒体管理画面で確認して作成する
 
-## 2. 対象ユーザー
+### ヘルプ
 
-- 自社で広告を運用している中小企業の担当者
-- 広告運用の専門知識が深くないマーケティング担当者
-- 広告代理店ではなく、自社の商材・予算・成果に責任を持つ人
-- 広告の初期設計から運用改善まで相談相手が欲しい人
+- Adコラムに代わり、操作手順、KPIの見方、OAuth、承認付きwriteの注意点を検索・閲覧できるヘルプを提供する
+- コンテンツの正常系はmicroCMSから取得し、credentialやAPIレスポンスをブラウザへ露出しない
+- microCMS未設定、timeout、4xx/5xx、空レスポンス時は、ビルドに含む最小ヘルプへフォールバックし、媒体の設定・実行に関わる誤った手順を表示しない
 
-## 3. 提供価値
+## 9. Agent・提案・記憶
 
-AdOps Advisor は、広告コンサルタントのように振る舞う。
+初期Agentは`root_agent`、`setup_advisor_agent`、`performance_analyst_agent`、`action_plan_agent`、`qa_agent`の5つだけとする。IssueごとのAgentや別の専門Agentは追加しない。Agentに媒体mutation toolを与えない。
 
-広告開始前:
+最終出力はPydantic構造化出力とし、結論、根拠、原因仮説、推奨アクション、人間向け作業手順、実施前チェック、リスク、実施後の観察、自信度を必須とする。recommendation、human task、write candidate、memory candidatesはoptionalとする。
 
-- 商材理解
-- ペルソナ設計
-- ターゲット整理
-- 訴求軸の整理
-- 媒体選定
-- 初期キャンペーン構成の提案
+- write candidateは当該requestのworkspace scope済み実コンテキストに存在するcustomer/campaign IDだけを許可する
+- 長期記憶は安定した好み・会社文脈・継続方針に限り、source/dedupe keyを持たせる
+- 一時的KPI、顧客一覧、PII、secret、tokenは保存しない
+- Agent promptにsecret/token/顧客一覧を渡さない
 
-広告運用中:
+## 10. Google Ads承認付きwrite
 
-- KPIの読み解き
-- CPA悪化、CVR低下、CTR低下などの原因仮説
-- 媒体横断での優先順位付け
-- 次に見るべきキャンペーンの提示
-- 人間が管理画面で実行するための作業手順作成
+実行はcampaign statusとcampaign budgetだけに限る。Agent toolではなくAPI layerが実行する。
 
-実施後:
+- live preview APIで現在値をGoogle Adsから取る
+- requestにexpected current value、`confirmed=true`、承認理由、ロールバック条件を必須化する
+- 実行直前に再取得し、差分があれば409で停止する
+- 認証、workspace所属、active subscription、Standard/Premium、write flag、budget上限をすべて満たす場合だけ実行する
+- before/after/audit ID/rollback payloadを返し、成功・失敗・競合をredact済み監査ログへ残す
+- 復元実行は`rollbackAuditId`で元auditと関係付ける
+- キャンペーン表とAI提案の両方から確認モーダルを開ける
+- 本番初回公開時は`GOOGLE_ADS_WRITE_ENABLED=false`とし、別の承認で有効化する
 
-- 提案が採用されたかを記録
-- 実施後の結果や担当者フィードバックを記憶
-- 次回以降の提案に反映
+## 11. セキュリティと受け入れ
 
-## 4. MVPスコープ
+- 全事業データはworkspace scopeを検証し、RLSとAPIの両方で越境を拒否する
+- OAuth token、refresh token、API key、service role keyはログ、ブラウザ、Agent prompt、memory、メールに出さない
+- tokenはサーバー側でAES-256-GCM暗号化保存する
+- preview/auth bypass/mock toggleはproductionで無効とする
+- 顧客にtoken数や内部原価を開示しない
+- stagingでstatusを`ENABLED ↔ PAUSED`と往復し必ず復元する。budgetはprovider mock/契約テストだけで実媒体は変更しない
 
-### 含む
+## 12. 外部入力・承認ゲート
 
-- Supabase Auth によるログイン
-- 1 workspace = 1会社
-- 1 workspace に複数広告アカウントを連携可能
-- Google Ads の read/write API連携
-- Meta Ads / Yahoo Ads の read API連携は後続
-- 最低限のダッシュボード
-- OpenAI Agents SDK ベースのAIチャット
-- Stripe Checkout / Billing Portal / Webhook によるSaaS課金
-- ログインユーザー単位の長期記憶
-- workspace単位の会社・商材・広告アカウント文脈
-- human-in-the-loop の改善提案
-- 人間向け作業指示書
-- human task 管理
-- operator feedback の記録
-- agent tool call / audit log の記録
+次はコード実装者が決めず、ユーザー承認後に実施する。
 
-### 含まない
+- 製品専用メール送信ドメインの取得と文字列確定
+- Standard/PremiumのAI利用枠と相談回数目安（初期費用・月額料金は2026-07-24承認済み）
+- remote Supabase migration
+- Stripe Product/Price、Portal、Webhookのtest/live設定
+- Google Ads staging/production write
+- 本番write flag有効化
 
-- AIによる無承認の広告設定変更
-- 入札変更、広告作成、targeting変更の自動実行
-- 自動最適化
-- 定期実行型の自律エージェント
-- Slack通知
-- 代理店向けマルチクライアント管理
-- 高度なBIツール
-- CSV / Google Sheets を主データソースにすること
+Issue由来の次の項目は、必要な外部入力が揃うまで`blocked`とし、推測で実装しない。
 
-CSV / Sheets は将来的なデモ、検証、fallback では使ってよいが、プロダクトの主軸にはしない。
+- #5「【要判断】ポイント」: 意味、対象画面、受入条件が未定義。定義またはIssue終了の判断が必要
+- #15「森さんのチャット要件をダッシュボードへ反映」: 原文または同等の要件一覧、対象画面、受入条件が必要
 
-## 5. ワークスペース設計
-
-MVPでは以下の設計にする。
-
-- `workspace` = 1会社
-- `user` = Supabase Auth のログインユーザー
-- 1 workspace に複数 user を紐付けられる設計にしておく
-- 1 workspace に Google / Meta / Yahoo の複数広告アカウントを紐付けられる
-- ユーザー記憶は user 単位
-- 会社情報・商材情報・広告アカウント情報は workspace 単位
-
-代理店向けの複数クライアント切り替えUIはMVPでは作らない。ただしDBは将来拡張できる形にしておく。
-
-## 6. 認証・広告アカウント連携
-
-### UX方針
-
-ユーザーには「ログインしたらそのまま広告アカウントも連携できる」ように感じさせたい。
-
-ただし、アプリログインと広告API認可は技術的に別物として扱う。
-
-ユーザーに広告媒体のAPIキー、developer token、client secret、app secret の取得や入力を求めない。ユーザー向けUIは `Google Ads と連携` のようなOAuthボタンを基本にし、各媒体の認可画面でログインして必要scopeを許可してもらう。媒体アプリのclient secretやdeveloper tokenが必要な場合はAdOps Advisor側のサーバー設定として管理し、ワークスペース利用者には見せない。
-
-Google Ads writeはhuman-in-the-loopを必須にする。AIは変更候補、理由、戻し条件、観察計画を作るが、実行は認証済みユーザーが対象IDと `confirmed=true` を指定したAPI routeだけに限定する。`GOOGLE_ADS_WRITE_ENABLED=true` が設定されていない環境ではwrite routeは実行しない。
-
-### 技術方針
-
-- アプリログイン: Supabase Auth
-- Google Ads連携: Google Ads API 用 OAuth
-- Meta Ads連携: Meta Marketing API 用 OAuth
-- Yahoo Ads連携: Yahoo Ads API 用 OAuth
-
-OAuth token は暗号化して保存する。token はサーバー側だけで扱い、ブラウザ、ログ、AIプロンプト、agent memory に出してはいけない。
-
-## 7. インフラ方針
-
-### 現時点の推奨
-
-MVP初期は **Cloudflare + Cloud Run + Supabase** の組み合わせを第一候補にする。
-
-- Web / 軽量API / OAuth callback:
-  - Cloudflare Pages / Workers を候補にする
-- OpenAI Agent Service:
-  - Google Cloud Run を第一候補にする
-- DB / Auth:
-  - Supabase
-
-### 公開版 / SaaS本番の候補
-
-公開版では、Google Ads API、OpenAI Agent Service、分析処理、監査・運用監視をGoogle Cloud側に寄せるため、**Google Cloud中心構成** を第一候補にする。
-
-- Web / API:
-  - Cloud Run または Cloudflare Pages / Workers + Cloud Run API
-- OpenAI Agent Service:
-  - Google Cloud Run
-- DB:
-  - Cloud SQL for PostgreSQL
-- secret / encryption key:
-  - Secret Manager / Cloud KMS
-- 長期分析・集計:
-  - BigQuery
-
-ただしMVP開発速度を優先し、当面はSupabase Auth/Postgresで進める。DB schemaとservice実装は **Postgres-first** とし、Supabase固有機能への依存は認証・RLS・DB境界に閉じ込める。agent/service層はCloud SQL for PostgreSQLへ移行しやすい形を保つ。
-
-### 理由
-
-Cloudflare はフロント配信、軽量API、OAuth callback、エッジ実行に強い。一方で、OpenAI Agents SDK runtimeはPython依存、長めのagent処理、将来的なジョブ実行・観測性を考えると Cloud Run の方が扱いやすい。
-
-したがって、全部をCloudflareに寄せるより、以下の分担がよい。
-
-```txt
-Cloudflare Pages / Workers
-  - Web UI
-  - BFF / 軽量API
-  - OAuth callback
-
-Google Cloud Run
-  - OpenAI Agent Service
-  - 重い分析処理
-  - Google Ads API / Stripe / OpenAI runtime との連携
-
-Supabase
-  - Auth
-  - Postgres
-  - Row Level Security
-```
-
-公開版候補:
-
-```txt
-Google Cloud Run
-  - Web/API backend
-  - OpenAI Agent Service
-
-Cloud SQL for PostgreSQL
-  - SaaS core DB
-
-Secret Manager / Cloud KMS
-  - OAuth token encryption key
-  - service credentials
-
-BigQuery
-  - 広告metricsの長期分析・集計
-```
-
-### 未確定
-
-Next.jsを使うか、別のWebフレームワークを使うかは未確定。Cloudflareを使うなら、Cloudflare Pagesとの相性を考慮して決める。
-
-## 8. データ要件
-
-### 広告アカウント情報
-
-各連携広告アカウントについて、最低限以下を保持する。
-
-- platform
-- external account id
-- account name
-- currency
-- timezone
-- status
-- connection status
-
-### 指標データ
-
-最低限、以下の粒度を扱えるようにする。
-
-- account
-- campaign
-- ad group / ad set
-- ad / creative（取得可能な場合）
-
-最低限の指標:
-
-- impressions
-- clicks
-- cost
-- conversions
-- revenue / conversion value
-- CTR
-- CVR
-- CPC
-- CPA
-- ROAS
-
-KPI算出ルール:
-
-- CTR = clicks / impressions
-- CVR = conversions / clicks
-- CPC = cost / clicks
-- CPA = cost / conversions
-- ROAS = revenue / cost
-- ゼロ割は禁止
-- 算出不能な値はUIでは `-` 表示
-
-## 9. ダッシュボード要件
-
-ダッシュボードは最小限でよい。AIに相談するための状況把握画面として作る。
-
-必須:
-
-- 連携アカウント状態
-- 期間フィルタ
-- 媒体 / アカウントフィルタ
-- KPIカード
-- キャンペーン別パフォーマンス表
-- シンプルな時系列グラフ
-- 最近のAI提案 / human task
-
-MVPでは不要:
-
-- 高度なBI
-- 自由なレポートビルダー
-- スライド自動生成
-- 細かいデザイン作り込み
-
-## 10. AI Advisor要件
-
-AI Advisor は、広告に関する広い質問に答えられることを目指す。
-
-例:
-
-- 「誰をターゲットにすべき？」
-- 「ペルソナを一緒に考えて」
-- 「キャンペーン構成どうすればいい？」
-- 「CPAが悪化した理由を教えて」
-- 「どのキャンペーンから見るべき？」
-- 「次に何をすればいい？」
-- 「作業チェックリストにして」
-- 「初心者にもわかるように説明して」
-
-広告データが足りない場合は、推測で断言せず、足りない情報を明示する。商材情報が足りない場合は、必要な質問をする。
-
-## 11. OpenAI Agent構成
-
-最初から巨大なmulti-agent構成にしない。まずは小さく始める。
-
-### 初期agent
-
-- `root_agent`
-  - 全質問の入口
-  - intent判定
-  - tool / sub-agent 呼び出し
-  - 最終回答の統合
-
-- `setup_advisor_agent`
-  - 広告開始前の相談
-  - 商材、ペルソナ、ターゲット、訴求、媒体選定、初期構成
-
-- `performance_analyst_agent`
-  - 広告指標の読み取り
-  - 期間比較
-  - KPI変化の説明
-  - 原因仮説
-
-- `action_plan_agent`
-  - 提案を人間向け作業手順に変換
-  - チェックリスト、リスク、期待効果、観察計画
-
-- `qa_agent`
-  - 根拠確認
-  - 自信度調整
-  - 危険な断定の抑制
-  - 承認付きwrite境界チェック
-
-### 後で分離するagent候補
-
-- `budget_advisor_agent`
-- `creative_review_agent`
-- `reporting_agent`
-- `help_agent`
-
-## 12. Tool Policy
-
-### 許可するtool
-
-- 広告アカウント一覧の取得
-- 指標データの取得
-- KPI計算
-- 期間比較
-- 異常検知
-- user memory の読み書き
-- recommendation の作成
-- human task の作成
-- operator feedback の記録
-- Google Ads campaign status / budget write の承認付きAPI実行
-
-### 禁止するtool
-
-- bid / bid strategy 変更
-- ad 作成 / 編集
-- targeting 変更
-- AI agentからの無承認 platform mutation
-
-write系はagent toolではなくAPI layerに置く。Google Ads campaign status / budgetのみ、認証済みユーザー、workspace scope、`confirmed=true`、`GOOGLE_ADS_WRITE_ENABLED=true`、監査ログを満たした場合に実行する。
-
-## 13. AI回答フォーマット
-
-運用改善の回答では、原則として以下の形にする。
-
-```txt
-結論:
-何が起きているか
-
-根拠:
-どの期間・どの数値を見たか
-
-原因仮説:
-なぜそうなった可能性があるか
-
-推奨アクション:
-優先度つきの打ち手
-
-人間向け作業手順:
-媒体管理画面で人間がどう確認・操作するか
-
-実施前チェック:
-変更前に確認すべきこと
-
-リスク:
-何が悪化する可能性があるか
-
-実施後の観察:
-いつ、どの指標を見るか
-
-自信度:
-High / Medium / Low と理由
-```
-
-## 14. Memory要件
-
-Memory は会話と operator feedback から自動抽出する。
-
-### user memory
-
-- 担当者の好み
-- 説明の粒度
-- 重視KPI
-- 過去の意思決定
-- 採用されやすい提案 / されにくい提案
-- 過去のフィードバック
-
-### workspace profile
-
-- 会社概要
-- 商材概要
-- ターゲット
-- CV定義
-- 月予算
-- 制約条件
-- 連携広告アカウント
-
-### thread state
-
-- 現在の会話内だけの一時文脈
-
-Memory に OAuth token、API key、顧客リスト、個人情報、秘密情報を保存してはいけない。
-
-## 15. Human Task / Feedback
-
-AIの提案は `human_tasks` に変換できるようにする。
-
-task status:
-
-- `draft`
-- `suggested`
-- `accepted`
-- `doing`
-- `done`
-- `rejected`
-- `ignored`
-
-operator feedback では以下を記録する。
-
-- 提案を採用したか
-- 採用しなかった理由
-- 実施したか
-- 実施後に成果が改善したか
-- 担当者コメント
-- 必要なら実施後の観察指標
-
-## 16. DB設計方針
-
-初期schemaには以下を含める。
-
-- `workspaces`
-- `workspace_members`
-- `workspace_profiles`
-- `ad_platform_connections`
-- `ad_accounts`
-- `campaign_snapshots`
-- `ad_group_snapshots`
-- `ad_daily_metrics`
-- `agent_threads`
-- `agent_messages`
-- `user_memories`
-- `agent_tool_calls`
-- `recommendations`
-- `human_tasks`
-- `operator_feedback`
-- `audit_logs`
-
-事業データには原則 `workspace_id` を持たせる。
-
-## 17. セキュリティ・ガードレール
-
-- すべてのデータアクセスで workspace scope を強制する
-- OAuth token は暗号化保存する
-- token をAIプロンプトに渡さない
-- agent tool call を記録する
-- 数値根拠なしの成果断定は禁止
-- 提案には自信度を付ける
-- 予算関連の提案にはリスク説明を必須にする
-- 「必ず改善します」のような保証表現は禁止
-- ユーザーが依頼しても、媒体設定の直接変更は拒否する
-
-## 18. 開発マイルストーン
-
-### Milestone 0: Repository Reboot
-
-- 旧Sheets-first MVPコードを削除
-- `REQUIREMENTS.md` を新方針で書き直す
-- `AGENTS.md` を書き直す
-- DB schema 初稿を追加
-- OpenAI Agent Service skeleton を追加
-
-### Milestone 1: Auth / Workspace基盤
-
-- Supabase Auth
-- workspace / member model
-- 基本app shell
-
-### Milestone 2: Platform OAuth / Google Ads Data
-
-- Google Ads OAuth連携
-- token暗号化保存
-- 広告アカウント一覧取得
-- campaign metrics 取得
-
-### Milestone 3: Minimal Dashboard
-
-- 連携アカウント状態
-- KPI cards
-- campaign table
-- trend chart
-
-### Milestone 4: OpenAI Chat MVP
-
-- root agent
-- setup advisor
-- performance analyst
-- action plan agent
-- QA guardrail
-- user memory extraction
-
-### Milestone 6: Google Ads Write / Stripe Billing
-
-- Google Ads campaign status / budget の承認付きwrite route
-- Google Ads write audit log
-- Stripe Checkout / Billing Portal
-- Stripe Webhook によるsubscription状態同期
-- production readinessでOpenAI / Google Ads / Stripe / deploymentをGo判定できる状態にする
-
-### Milestone 5: Human Tasks / Feedback
-
-- recommendation 保存
-- human task 作成
-- operator feedback 記録
-- feedback を次回以降の会話に反映
-
-## 19. 未確定事項
-
-- Supabase Auth の初期providerを email / Google / 両方 のどれにするか
-- Webフレームワークを何にするか
-- Cloudflare Pages / Workers をどこまで使うか
-- OpenAI Agent Service を最初から Cloud Run に載せるか、ローカル開発優先にするか
-- OAuth token の具体的な暗号化方式
-- 3媒体で共通化できる指標と、媒体固有指標の扱い
-- platform APIから都度読むか、DBにどの粒度でcacheするか
+各ゲートの現状と証跡は`deploy/production-readiness-checklist.md`とrelease evidenceに記録する。初回本番Goと本番write有効化は別の承認証跡を持たせる。

@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "id": "conversation",
+  "synthetic": true,
+  "workspaceId": "demo-workspace-0002",
+  "state": {
+    "threadId": "demo-thread-0002",
+    "messages": [
+      {
+        "messageId": "demo-message-0001",
+        "role": "user",
+        "content": "CPAが上がった理由と、次に確認することを教えて。"
+      },
+      {
+        "messageId": "demo-message-0002",
+        "role": "assistant",
+        "content": "現時点では検索語句とCVRの変化を優先して確認します。媒体設定の変更は実行しません。"
+      }
+    ],
+    "recommendation": {
+      "recommendationId": "demo-recommendation-0002",
+      "status": "suggested",
+      "title": "検索語句とCVR変化の確認"
+    },
+    "task": {
+      "taskId": "demo-task-0002",
+      "status": "doing",
+      "title": "既存の検索語句確認タスク",
+      "checkpoint": "2026-07-15の架空スナップショットと比較する"
+    }
+  },
+  "assertions": [
+    "conversation context is scoped to the synthetic workspace",
+    "the existing task is reused instead of duplicated",
+    "the answer does not claim a provider change"
+  ]
+}

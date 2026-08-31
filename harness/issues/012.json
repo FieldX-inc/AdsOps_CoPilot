@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "manifestVersion": 2,
+  "issue": {"number": 12, "url": "https://github.com/FieldX-inc/AdsOps_CoPilot/issues/12", "title": "キャンペーン・広告グループ・広告の階層セレクター", "slug": "ads-hierarchy-selector"},
+  "state": "browser_verified",
+  "wave": "wave-2-filters",
+  "summary": "Add a workspace-scoped account/campaign/ad-group/ad hierarchy selector backed by one shared filter contract.",
+  "decisions": ["Account remains the required trust boundary; deeper entities refine the selected data only.", "Dashboard, Agent context, and report consumers share the same validated filter representation.", "Invalid, platform-mismatched, and cross-workspace selections fail explicitly."],
+  "scope": {"in": ["Account/campaign/ad-group/ad selector", "Dependent option loading", "Shared filter serialization", "Invalid and empty states", "API scope validation"], "out": ["New media mutations", "Cross-account aggregate BI", "Unbounded customer ID input"]},
+  "requirementRefs": ["REQUIREMENTS.md#8-広告データとui", "docs/architecture.md#data-path", "docs/database.md#core-tables"],
+  "dependencies": [],
+  "blockers": [],
+  "risks": [
+    {"id": "scope-bypass", "level": "critical", "description": "Nested IDs could bypass the selected workspace/account scope.", "mitigation": "Resolve every child through the server-side workspace/account relationship and test cross-scope rejection."},
+    {"id": "stale-selection", "level": "medium", "description": "Changing a parent may retain an invalid child selection.", "mitigation": "Clear descendants atomically and expose loading/empty/error states."}
+  ],
+  "gates": [
+    {"id": "filter-contract-review", "type": "security_review", "requiredAt": "before_local_verification", "status": "pending", "owner": "contract-guard", "description": "Confirm the shared filter contract cannot express an unscoped nested entity."}
+  ],
+  "ownership": {"primaryAgent": "product-ui-agent", "reviewAgents": ["contract-guard", "api-db-provider-agent", "qa-release-agent"], "allowedPaths": ["apps/web/src/main.tsx", "apps/web/src/styles.css", "apps/api/src/index.ts", "apps/api/src/index.test.ts", "packages/shared-schemas/**", "docs/architecture.md", "docs/database.md", "REQUIREMENTS.md", "DESIGN.md"], "forbiddenPaths": ["services/adk-agent/**", "supabase/migrations/**", ".env*"]},
+  "acceptanceCriteria": ["Selecting a parent filters valid child choices and clears stale descendants.", "Loading, no child data, sync error, and invalid selection states are explicit.", "Invalid account/platform values return 400 and workspace crossing returns 403.", "The serialized filter is reusable by Dashboard, Agent context, and scheduled report paths.", "Keyboard navigation and labels pass browser tests."],
+  "verification": {"commands": ["npm --workspace @adops/api test", "npm --workspace @adops/web run typecheck", "npm run e2e:browser"], "scenarioIds": ["filters-hierarchy", "release-read-only-smoke"]},
+  "evidence": {"requiredArtifacts": ["test-log", "api-contract", "screenshot", "playwright-trace"], "retention": "release-lifetime"},
+  "rollback": {"strategy": "Fall back to the account-only filter and ignore deeper query fields server-side without widening scope.", "verification": "Account-only Dashboard, Agent, and report tests pass and cross-workspace nested IDs remain rejected."}
+}

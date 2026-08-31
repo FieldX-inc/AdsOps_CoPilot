@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "onboarding",
+  "synthetic": true,
+  "workspaceId": "demo-workspace-0002",
+  "state": {
+    "stage": "not_started",
+    "completedSteps": [],
+    "requiredSteps": ["workspace_profile", "provider_connection", "goal_setup", "review"],
+    "providerConnection": {
+      "provider": "google_ads",
+      "status": "not_connected",
+      "source": "synthetic"
+    },
+    "nextAction": "workspace_profile"
+  },
+  "assertions": [
+    "onboarding is visible before dashboard data",
+    "provider connection is explicitly not connected",
+    "no external provider is contacted"
+  ]
+}

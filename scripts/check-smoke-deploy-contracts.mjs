@@ -5,13 +5,61 @@ import { spawn } from "node:child_process";
 
 const issues = [];
 
-await runContract("passes when deployed health and readiness are production-ready", {
+await runContract("initial production Go passes only with media writes disabled", {
   apiHealth: productionApiHealth(),
   readiness: productionReadiness("Go"),
   agentHealth: productionAgentHealth(),
   webHtml: productionWebHtml(),
   expectStatus: 0,
-  mustIncludeStdout: ["Deploy smoke check passed.", "supabase-auth-env: pass", "Web app: html=received", "Web assets: checked=2"],
+  mustIncludeStdout: ["Deploy smoke check passed.", "mediaWriteEnabled=false", "Production gate: initial-production-go", "supabase-auth-env: pass", "Web app: html=received", "Web assets: checked=2"],
+});
+
+await runContract("separate Google Ads write activation passes only with media writes enabled", {
+  apiHealth: productionApiHealth({ mediaWriteEnabled: true }),
+  readiness: productionReadiness("Go"),
+  agentHealth: productionAgentHealth(),
+  webHtml: productionWebHtml(),
+  extraEnv: {
+    EXPECT_PRODUCTION_READY: "false",
+    EXPECT_GOOGLE_ADS_WRITE_ACTIVATION: "true",
+  },
+  expectStatus: 0,
+  mustIncludeStdout: ["Deploy smoke check passed.", "mediaWriteEnabled=true", "Production gate: google-ads-write-activation"],
+});
+
+await runContract("initial production Go rejects enabled media writes", {
+  apiHealth: productionApiHealth({ mediaWriteEnabled: true }),
+  readiness: productionReadiness("Go"),
+  agentHealth: productionAgentHealth(),
+  webHtml: productionWebHtml(),
+  expectStatus: 1,
+  mustIncludeStderr: ["expected mediaWriteEnabled=false for initial production Go gate"],
+});
+
+await runContract("Google Ads write activation rejects disabled media writes", {
+  apiHealth: productionApiHealth(),
+  readiness: productionReadiness("Go"),
+  agentHealth: productionAgentHealth(),
+  webHtml: productionWebHtml(),
+  extraEnv: {
+    EXPECT_PRODUCTION_READY: "false",
+    EXPECT_GOOGLE_ADS_WRITE_ACTIVATION: "true",
+  },
+  expectStatus: 1,
+  mustIncludeStderr: ["expected mediaWriteEnabled=true for Google Ads write activation gate"],
+});
+
+await runContract("production gate flags are mutually exclusive", {
+  apiHealth: productionApiHealth({ mediaWriteEnabled: true }),
+  readiness: productionReadiness("Go"),
+  agentHealth: productionAgentHealth(),
+  webHtml: productionWebHtml(),
+  extraEnv: {
+    EXPECT_PRODUCTION_READY: "true",
+    EXPECT_GOOGLE_ADS_WRITE_ACTIVATION: "true",
+  },
+  expectStatus: 1,
+  mustIncludeStderr: ["Choose exactly one production gate"],
 });
 
 await runContract("fails when readiness is No-Go", {
@@ -32,17 +80,17 @@ await runContract("fails when readiness omits staging evidence window check", {
   mustIncludeStderr: ["missing production check staging-e2e-evidence-window"],
 });
 
-await runContract("fails when API health is still mock or write/billing disabled", {
+await runContract("fails when API health is still mock, write enabled, or billing disabled at initial Go", {
   apiHealth: productionApiHealth({
     mode: "mock",
-    mediaWriteEnabled: false,
+    mediaWriteEnabled: true,
     billingConfigured: false,
   }),
   readiness: productionReadiness("Go"),
   agentHealth: productionAgentHealth(),
   webHtml: productionWebHtml(),
   expectStatus: 1,
-  mustIncludeStderr: ["mode=agent-proxy", "mediaWriteEnabled=true", "billingConfigured=true"],
+  mustIncludeStderr: ["mode=agent-proxy", "mediaWriteEnabled=false", "billingConfigured=true"],
 });
 
 await runContract("fails when Agent runtime or data safety is not production-ready", {
@@ -139,6 +187,7 @@ async function runContract(name, contract) {
       AGENT_SERVICE_URL: origin(agent),
       WEB_ORIGIN: origin(web),
       EXPECT_PRODUCTION_READY: "true",
+      EXPECT_GOOGLE_ADS_WRITE_ACTIVATION: "false",
       ADK_AGENT_URL: "",
       USE_ADK_AGENT: "",
       ADK_AGENT_TIMEOUT_MS: "",
@@ -255,7 +304,7 @@ function productionApiHealth(overrides = {}) {
     ok: true,
     service: "adops-api",
     mode: "agent-proxy",
-    mediaWriteEnabled: true,
+    mediaWriteEnabled: false,
     billingConfigured: true,
     supabaseConfigured: true,
     authConfigured: true,

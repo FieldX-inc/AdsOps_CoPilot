@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "manifestVersion": 2,
+  "issue": {"number": 9, "url": "https://github.com/FieldX-inc/AdsOps_CoPilot/issues/9", "title": "プロダクト全体のデザインを全面リファインする", "slug": "product-design-refine"},
+  "state": "browser_verified",
+  "wave": "wave-4-product-surface",
+  "summary": "Serve as the cross-surface acceptance issue for a calm, operational, human-approved UI after the component issues land.",
+  "decisions": ["Treat this as a final acceptance umbrella, not a parallel rewrite of the same screens.", "Use the green, calm, operational design system and keep approval/data hierarchy primary.", "Verify responsive, keyboard, loading, empty, error, partial, and locked states."],
+  "scope": {"in": ["Cross-screen visual system", "Information hierarchy", "Responsive layout", "Accessibility", "State completeness", "Visual regression baseline"], "out": ["A second implementation of child issues", "A giant BI redesign", "Generic neon or autonomous-AI styling"]},
+  "requirementRefs": ["DESIGN.md", "REQUIREMENTS.md#8-広告データとui"],
+  "dependencies": [4, 12, 13, 14, 15, 16, 19, 20],
+  "blockers": [],
+  "risks": [
+    {"id": "umbrella-scope", "level": "high", "description": "A broad redesign may duplicate work and create merge conflicts.", "mitigation": "Land child issues first; limit this issue to shared design tokens, layout, defects, and acceptance."},
+    {"id": "visual-only-done", "level": "medium", "description": "Polished happy paths may hide missing operational states.", "mitigation": "Require browser evidence for loading, empty, sync error, partial, locked, and confirmation states."}
+  ],
+  "gates": [
+    {"id": "final-ui-acceptance", "type": "product_decision", "requiredAt": "before_browser_verification", "status": "pending", "owner": "user", "description": "Approve the final desktop and mobile surface screenshots."}
+  ],
+  "ownership": {"primaryAgent": "product-ui-agent", "reviewAgents": ["contract-guard", "qa-release-agent"], "allowedPaths": ["apps/web/src/**", "apps/web/public/**", "DESIGN.md", "docs/user-test-readiness.md", "tests/e2e/**"], "forbiddenPaths": ["apps/api/**", "services/adk-agent/**", "supabase/**"]},
+  "acceptanceCriteria": ["All primary routes share a coherent visual and interaction system.", "Approval actions are visually distinct and never implied to be autonomous.", "Desktop/mobile and keyboard journeys pass.", "Loading, empty, sync error, partial, mock, billing lock, AI limit, and write confirmation states have explicit text.", "Visual acceptance does not regress child issue behavior."],
+  "verification": {"commands": ["npm --workspace @adops/web run typecheck", "npm --workspace @adops/web run build", "npm run e2e:browser"], "scenarioIds": ["dashboard-chat-character", "release-read-only-smoke"]},
+  "evidence": {"requiredArtifacts": ["screenshot", "playwright-trace", "video", "decision-record"], "retention": "release-lifetime"},
+  "rollback": {"strategy": "Revert shared token/layout changes while retaining previously verified child functionality.", "verification": "Run all child browser scenarios and compare the approved baseline screenshots."}
+}

@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "manifestVersion": 2,
+  "issue": {"number": 1, "url": "https://github.com/FieldX-inc/AdsOps_CoPilot/issues/1", "title": "広告アカウントのwrite権限と提案内容を反映する機能の実装", "slug": "approved-google-ads-write"},
+  "state": "local_verified",
+  "wave": "wave-6-agent-and-write",
+  "summary": "Implement live preview and explicit-confirmation API routes for campaign status and budget only, with scope, entitlement, conflict, audit, and rollback controls.",
+  "decisions": ["Media mutation stays outside Agent tools and runs only in authenticated API routes.", "Campaign status and budget are the only allowed writes; campaign creation, ads, bids, and other mutations are excluded.", "Production launches with GOOGLE_ADS_WRITE_ENABLED=false and uses a separate enablement approval."],
+  "scope": {"in": ["Live provider preview", "confirmed=true API execution", "expected-current-value conflict check", "workspace and plan entitlement enforcement", "redacted audit and linked rollback", "write confirmation UI"], "out": ["Campaign creation", "Ad or bid mutation", "Autonomous Agent execution", "Live-provider budget E2E"]},
+  "requirementRefs": ["REQUIREMENTS.md#10-google-ads承認付きwrite", "DESIGN.md#5-高リスクwriteモーダル", "docs/architecture.md#trust-boundaries", "docs/database.md#google-ads-write-audit"],
+  "dependencies": [3, 6],
+  "blockers": [],
+  "risks": [
+    {"id": "stale-provider-value", "level": "critical", "description": "A value may change between preview and execution.", "mitigation": "Re-read immediately before mutation and return 409 on mismatch."},
+    {"id": "unapproved-mutation", "level": "critical", "description": "A media change could run without valid human intent.", "mitigation": "Require auth, workspace scope, active billing, entitlement, feature flag, confirmed=true, approval metadata, and an audit record."},
+    {"id": "failed-restore", "level": "high", "description": "Staging status may not be restored.", "mitigation": "Use only ENABLED/PAUSED and require re-read restore proof before evidence is accepted."}
+  ],
+  "gates": [
+    {"id": "write-security-review", "type": "security_review", "requiredAt": "before_local_verification", "status": "pending", "owner": "contract-guard", "description": "Verify fail-closed guards, audit redaction, and absence of Agent mutation tools."},
+    {"id": "staging-status-round-trip", "type": "human_approval", "requiredAt": "before_staging_verification", "status": "pending", "owner": "user", "description": "Approve one reversible ENABLED/PAUSED staging campaign round trip."},
+    {"id": "production-write-enable", "type": "release_approval", "requiredAt": "after_initial_release", "status": "pending", "owner": "user", "description": "Separate approval is required before enabling the production write flag."}
+  ],
+  "ownership": {"primaryAgent": "api-db-provider-agent", "reviewAgents": ["contract-guard", "product-ui-agent", "qa-release-agent"], "allowedPaths": ["apps/api/src/google-ads.ts", "apps/api/src/index.ts", "apps/api/src/**/*write*.test.ts", "apps/web/src/main.tsx", "apps/web/src/styles.css", "supabase/migrations/*.sql", "docs/**", "deploy/**", "scripts/staging-e2e.mjs"], "forbiddenPaths": ["services/adk-agent/**", ".env*", "**/*secret*"]},
+  "acceptanceCriteria": ["Only status and budget candidates can reach execution.", "Preview and execution validate the same workspace-scoped real customer and campaign IDs.", "A stale expected value returns 409 without mutation.", "Success and failure records contain redacted approval metadata, before/after, audit ID, and rollback linkage.", "The UI presents target, observed value/time, proposed value, rationale, risk, rollback, checkbox, result, and restore action.", "Production smoke keeps GOOGLE_ADS_WRITE_ENABLED=false."],
+  "verification": {"commands": ["npm --workspace @adops/api test", "npm run check:staging-e2e", "npm run e2e:staging"], "scenarioIds": ["approved-status-write", "budget-write-contract", "release-read-only-smoke"]},
+  "evidence": {"requiredArtifacts": ["test-log", "api-contract", "screenshot", "audit-record", "rollback-proof", "provider-confirmation"], "retention": "release-lifetime"},
+  "rollback": {"strategy": "Disable GOOGLE_ADS_WRITE_ENABLED; restore the staging campaign status through the linked rollback path; leave read-only surfaces available.", "verification": "Re-read the campaign, match the original value, and confirm the restore audit references the original audit ID."}
+}

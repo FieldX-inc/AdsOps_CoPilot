@@ -1,0 +1,277 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "adops-local-demo-v1",
+  "seedVersion": "2026-07-21.1",
+  "frozenAt": "2026-07-21T00:00:00.000Z",
+  "mode": "local-artifact-only",
+  "synthetic": true,
+  "safeguards": {
+    "networkAccess": false,
+    "databaseAccess": false,
+    "providerAccess": false,
+    "externalApplication": "not_performed"
+  },
+  "workspace": {
+    "workspaceId": "demo-workspace-0002",
+    "userId": "demo-user-0002",
+    "displayName": "DEMO賃貸管理（架空）",
+    "timezone": "Asia/Tokyo",
+    "currency": "JPY",
+    "adAccountId": "demo-ad-account-0002",
+    "adAccountName": "DEMO Google Adsアカウント（架空）"
+  },
+  "stateOrder": [
+    "onboarding",
+    "active-dashboard",
+    "partial-error",
+    "setup",
+    "conversation",
+    "scheduled-report",
+    "write-review"
+  ],
+  "states": {
+    "onboarding": {
+      "schemaVersion": 1,
+      "id": "onboarding",
+      "synthetic": true,
+      "workspaceId": "demo-workspace-0002",
+      "state": {
+        "stage": "not_started",
+        "completedSteps": [],
+        "requiredSteps": [
+          "workspace_profile",
+          "provider_connection",
+          "goal_setup",
+          "review"
+        ],
+        "providerConnection": {
+          "provider": "google_ads",
+          "status": "not_connected",
+          "source": "synthetic"
+        },
+        "nextAction": "workspace_profile"
+      },
+      "assertions": [
+        "onboarding is visible before dashboard data",
+        "provider connection is explicitly not connected",
+        "no external provider is contacted"
+      ]
+    },
+    "active-dashboard": {
+      "schemaVersion": 1,
+      "id": "active-dashboard",
+      "synthetic": true,
+      "workspaceId": "demo-workspace-0002",
+      "state": {
+        "dataStatus": "ready",
+        "period": {
+          "start": "2026-07-01",
+          "end": "2026-07-14"
+        },
+        "summary": {
+          "impressions": 48200,
+          "clicks": 1928,
+          "cost": 385600,
+          "conversions": 64,
+          "revenue": 1024000,
+          "ctr": 4,
+          "cvr": 3.32,
+          "cpa": 6025,
+          "roas": 265.56
+        },
+        "campaigns": [
+          {
+            "campaignId": "demo-campaign-search-0002",
+            "campaignName": "DEMO_検索_空室対策（架空）",
+            "status": "ENABLED",
+            "cost": 245600,
+            "conversions": 48
+          },
+          {
+            "campaignId": "demo-campaign-display-0002",
+            "campaignName": "DEMO_ディスプレイ_認知（架空）",
+            "status": "PAUSED",
+            "cost": 140000,
+            "conversions": 16
+          }
+        ]
+      },
+      "assertions": [
+        "dashboard KPIs use the frozen synthetic period",
+        "campaign totals are stable across resets",
+        "active and paused rows are both represented"
+      ]
+    },
+    "partial-error": {
+      "schemaVersion": 1,
+      "id": "partial-error",
+      "synthetic": true,
+      "workspaceId": "demo-workspace-0002",
+      "state": {
+        "dataStatus": "partial",
+        "lastCompleteDate": "2026-07-12",
+        "availableSections": [
+          "summary",
+          "campaigns"
+        ],
+        "unavailableSections": [
+          "search_terms",
+          "comparison"
+        ],
+        "notice": {
+          "code": "DEMO_PARTIAL_METRICS",
+          "severity": "warning",
+          "message": "架空の連携遅延により、一部データは前日までです。",
+          "retryable": true
+        },
+        "fallback": "show_last_complete_snapshot"
+      },
+      "assertions": [
+        "partial data is not presented as complete",
+        "the unavailable sections are explicit",
+        "the last complete synthetic snapshot remains usable"
+      ]
+    },
+    "setup": {
+      "schemaVersion": 1,
+      "id": "setup",
+      "synthetic": true,
+      "workspaceId": "demo-workspace-0002",
+      "state": {
+        "questionnaireStatus": "draft_ready",
+        "answers": {
+          "businessType": "賃貸管理（架空）",
+          "goal": "管理受託の問い合わせ",
+          "monthlyTestBudget": 300000,
+          "primaryConversion": "問い合わせフォーム送信"
+        },
+        "campaignDraft": {
+          "campaignName": "DEMO_検索_新規管理受託（架空）",
+          "status": "proposal_only",
+          "execution": "not_requested",
+          "humanReviewRequired": true
+        },
+        "nextAction": "review_draft_and_manual_steps"
+      },
+      "assertions": [
+        "setup output remains a draft",
+        "campaign creation is never executed",
+        "a human review is required before any manual setup"
+      ]
+    },
+    "conversation": {
+      "schemaVersion": 1,
+      "id": "conversation",
+      "synthetic": true,
+      "workspaceId": "demo-workspace-0002",
+      "state": {
+        "threadId": "demo-thread-0002",
+        "messages": [
+          {
+            "messageId": "demo-message-0001",
+            "role": "user",
+            "content": "CPAが上がった理由と、次に確認することを教えて。"
+          },
+          {
+            "messageId": "demo-message-0002",
+            "role": "assistant",
+            "content": "現時点では検索語句とCVRの変化を優先して確認します。媒体設定の変更は実行しません。"
+          }
+        ],
+        "recommendation": {
+          "recommendationId": "demo-recommendation-0002",
+          "status": "suggested",
+          "title": "検索語句とCVR変化の確認"
+        },
+        "task": {
+          "taskId": "demo-task-0002",
+          "status": "doing",
+          "title": "既存の検索語句確認タスク",
+          "checkpoint": "2026-07-15の架空スナップショットと比較する"
+        }
+      },
+      "assertions": [
+        "conversation context is scoped to the synthetic workspace",
+        "the existing task is reused instead of duplicated",
+        "the answer does not claim a provider change"
+      ]
+    },
+    "scheduled-report": {
+      "schemaVersion": 1,
+      "id": "scheduled-report",
+      "synthetic": true,
+      "workspaceId": "demo-workspace-0002",
+      "state": {
+        "scheduleId": "demo-report-schedule-0002",
+        "frequency": "weekly",
+        "timezone": "Asia/Tokyo",
+        "nextRunAt": "2026-07-27T00:00:00.000Z",
+        "delivery": {
+          "channel": "local_artifact",
+          "destination": "demo-report-preview",
+          "status": "disabled_local_only"
+        },
+        "latestReport": {
+          "reportId": "demo-performance-report-0002",
+          "periodStart": "2026-07-01",
+          "periodEnd": "2026-07-14",
+          "status": "preview_ready",
+          "dataQuality": "complete_synthetic"
+        }
+      },
+      "assertions": [
+        "scheduled report timing is frozen",
+        "delivery targets a local artifact only",
+        "no email or provider job is dispatched"
+      ]
+    },
+    "write-review": {
+      "schemaVersion": 1,
+      "id": "write-review",
+      "synthetic": true,
+      "workspaceId": "demo-workspace-0002",
+      "state": {
+        "reviewId": "demo-write-review-0002",
+        "operation": "campaign_status",
+        "campaignId": "demo-campaign-search-0002",
+        "campaignName": "DEMO_検索_空室対策（架空）",
+        "expectedCurrentValue": "ENABLED",
+        "proposedValue": "PAUSED",
+        "reason": "架空データで承認UIを確認するため",
+        "rollbackCondition": "架空の確認終了後にENABLED候補を再度レビューする",
+        "approval": {
+          "required": true,
+          "confirmed": false,
+          "status": "awaiting_human_review"
+        },
+        "execution": {
+          "status": "not_requested",
+          "providerAccess": false,
+          "databaseAccess": false
+        }
+      },
+      "assertions": [
+        "preview precedes explicit confirmation",
+        "the default fixture never executes a write",
+        "provider and database access remain disabled"
+      ]
+    }
+  },
+  "expectedCounts": {
+    "states": 7,
+    "campaigns": 2,
+    "conversationMessages": 2,
+    "scheduledReports": 1,
+    "pendingWriteReviews": 1
+  },
+  "sourceFiles": [
+    "fixtures/demo/manifest.json",
+    "fixtures/demo/states/onboarding.json",
+    "fixtures/demo/states/active-dashboard.json",
+    "fixtures/demo/states/partial-error.json",
+    "fixtures/demo/states/setup.json",
+    "fixtures/demo/states/conversation.json",
+    "fixtures/demo/states/scheduled-report.json",
+    "fixtures/demo/states/write-review.json"
+  ]
+}

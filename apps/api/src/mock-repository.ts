@@ -13,6 +13,7 @@ import {
 } from "./mock-ad-fixtures.js";
 
 export type ChatRequest = {
+  requestId?: string;
   workspaceId: string;
   userId: string;
   threadId: string;
@@ -20,6 +21,8 @@ export type ChatRequest = {
   context?: {
     dateRange?: string;
     comparisonRange?: string;
+    from?: string;
+    to?: string;
     range?: number;
     platform?: PlatformFilter;
     advisorMode?: AdvisorMode | string;
@@ -57,6 +60,19 @@ export type ChatResponse = {
     title: string;
     priority: "high" | "medium" | "low";
     status: "suggested";
+  };
+  structuredOutput?: {
+    write_candidate?: {
+      operation: "campaign_status" | "campaign_budget";
+      customer_id: string;
+      campaign_id: string;
+      expected_current_value: string | number;
+      proposed_value: string | number;
+      approval_reason: string;
+      rollback_condition: string;
+    } | null;
+    memory_candidates?: Array<Record<string, unknown>>;
+    [key: string]: unknown;
   };
 };
 
@@ -105,6 +121,10 @@ export type DashboardResponse = {
   workspaceId: string;
   range: number;
   platform: PlatformFilter;
+  adAccountId: string | null;
+  campaignId: string | null;
+  adGroupId: string | null;
+  adId: string | null;
   summary: MetricTotals;
   comparison: MetricTotals;
   changes: Record<"ctr" | "cvr" | "cpc" | "cpa" | "roas" | "cost" | "conversions", number | null>;
@@ -141,6 +161,10 @@ export type LatestAdData = {
   generatedAt: string;
   range: number;
   platform: PlatformFilter;
+  adAccountId: string | null;
+  campaignId: string | null;
+  adGroupId: string | null;
+  adId: string | null;
   current: {
     label: string;
     totals: MetricTotals;
@@ -154,6 +178,52 @@ export type LatestAdData = {
   anomalies: DashboardResponse["anomalies"];
   relatedTags: string[];
 };
+
+export type DashboardHierarchyFilters = {
+  adAccountId?: string | null;
+  campaignId?: string | null;
+  adGroupId?: string | null;
+  adId?: string | null;
+};
+
+export type DashboardFilterOptions = {
+  accounts: Array<{ id: string; name: string; platform: Platform }>;
+  campaigns: Array<{
+    id: string;
+    name: string;
+    adAccountId: string;
+    platform: Platform;
+    status: string;
+  }>;
+  adGroups: Array<{
+    id: string;
+    name: string;
+    adAccountId: string;
+    campaignId: string;
+    platform: Platform;
+    status: string;
+  }>;
+  ads: Array<{
+    id: string;
+    name: string;
+    adAccountId: string;
+    campaignId: string;
+    adGroupId: string;
+    platform: Platform;
+    status: string;
+  }>;
+};
+
+export type ResolvedDashboardHierarchyFilters = {
+  adAccountId: string | null;
+  campaignId: string | null;
+  adGroupId: string | null;
+  adId: string | null;
+};
+
+export class DashboardFilterError extends Error {
+  status = 400 as const;
+}
 
 export type HelpArticle = {
   id: string;
@@ -449,11 +519,28 @@ export function parsePlatform(value: string | null | undefined): PlatformFilter 
   return value === "google" || value === "meta" || value === "yahoo" ? value : "all";
 }
 
-export function getDashboardData(workspaceId: string, range: number, platform: PlatformFilter): DashboardResponse {
-  const latest = getLatestAdData(workspaceId, range, platform);
+export function getDashboardFilterOptions(
+  _workspaceId: string,
+  platform: PlatformFilter,
+  filters: DashboardHierarchyFilters = {},
+): DashboardFilterOptions {
+  const allOptions = buildMockDashboardFilterOptions(platform);
+  const resolved = resolveDashboardHierarchyFilters(allOptions, filters);
+  return cascadeDashboardFilterOptions(allOptions, resolved);
+}
+
+export function getDashboardData(
+  workspaceId: string,
+  range: number,
+  platform: PlatformFilter,
+  filters: DashboardHierarchyFilters = {},
+): DashboardResponse {
+  const options = buildMockDashboardFilterOptions(platform);
+  const resolved = resolveDashboardHierarchyFilters(options, filters);
+  const latest = getLatestAdData(workspaceId, range, platform, resolved);
   const currentDates = getCurrentDates(range);
   const series = currentDates.map((date) => {
-    const rows = filterRows(dailyMetrics, [date], platform);
+    const rows = filterRows(dailyMetrics, [date], platform, resolved);
     const totals = calculateTotals(rows);
     return {
       date: date.slice(5).replace("-", "/"),
@@ -475,6 +562,7 @@ export function getDashboardData(workspaceId: string, range: number, platform: P
     workspaceId,
     range,
     platform,
+    ...resolved,
     summary: latest.current.totals,
     comparison: latest.comparison.totals,
     changes: latest.changes,
@@ -516,17 +604,26 @@ export function getConnectionStatus(
   };
 }
 
-export function getLatestAdData(workspaceId: string, range: number, platform: PlatformFilter): LatestAdData {
+export function getLatestAdData(
+  workspaceId: string,
+  range: number,
+  platform: PlatformFilter,
+  filters: DashboardHierarchyFilters = {},
+): LatestAdData {
+  const options = buildMockDashboardFilterOptions(platform);
+  const resolved = resolveDashboardHierarchyFilters(options, filters);
   const currentDates = getCurrentDates(range);
   const previousDates = getComparisonDates(range);
-  const currentRows = filterRows(dailyMetrics, currentDates, platform);
-  const comparisonRows = filterRows(dailyMetrics, previousDates, platform);
+  const currentRows = filterRows(dailyMetrics, currentDates, platform, resolved);
+  const comparisonRows = filterRows(dailyMetrics, previousDates, platform, resolved);
   const currentTotals = calculateTotals(currentRows);
   const comparisonTotals = calculateTotals(comparisonRows);
   const campaigns = campaignProfiles
     .filter((campaign) => platform === "all" || campaign.platform === platform)
+    .filter((campaign) => !resolved.adAccountId || campaign.adAccountId === resolved.adAccountId)
+    .filter((campaign) => !resolved.campaignId || campaign.campaignId === resolved.campaignId)
     .map((campaign) => {
-      const current = calculateTotals(filterRows(currentRows, currentDates, campaign.platform, campaign.campaignId));
+      const current = calculateTotals(filterRows(currentRows, currentDates, campaign.platform, { campaignId: campaign.campaignId }));
       return {
         campaignId: campaign.campaignId,
         campaign: campaign.campaignName,
@@ -554,6 +651,7 @@ export function getLatestAdData(workspaceId: string, range: number, platform: Pl
     generatedAt,
     range,
     platform,
+    ...resolved,
     current: {
       label: `直近${range}日`,
       totals: currentTotals,
@@ -723,7 +821,7 @@ export function ensureChatThread(workspaceId: string, userId: string, threadId: 
         id: `msg-${threadId}-welcome`,
         role: "assistant",
         content:
-          "こんにちは。最新広告データ、保存済みナレッジ、必要に応じた外部検索を分けて扱いながら、原因分析と人間向け作業手順まで整理します。",
+          "気になる数字や変化を教えてください。原因と、次に確認する順番を整理します。",
         createdAt: now,
       },
     ],
@@ -745,13 +843,124 @@ export function getColumnById(id: string) {
   return { article, related };
 }
 
-function filterRows(rows: DailyMetricRow[], dates: string[], platform: PlatformFilter, campaignId?: string) {
+function filterRows(
+  rows: DailyMetricRow[],
+  dates: string[],
+  platform: PlatformFilter,
+  filters: DashboardHierarchyFilters = {},
+) {
   return rows.filter(
     (row) =>
       dates.includes(row.date) &&
       (platform === "all" || row.platform === platform) &&
-      (!campaignId || row.campaignId === campaignId),
+      (!filters.adAccountId || row.adAccountId === filters.adAccountId) &&
+      (!filters.campaignId || row.campaignId === filters.campaignId),
   );
+}
+
+function buildMockDashboardFilterOptions(platform: PlatformFilter): DashboardFilterOptions {
+  const accounts = adAccounts
+    .filter((account) => platform === "all" || account.platform === platform)
+    .map((account) => ({ id: account.id, name: account.name, platform: account.platform }));
+  const campaigns = campaignProfiles
+    .filter((campaign) => platform === "all" || campaign.platform === platform)
+    .map((campaign) => ({
+      id: campaign.campaignId,
+      name: campaign.campaignName,
+      adAccountId: campaign.adAccountId,
+      platform: campaign.platform,
+      status: "ENABLED",
+    }));
+  const adGroups = campaigns.map((campaign) => ({
+    id: `grp-${campaign.id}`,
+    name: `${campaign.name} / 広告グループ`,
+    adAccountId: campaign.adAccountId,
+    campaignId: campaign.id,
+    platform: campaign.platform,
+    status: "ENABLED",
+  }));
+  const ads = adGroups.map((adGroup) => ({
+    id: `ad-${adGroup.campaignId}-primary`,
+    name: `${campaigns.find((campaign) => campaign.id === adGroup.campaignId)?.name ?? adGroup.campaignId} / 広告`,
+    adAccountId: adGroup.adAccountId,
+    campaignId: adGroup.campaignId,
+    adGroupId: adGroup.id,
+    platform: adGroup.platform,
+    status: "ENABLED",
+  }));
+  return { accounts, campaigns, adGroups, ads };
+}
+
+export function resolveDashboardHierarchyFilters(
+  options: DashboardFilterOptions,
+  filters: DashboardHierarchyFilters,
+): ResolvedDashboardHierarchyFilters {
+  const requested = {
+    adAccountId: normalizeFilterId(filters.adAccountId),
+    campaignId: normalizeFilterId(filters.campaignId),
+    adGroupId: normalizeFilterId(filters.adGroupId),
+    adId: normalizeFilterId(filters.adId),
+  };
+  const ad = requested.adId ? uniqueFilterOption(options.ads, requested.adId, "adId") : null;
+  const adGroupId = requested.adGroupId ?? ad?.adGroupId ?? null;
+  if (ad && requested.adGroupId && ad.adGroupId !== requested.adGroupId) {
+    throw new DashboardFilterError("adIdとadGroupIdの親子関係が一致しません。");
+  }
+  const adGroup = adGroupId ? uniqueFilterOption(options.adGroups, adGroupId, "adGroupId") : null;
+  const campaignId = requested.campaignId ?? adGroup?.campaignId ?? ad?.campaignId ?? null;
+  if ((adGroup && requested.campaignId && adGroup.campaignId !== requested.campaignId)
+    || (ad && campaignId && ad.campaignId !== campaignId)) {
+    throw new DashboardFilterError("adGroupId/adIdとcampaignIdの親子関係が一致しません。");
+  }
+  const campaign = campaignId ? uniqueFilterOption(options.campaigns, campaignId, "campaignId") : null;
+  const adAccountId = requested.adAccountId
+    ?? campaign?.adAccountId
+    ?? adGroup?.adAccountId
+    ?? ad?.adAccountId
+    ?? null;
+  if ((campaign && adAccountId && campaign.adAccountId !== adAccountId)
+    || (adGroup && adAccountId && adGroup.adAccountId !== adAccountId)
+    || (ad && adAccountId && ad.adAccountId !== adAccountId)) {
+    throw new DashboardFilterError("選択した階層とadAccountIdの親子関係が一致しません。");
+  }
+  const account = adAccountId ? uniqueFilterOption(options.accounts, adAccountId, "adAccountId") : null;
+  for (const item of [campaign, adGroup, ad]) {
+    if (account && item && item.platform !== account.platform) {
+      throw new DashboardFilterError("選択した階層のplatformが一致しません。");
+    }
+  }
+  return { adAccountId, campaignId, adGroupId, adId: requested.adId };
+}
+
+function cascadeDashboardFilterOptions(
+  options: DashboardFilterOptions,
+  filters: ResolvedDashboardHierarchyFilters,
+): DashboardFilterOptions {
+  return {
+    accounts: options.accounts,
+    campaigns: options.campaigns.filter((item) => !filters.adAccountId || item.adAccountId === filters.adAccountId),
+    adGroups: options.adGroups.filter((item) => (
+      (!filters.adAccountId || item.adAccountId === filters.adAccountId)
+      && (!filters.campaignId || item.campaignId === filters.campaignId)
+    )),
+    ads: options.ads.filter((item) => (
+      (!filters.adAccountId || item.adAccountId === filters.adAccountId)
+      && (!filters.campaignId || item.campaignId === filters.campaignId)
+      && (!filters.adGroupId || item.adGroupId === filters.adGroupId)
+    )),
+  };
+}
+
+function normalizeFilterId(value: string | null | undefined) {
+  const normalized = String(value ?? "").trim();
+  return normalized || null;
+}
+
+function uniqueFilterOption<T extends { id: string }>(options: T[], id: string, field: string) {
+  const matches = options.filter((item) => item.id === id);
+  if (matches.length === 0) throw new DashboardFilterError(`指定された${field}が存在しません。`);
+  if (matches.length > 1) throw new DashboardFilterError(`指定された${field}を一意に特定できません。`);
+  return matches[0];
 }
 
 function getCurrentDates(range: number) {

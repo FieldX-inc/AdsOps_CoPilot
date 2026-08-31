@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "manifestVersion": 2,
+  "issue": {"number": 14, "url": "https://github.com/FieldX-inc/AdsOps_CoPilot/issues/14", "title": "ROASフィルター削除・CVRの日本語表記修正", "slug": "metric-filter-copy-cleanup"},
+  "state": "browser_verified",
+  "wave": "wave-2-filters",
+  "summary": "Remove the ROAS filter and standardize customer-facing CVR terminology in Japanese without changing metric formulas.",
+  "decisions": ["Remove ROAS only as a filter; do not silently remove valid ROAS KPI display or calculation unless separately specified.", "Use one approved Japanese CVR label and help text across customer-facing surfaces.", "Metric semantics and missing-value behavior remain unchanged."],
+  "scope": {"in": ["ROAS filter removal", "CVR Japanese label consistency", "URL/query cleanup", "Copy and visual regression"], "out": ["KPI formula changes", "ROAS data deletion", "Unrelated metric redesign"]},
+  "requirementRefs": ["DESIGN.md#ダッシュボード", "DESIGN.md#6-表示とアクセシビリティ", "REQUIREMENTS.md#8-広告データとui"],
+  "dependencies": [12],
+  "blockers": [],
+  "risks": [
+    {"id": "semantic-regression", "level": "medium", "description": "A copy/filter change may accidentally alter KPI calculation or hide ROAS entirely.", "mitigation": "Keep calculation contracts untouched and assert KPI payloads before/after."},
+    {"id": "stale-query", "level": "low", "description": "Old ROAS filter query state may continue affecting results.", "mitigation": "Ignore/remove the deprecated filter and cover old bookmarked URLs."}
+  ],
+  "gates": [],
+  "ownership": {"primaryAgent": "product-ui-agent", "reviewAgents": ["api-db-provider-agent", "qa-release-agent"], "allowedPaths": ["apps/web/src/main.tsx", "apps/web/src/styles.css", "apps/api/src/index.ts", "apps/api/src/index.test.ts", "DESIGN.md", "docs/**"], "forbiddenPaths": ["services/adk-agent/**", "supabase/migrations/**", ".env*"]},
+  "acceptanceCriteria": ["No interactive ROAS filter remains in the product or active URL state.", "Existing ROAS KPI data, where required, is not removed by this issue.", "CVR label and explanatory copy are consistent in Japanese.", "Missing CVR remains '-' and is not presented as zero.", "Old URLs containing the deprecated filter do not break the screen or alter results."],
+  "verification": {"commands": ["npm --workspace @adops/api test", "npm --workspace @adops/web run typecheck", "npm run e2e:browser"], "scenarioIds": ["filters-hierarchy", "release-read-only-smoke"]},
+  "evidence": {"requiredArtifacts": ["test-log", "screenshot", "playwright-trace"], "retention": "release-lifetime"},
+  "rollback": {"strategy": "Revert copy/query cleanup without changing metric storage or formulas.", "verification": "Metric payload contract and missing-value display remain unchanged."}
+}

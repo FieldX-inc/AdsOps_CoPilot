@@ -6,7 +6,7 @@ type IndexModule = typeof import("./index.js");
 
 const originalUseAgentServiceForMockApp = process.env.USE_AGENT_SERVICE;
 process.env.USE_AGENT_SERVICE = "false";
-const { app, buildLocalSetupIntakeResult } = (await import(`./index.js?mock-tests-${Date.now()}`)) as IndexModule;
+const { app, buildLocalSetupIntakeResult, buildStructuredSetupAnswerResult } = (await import(`./index.js?mock-tests-${Date.now()}`)) as IndexModule;
 if (originalUseAgentServiceForMockApp === undefined) {
   delete process.env.USE_AGENT_SERVICE;
 } else {
@@ -22,6 +22,144 @@ const baseChatPayload = {
     platform: "all",
   },
 };
+
+test("dashboard accepts an explicit inclusive date range and rejects unsafe ranges", async () => {
+  const valid = await app.request("/dashboard?workspaceId=date-range-workspace&from=2026-07-01&to=2026-07-07&platform=google");
+  const body = (await valid.json()) as { range: number; dateRange: { from: string; to: string } };
+  assert.equal(valid.status, 200);
+  assert.equal(body.range, 7);
+  assert.deepEqual(body.dateRange, { from: "2026-07-01", to: "2026-07-07" });
+
+  const missingEnd = await app.request("/dashboard?workspaceId=date-range-workspace&from=2026-07-01");
+  assert.equal(missingEnd.status, 400);
+
+  const reversed = await app.request("/dashboard?workspaceId=date-range-workspace&from=2026-07-08&to=2026-07-01");
+  assert.equal(reversed.status, 400);
+
+  const tooLong = await app.request("/dashboard?workspaceId=date-range-workspace&from=2026-05-01&to=2026-07-01");
+  assert.equal(tooLong.status, 400);
+});
+
+test("dashboard filter options cascade from account to campaign, ad group, and ad", async () => {
+  const baseRes = await app.request("/dashboard/filter-options?workspaceId=filter-workspace&platform=google");
+  const base = (await baseRes.json()) as {
+    accounts: Array<{ id: string; platform: string }>;
+    campaigns: Array<{ id: string; adAccountId: string; platform: string }>;
+    adGroups: Array<{ id: string; adAccountId: string; campaignId: string; platform: string }>;
+    ads: Array<{ id: string; adAccountId: string; campaignId: string; adGroupId: string; platform: string }>;
+  };
+  assert.equal(baseRes.status, 200);
+  assert.deepEqual(base.accounts.map((item) => item.id), ["acct-google-001"]);
+  assert.ok(base.campaigns.length > 1);
+
+  const campaign = base.campaigns.find((item) => item.id === "cmp-google-nonbrand");
+  assert.ok(campaign);
+  const campaignQuery = new URLSearchParams({
+    workspaceId: "filter-workspace",
+    platform: "google",
+    adAccountId: campaign.adAccountId,
+    campaignId: campaign.id,
+  });
+  const campaignRes = await app.request(`/dashboard/filter-options?${campaignQuery}`);
+  const campaignBody = (await campaignRes.json()) as typeof base;
+  assert.equal(campaignRes.status, 200);
+  assert.ok(campaignBody.campaigns.every((item) => item.adAccountId === campaign.adAccountId));
+  assert.deepEqual([...new Set(campaignBody.adGroups.map((item) => item.campaignId))], [campaign.id]);
+  assert.deepEqual([...new Set(campaignBody.ads.map((item) => item.campaignId))], [campaign.id]);
+
+  const adGroup = campaignBody.adGroups[0];
+  assert.ok(adGroup);
+  const adGroupRes = await app.request(`/dashboard/filter-options?${new URLSearchParams({
+    workspaceId: "filter-workspace",
+    platform: "google",
+    campaignId: campaign.id,
+    adGroupId: adGroup.id,
+  })}`);
+  const adGroupBody = (await adGroupRes.json()) as typeof base;
+  assert.equal(adGroupRes.status, 200);
+  assert.ok(adGroupBody.ads.length > 0);
+  assert.ok(adGroupBody.ads.every((item) => item.adGroupId === adGroup.id));
+});
+
+test("dashboard hierarchy filters reject unknown and inconsistent parents", async () => {
+  const accountCampaignMismatch = new URLSearchParams({
+    workspaceId: "filter-workspace",
+    adAccountId: "acct-google-001",
+    campaignId: "cmp-meta-prospecting",
+  });
+  for (const path of ["/dashboard/filter-options", "/dashboard", "/ad-data/latest"]) {
+    const res = await app.request(`${path}?${accountCampaignMismatch}`);
+    const body = (await res.json()) as { code: string };
+    assert.equal(res.status, 400, path);
+    assert.equal(body.code, "invalid_dashboard_filter", path);
+  }
+
+  const unknownAd = await app.request("/dashboard/filter-options?workspaceId=filter-workspace&adId=missing-ad");
+  assert.equal(unknownAd.status, 400);
+  assert.equal(((await unknownAd.json()) as { code: string }).code, "invalid_dashboard_filter");
+});
+
+test("dashboard and latest ad data apply the same hierarchy query to metrics and campaign rows", async () => {
+  const query = new URLSearchParams({
+    workspaceId: "filter-workspace",
+    platform: "google",
+    adAccountId: "acct-google-001",
+    campaignId: "cmp-google-nonbrand",
+    adGroupId: "grp-cmp-google-nonbrand",
+    adId: "ad-cmp-google-nonbrand-primary",
+    range: "7",
+  });
+  const [dashboardRes, latestRes, unfilteredRes] = await Promise.all([
+    app.request(`/dashboard?${query}`),
+    app.request(`/ad-data/latest?${query}`),
+    app.request("/dashboard?workspaceId=filter-workspace&platform=google&range=7"),
+  ]);
+  const dashboard = (await dashboardRes.json()) as {
+    adAccountId: string;
+    campaignId: string;
+    adGroupId: string;
+    adId: string;
+    summary: { cost: number };
+    campaigns: Array<{ campaignId: string; cost: number }>;
+  };
+  const latest = ((await latestRes.json()) as {
+    latestAdData: {
+      adAccountId: string;
+      campaignId: string;
+      adGroupId: string;
+      adId: string;
+      current: { totals: { cost: number } };
+      campaigns: Array<{ campaignId: string; cost: number }>;
+    };
+  }).latestAdData;
+  const unfiltered = (await unfilteredRes.json()) as { summary: { cost: number } };
+
+  assert.equal(dashboardRes.status, 200);
+  assert.equal(latestRes.status, 200);
+  assert.deepEqual(
+    [dashboard.adAccountId, dashboard.campaignId, dashboard.adGroupId, dashboard.adId],
+    ["acct-google-001", "cmp-google-nonbrand", "grp-cmp-google-nonbrand", "ad-cmp-google-nonbrand-primary"],
+  );
+  assert.deepEqual(dashboard.campaigns.map((item) => item.campaignId), ["cmp-google-nonbrand"]);
+  assert.deepEqual(latest.campaigns.map((item) => item.campaignId), ["cmp-google-nonbrand"]);
+  assert.equal(dashboard.summary.cost, latest.current.totals.cost);
+  assert.equal(dashboard.campaigns[0]?.cost, dashboard.summary.cost);
+  assert.ok(unfiltered.summary.cost > dashboard.summary.cost);
+});
+
+test("agent chat rejects incomplete custom date context", async () => {
+  const res = await app.request("/agent/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...baseChatPayload,
+      message: "CPAの変化を見て",
+      context: { ...baseChatPayload.context, from: "2026-07-01" },
+    }),
+  });
+  assert.equal(res.status, 400);
+  assert.equal(((await res.json()) as { code: string }).code, "invalid_date_range");
+});
 
 test("readiness splits mock Go and production No-Go scopes", async () => {
   const res = await app.request("/readiness?workspaceId=readiness-workspace");
@@ -168,6 +306,8 @@ test("readiness requires staging E2E evidence before production Go", async () =>
     process.env.OPENAI_AGENT_STAGING_E2E_PASSED_AT = "2026-06-04T10:00:00+09:00";
     process.env.GOOGLE_ADS_STAGING_E2E_PASSED_AT = "2026-06-04T10:10:00+09:00";
     process.env.STRIPE_STAGING_E2E_PASSED_AT = "2026-06-04T10:20:00+09:00";
+    process.env.SUPABASE_STAGING_E2E_PASSED_AT = "2026-06-04T10:30:00+09:00";
+    process.env.REPORT_EMAIL_STAGING_E2E_PASSED_AT = "2026-06-04T10:40:00+09:00";
     process.env.DEPLOYMENT_RUNBOOK_ACK = "true";
 
     const { app: readyApp } = await importFreshIndex("readiness-e2e-ready");
@@ -202,6 +342,8 @@ test("readiness rejects malformed staging E2E evidence timestamps", async () => 
     process.env.OPENAI_AGENT_STAGING_E2E_PASSED_AT = "not-a-timestamp";
     process.env.GOOGLE_ADS_STAGING_E2E_PASSED_AT = new Date().toISOString();
     process.env.STRIPE_STAGING_E2E_PASSED_AT = new Date().toISOString();
+    process.env.SUPABASE_STAGING_E2E_PASSED_AT = new Date().toISOString();
+    process.env.REPORT_EMAIL_STAGING_E2E_PASSED_AT = new Date().toISOString();
     process.env.DEPLOYMENT_RUNBOOK_ACK = "true";
 
     const { app: malformedEvidenceApp } = await importFreshIndex("readiness-malformed-evidence");
@@ -240,6 +382,8 @@ test("readiness rejects staging E2E evidence from different release windows", as
     oldGoogleEvidenceDate.setDate(oldGoogleEvidenceDate.getDate() - 8);
     process.env.GOOGLE_ADS_STAGING_E2E_PASSED_AT = oldGoogleEvidenceDate.toISOString();
     process.env.STRIPE_STAGING_E2E_PASSED_AT = new Date().toISOString();
+    process.env.SUPABASE_STAGING_E2E_PASSED_AT = new Date().toISOString();
+    process.env.REPORT_EMAIL_STAGING_E2E_PASSED_AT = new Date().toISOString();
     process.env.DEPLOYMENT_RUNBOOK_ACK = "true";
 
     const { app: mixedEvidenceApp } = await importFreshIndex("readiness-mixed-evidence-window");
@@ -409,12 +553,14 @@ test("health exposes production capability flags", async () => {
   const body = (await res.json()) as {
     mediaWriteEnabled: boolean;
     billingConfigured: boolean;
+    helpContentConfigured: boolean;
     supabaseConfigured: boolean;
   };
 
   assert.equal(res.status, 200);
   assert.equal(body.mediaWriteEnabled, false);
   assert.equal(body.billingConfigured, false);
+  assert.equal(typeof body.helpContentConfigured, "boolean");
   assert.equal(typeof body.supabaseConfigured, "boolean");
 });
 
@@ -753,6 +899,69 @@ test("setup intake fallback normalizes conversational measurement for setup step
   assert.doesNotMatch(joined, /Metaなら|Yahooなら|Google\/Yahoo検索広告|Meta広告マネージャ|Yahoo広告 管理画面/);
 });
 
+test("structured setup answers complete exactly one required question without chat inference", () => {
+  const result = buildStructuredSetupAnswerResult({
+    field: "audience",
+    value: "年齢: 30代 / 40代\n家族構成: 夫婦＋子ども\n住宅検討状況: 工務店比較中",
+    note: "土地探し中を優先",
+    previousFacts: {
+      basicInfo: "会社名: サンプル工務店\nホームページURL: https://example.com\n施工エリア: 東京都",
+      product: "注文住宅",
+      goal: "お問い合わせ獲得",
+      area: "都道府県: 東京都\n市区町村: 世田谷区",
+      strengths: "高気密・高断熱 / 自由設計",
+      keyMessage: "高性能な家を適正価格で",
+      budget: "10〜30万円",
+      destination: "LP",
+      assets: "写真: 十分ある\n動画: ある\nロゴ: ある\nLP: イベントページ",
+      acquisitionMethods: "Instagram運用 / 紹介",
+      _questionnaire: {
+        version: "housing-v1",
+        completedFields: ["basicInfo", "product", "goal", "area", "strengths", "keyMessage", "budget", "destination", "assets", "acquisitionMethods"],
+      },
+    },
+    previousMissingFields: ["audience", "adExperience"],
+  });
+
+  assert.match(String(result.extractedFacts.audience), /夫婦＋子ども/);
+  assert.deepEqual(result.missingFields, ["adExperience"]);
+  assert.equal(result.dimensionScores.audience, 10);
+  assert.equal(result.readyForSetupSteps, false);
+  assert.equal(result.assistantMessage, "");
+});
+
+test("structured setup answers generate human setup steps only after every required answer", () => {
+  const result = buildStructuredSetupAnswerResult({
+    field: "adExperience",
+    value: "両方運用している",
+    previousFacts: {
+      basicInfo: "会社名: サンプル工務店\nホームページURL: https://example.com\n施工エリア: 東京都",
+      product: "注文住宅",
+      goal: "モデルハウス来場予約",
+      area: "都道府県: 東京都\n市区町村: 世田谷区",
+      audience: "年齢: 30代\n家族構成: 夫婦＋子ども\n住宅検討状況: 具体的に検討中",
+      strengths: "高気密・高断熱 / 自由設計",
+      keyMessage: "高性能な家を適正価格で",
+      budget: "10〜30万円",
+      destination: "LP",
+      assets: "写真: 十分ある\n動画: ある\nロゴ: ある\nLP: イベントページ",
+      acquisitionMethods: "Google広告 / Meta広告",
+      _questionnaire: {
+        version: "housing-v1",
+        completedFields: ["basicInfo", "product", "goal", "area", "audience", "strengths", "keyMessage", "budget", "destination", "assets", "acquisitionMethods"],
+      },
+    },
+    previousMissingFields: ["adExperience"],
+  });
+
+  assert.deepEqual(result.missingFields, []);
+  assert.equal(result.score, 10);
+  assert.equal(result.readyForSetupSteps, true);
+  assert.ok(result.setupSteps.length > 0);
+  assert.match(result.setupSteps.flatMap((step) => step.steps).join("\n"), /Google広告/);
+  assert.match(result.setupSteps.flatMap((step) => step.steps).join("\n"), /Meta/);
+});
+
 test("Agent Service chat fetch aborts on timeout", async () => {
   const originalUseAgentService = process.env.USE_AGENT_SERVICE;
   const originalTimeout = process.env.AGENT_SERVICE_TIMEOUT_MS;
@@ -815,7 +1024,9 @@ test("billing status reports active subscription after login", async () => {
         workspace_id: testWorkspaceId,
         stripe_customer_id: "cus_test_active",
         stripe_subscription_id: "sub_test_active",
-        stripe_price_id: "price_test",
+        stripe_price_id: "price_standard_month",
+        plan_id: "standard",
+        billing_interval: "month",
         status: "active",
         current_period_end: "2026-07-04T00:00:00.000Z",
         cancel_at_period_end: false,
@@ -849,6 +1060,27 @@ test("billing status reports active subscription after login", async () => {
   });
 });
 
+test("premium billing status always exposes the fallback onboarding booking URL", async () => {
+  await withMockProductionEnv(async () => {
+    delete process.env.PREMIUM_ONBOARDING_BOOKING_URL;
+    const fetchMock = createProductionFetchMock({
+      billingSubscription: activeBillingSubscription({
+        stripe_price_id: "price_premium_month",
+        plan_id: "premium",
+      }),
+    });
+
+    await withMockFetch(fetchMock.fetch, async () => {
+      const { app: productionApp } = await importFreshIndex("premium-booking-fallback");
+      const res = await productionApp.request("/billing/status", { headers: authHeaders() });
+      const body = await res.json() as { premiumOnboardingBookingUrl: string | null };
+
+      assert.equal(res.status, 200);
+      assert.equal(body.premiumOnboardingBookingUrl, "https://example.com");
+    });
+  });
+});
+
 test("google oauth callback stores encrypted tokens and audits connection without secrets", async () => {
   await withMockProductionEnv(async () => {
     process.env.GOOGLE_OAUTH_STATE_STORE = "memory";
@@ -861,10 +1093,12 @@ test("google oauth callback stores encrypted tokens and audits connection withou
         headers: authHeaders(),
       });
       const startBody = (await startRes.json()) as { url: string };
-      const state = new URL(startBody.url).searchParams.get("state");
+      const authorizationUrl = new URL(startBody.url);
+      const state = authorizationUrl.searchParams.get("state");
 
       assert.equal(startRes.status, 200);
       assert.ok(state);
+      assert.equal(authorizationUrl.searchParams.get("redirect_uri"), "https://api.example.test/oauth/google/callback");
 
       const callbackRes = await productionApp.request(`/oauth/google/callback?code=oauth-code-test&state=${encodeURIComponent(state)}`);
       const connectionUpsert = fetchMock.calls.find((call) => call.kind === "supabase.google_connection_upsert");
@@ -874,7 +1108,7 @@ test("google oauth callback stores encrypted tokens and audits connection withou
       const auditBody = JSON.stringify(auditCall?.json ?? {});
 
       assert.equal(callbackRes.status, 302);
-      assert.match(callbackRes.headers.get("Location") ?? "", /connection=google&status=connected/);
+      assert.equal(callbackRes.headers.get("Location"), "https://app.example.test/?connection=google&status=connected");
       assert.equal(decryptToken(String(connectionUpsert?.json?.access_token_encrypted)), "google-oauth-access-token");
       assert.equal(decryptToken(String(connectionUpsert?.json?.refresh_token_encrypted)), "google-oauth-refresh-token");
       assert.deepEqual(connectionUpsert?.json?.scopes, ["https://www.googleapis.com/auth/adwords"]);
@@ -882,6 +1116,22 @@ test("google oauth callback stores encrypted tokens and audits connection withou
       assert.equal(auditCall?.json?.payload?.refreshIssued, true);
       assert.deepEqual(auditCall?.json?.payload?.scopes, ["https://www.googleapis.com/auth/adwords"]);
       assert.doesNotMatch(auditBody, /google-oauth-access-token|google-oauth-refresh-token|oauth-code-test|client_secret|access_token|refresh_token/);
+    });
+  });
+});
+
+test("public app refuses a localhost Google Ads OAuth callback", async () => {
+  await withMockProductionEnv(async () => {
+    process.env.GOOGLE_ADS_REDIRECT_URI = "http://localhost:8787/oauth/google/callback";
+    const fetchMock = createProductionFetchMock({ billingSubscription: activeBillingSubscription() });
+
+    await withMockFetch(fetchMock.fetch, async () => {
+      const { app: productionApp } = await importFreshIndex("google-oauth-public-loopback-rejected");
+      const res = await productionApp.request("/oauth/google/start-url", { headers: authHeaders() });
+      const body = await res.json() as { error: string };
+
+      assert.equal(res.status, 500);
+      assert.match(body.error, /cannot use a localhost GOOGLE_ADS_REDIRECT_URI/);
     });
   });
 });
@@ -911,6 +1161,31 @@ test("google customer list provider errors are redacted before API response", as
   });
 });
 
+test("google customer connect rejects an MCC before it can consume the ad-account limit", async () => {
+  await withMockProductionEnv(async () => {
+    const { encryptToken } = await import("./crypto.js");
+    const fetchMock = createProductionFetchMock({
+      billingSubscription: activeBillingSubscription(),
+      encryptedGoogleAccessToken: encryptToken("google-access-token"),
+      googleCustomerManager: true,
+    });
+
+    await withMockFetch(fetchMock.fetch, async () => {
+      const { app: productionApp } = await importFreshIndex("google-connect-rejects-mcc");
+      const res = await productionApp.request(`/google/customers/1234567890/connect?workspaceId=${testWorkspaceId}`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ managerCustomerId: null }),
+      });
+      const body = (await res.json()) as { error: string };
+
+      assert.equal(res.status, 409);
+      assert.match(body.error, /MCC（管理者アカウント）は広告アカウント上限へ算入せず/);
+      assert.equal(fetchMock.calls.some((call) => call.kind === "supabase.ad_account_upsert"), false);
+    });
+  });
+});
+
 test("billing checkout session includes workspace metadata and audit log", async () => {
   await withMockProductionEnv(async () => {
     const fetchMock = createProductionFetchMock();
@@ -920,6 +1195,7 @@ test("billing checkout session includes workspace metadata and audit log", async
       const res = await productionApp.request("/billing/checkout-session", {
         method: "POST",
         headers: authHeaders(),
+        body: JSON.stringify({ planId: "standard", interval: "month" }),
       });
       const body = (await res.json()) as { id: string; url: string };
       const stripeCall = fetchMock.calls.find((call) => call.kind === "stripe.checkout");
@@ -932,6 +1208,11 @@ test("billing checkout session includes workspace metadata and audit log", async
       assert.equal(stripeCall?.params?.get("metadata[workspace_id]"), testWorkspaceId);
       assert.equal(stripeCall?.params?.get("metadata[user_id]"), testUserId);
       assert.equal(stripeCall?.params?.get("customer_email"), "operator@example.com");
+      assert.equal(stripeCall?.params?.get("success_url"), "https://app.example.test/?billing=success&session_id={CHECKOUT_SESSION_ID}");
+      assert.equal(stripeCall?.params?.get("line_items[0][price]"), "price_standard_month");
+      assert.equal(stripeCall?.params?.get("line_items[1][price]"), "price_standard_setup");
+      assert.equal(stripeCall?.params?.get("metadata[stripe_setup_fee_price_id]"), "price_standard_setup");
+      assert.equal(stripeCall?.params?.has("payment_method_types[0]"), false);
       assert.equal(auditCall?.json?.event_type, "stripe.checkout_session_created");
       assert.equal(auditCall?.json?.workspace_id, testWorkspaceId);
     });
@@ -956,6 +1237,7 @@ test("billing checkout session reuses existing Stripe customer without customer_
       const res = await productionApp.request("/billing/checkout-session", {
         method: "POST",
         headers: authHeaders(),
+        body: JSON.stringify({ planId: "standard", interval: "month" }),
       });
       const stripeCall = fetchMock.calls.find((call) => call.kind === "stripe.checkout");
 
@@ -976,6 +1258,7 @@ test("billing checkout provider errors are redacted before API response", async 
       const res = await productionApp.request("/billing/checkout-session", {
         method: "POST",
         headers: authHeaders(),
+        body: JSON.stringify({ planId: "standard", interval: "month" }),
       });
       const body = (await res.json()) as { error: string };
 
@@ -1040,7 +1323,14 @@ test("stripe webhook verifies signature and upserts billing records", async () =
           customer: "cus_webhook",
           subscription: "sub_webhook",
           client_reference_id: testWorkspaceId,
-          metadata: { workspace_id: testWorkspaceId, user_id: testUserId },
+          metadata: {
+            workspace_id: testWorkspaceId,
+            user_id: testUserId,
+            plan_id: "standard",
+            billing_interval: "month",
+            stripe_price_id: "price_standard_month",
+            stripe_setup_fee_price_id: "price_standard_setup",
+          },
         },
       },
     });
@@ -1058,6 +1348,8 @@ test("stripe webhook verifies signature and upserts billing records", async () =
       const body = (await res.json()) as { received: boolean };
       const customerUpsert = fetchMock.calls.find((call) => call.kind === "supabase.billing_customer_upsert");
       const subscriptionUpsert = fetchMock.calls.find((call) => call.kind === "supabase.billing_subscription_upsert");
+      const claim = fetchMock.calls.find((call) => call.kind === "supabase.stripe_webhook_claim");
+      const finish = fetchMock.calls.find((call) => call.kind === "supabase.stripe_webhook_finish");
 
       assert.equal(res.status, 200);
       assert.equal(body.received, true);
@@ -1065,6 +1357,222 @@ test("stripe webhook verifies signature and upserts billing records", async () =
       assert.equal(customerUpsert?.json?.stripe_customer_id, "cus_webhook");
       assert.equal(subscriptionUpsert?.json?.stripe_subscription_id, "sub_webhook");
       assert.equal(subscriptionUpsert?.json?.status, "checkout_completed");
+      assert.equal(claim?.json?.p_event_id, "evt_checkout_completed");
+      assert.equal(finish?.json?.p_succeeded, true);
+    });
+  });
+});
+
+test("checkout completion repairs an existing active subscription missing plan metadata", async () => {
+  await withMockProductionEnv(async () => {
+    const fetchMock = createProductionFetchMock({
+      billingCustomer: {
+        id: "billing-customer-row",
+        workspace_id: testWorkspaceId,
+        stripe_customer_id: "cus_webhook",
+      },
+      billingSubscription: activeBillingSubscription({
+        stripe_customer_id: "cus_webhook",
+        stripe_subscription_id: "sub_webhook",
+        plan_id: null,
+        billing_interval: null,
+      }),
+    });
+    const rawBody = JSON.stringify({
+      id: "evt_checkout_repairs_plan",
+      type: "checkout.session.completed",
+      created: 1_900_000_000,
+      data: {
+        object: {
+          customer: "cus_webhook",
+          subscription: "sub_webhook",
+          client_reference_id: testWorkspaceId,
+          metadata: {
+            workspace_id: testWorkspaceId,
+            user_id: testUserId,
+            plan_id: "standard",
+            billing_interval: "month",
+            stripe_price_id: "price_standard_month",
+            stripe_setup_fee_price_id: "price_standard_setup",
+          },
+        },
+      },
+    });
+
+    await withMockFetch(fetchMock.fetch, async () => {
+      const { app: productionApp } = await importFreshIndex("stripe-webhook-repair-plan");
+      const res = await productionApp.request("/billing/webhook", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "stripe-signature": stripeSignature(rawBody) },
+        body: rawBody,
+      });
+      const subscriptionUpsert = fetchMock.calls.find((call) => call.kind === "supabase.billing_subscription_upsert");
+
+      assert.equal(res.status, 200);
+      assert.equal(subscriptionUpsert?.json?.status, "active");
+      assert.equal(subscriptionUpsert?.json?.plan_id, "standard");
+      assert.equal(subscriptionUpsert?.json?.billing_interval, "month");
+    });
+  });
+});
+
+test("subscription creation can link the signed Checkout customer before checkout completion arrives", async () => {
+  await withMockProductionEnv(async () => {
+    const fetchMock = createProductionFetchMock();
+    const rawBody = JSON.stringify({
+      id: "evt_subscription_before_checkout",
+      type: "customer.subscription.created",
+      created: 1_900_000_000,
+      data: {
+        object: {
+          id: "sub_webhook",
+          customer: "cus_webhook",
+          status: "active",
+          metadata: {
+            workspace_id: testWorkspaceId,
+            user_id: testUserId,
+            plan_id: "standard",
+            billing_interval: "month",
+          },
+          items: { data: [{ price: { id: "price_standard_month" }, current_period_end: 1_910_000_000 }] },
+        },
+      },
+    });
+
+    await withMockFetch(fetchMock.fetch, async () => {
+      const { app: productionApp } = await importFreshIndex("stripe-webhook-subscription-first");
+      const res = await productionApp.request("/billing/webhook", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "stripe-signature": stripeSignature(rawBody) },
+        body: rawBody,
+      });
+      const customerUpsert = fetchMock.calls.find((call) => call.kind === "supabase.billing_customer_upsert");
+      const subscriptionUpsert = fetchMock.calls.find((call) => call.kind === "supabase.billing_subscription_upsert");
+
+      assert.equal(res.status, 200);
+      assert.equal(customerUpsert?.json?.workspace_id, testWorkspaceId);
+      assert.equal(customerUpsert?.json?.user_id, testUserId);
+      assert.equal(subscriptionUpsert?.json?.status, "active");
+      assert.equal(subscriptionUpsert?.json?.plan_id, "standard");
+      assert.equal(subscriptionUpsert?.json?.current_period_end, new Date(1_910_000_000 * 1000).toISOString());
+    });
+  });
+});
+
+test("duplicate Stripe webhook deliveries return success without repeating mutations", async () => {
+  await withMockProductionEnv(async () => {
+    const fetchMock = createProductionFetchMock({ stripeWebhookClaimed: false });
+    const rawBody = JSON.stringify({
+      id: "evt_duplicate",
+      type: "checkout.session.completed",
+      data: { object: { customer: "cus_duplicate", metadata: {} } },
+    });
+
+    await withMockFetch(fetchMock.fetch, async () => {
+      const { app: productionApp } = await importFreshIndex("stripe-webhook-duplicate");
+      const res = await productionApp.request("/billing/webhook", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "stripe-signature": stripeSignature(rawBody) },
+        body: rawBody,
+      });
+      const body = await res.json() as { duplicate: boolean };
+
+      assert.equal(res.status, 200);
+      assert.equal(body.duplicate, true);
+      assert.equal(fetchMock.calls.some((call) => call.kind === "supabase.billing_customer_upsert"), false);
+      assert.equal(fetchMock.calls.some((call) => call.kind === "supabase.stripe_webhook_finish"), false);
+    });
+  });
+});
+
+test("Stripe Portal plan changes use the current Price even when subscription metadata is stale", async () => {
+  await withMockProductionEnv(async () => {
+    const fetchMock = createProductionFetchMock({
+      billingCustomer: {
+        id: "billing-customer-row",
+        workspace_id: testWorkspaceId,
+        stripe_customer_id: "cus_test_active",
+      },
+    });
+    const rawBody = JSON.stringify({
+      id: "evt_subscription_portal_change",
+      type: "customer.subscription.updated",
+      data: {
+        object: {
+          id: "sub_test_active",
+          customer: "cus_test_active",
+          status: "active",
+          current_period_end: 1_800_000_000,
+          metadata: {
+            workspace_id: testWorkspaceId,
+            plan_id: "standard",
+            billing_interval: "month",
+          },
+          items: { data: [{ price: { id: "price_premium_month" } }] },
+        },
+      },
+    });
+
+    await withMockFetch(fetchMock.fetch, async () => {
+      const { app: productionApp } = await importFreshIndex("stripe-webhook-portal-plan-change");
+      const res = await productionApp.request("/billing/webhook", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "stripe-signature": stripeSignature(rawBody) },
+        body: rawBody,
+      });
+      const upsert = fetchMock.calls.find((call) => call.kind === "supabase.billing_subscription_upsert");
+
+      assert.equal(res.status, 200);
+      assert.equal(upsert?.json?.plan_id, "premium");
+      assert.equal(upsert?.json?.billing_interval, "month");
+      assert.equal(upsert?.json?.stripe_price_id, "price_premium_month");
+    });
+  });
+});
+
+test("out-of-order Stripe subscription events cannot overwrite newer mirrored state", async () => {
+  await withMockProductionEnv(async () => {
+    const fetchMock = createProductionFetchMock({
+      billingCustomer: {
+        id: "billing-customer-row",
+        workspace_id: testWorkspaceId,
+        stripe_customer_id: "cus_test_active",
+      },
+      billingSubscription: activeBillingSubscription({
+        plan_id: "premium",
+        billing_interval: "month",
+        stripe_price_id: "price_premium_month",
+        raw: { type: "customer.subscription.updated", stripeEventCreated: 2_000_000_000 },
+      }),
+    });
+    const rawBody = JSON.stringify({
+      id: "evt_stale_subscription",
+      type: "customer.subscription.updated",
+      created: 1_900_000_000,
+      data: {
+        object: {
+          id: "sub_test_active",
+          customer: "cus_test_active",
+          status: "active",
+          metadata: { workspace_id: testWorkspaceId },
+          items: { data: [{ price: { id: "price_standard_month" } }] },
+        },
+      },
+    });
+
+    await withMockFetch(fetchMock.fetch, async () => {
+      const { app: productionApp } = await importFreshIndex("stripe-webhook-stale-event");
+      const res = await productionApp.request("/billing/webhook", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "stripe-signature": stripeSignature(rawBody) },
+        body: rawBody,
+      });
+      const body = await res.json() as { stale: boolean };
+
+      assert.equal(res.status, 200);
+      assert.equal(body.stale, true);
+      assert.equal(fetchMock.calls.some((call) => call.kind === "supabase.billing_subscription_upsert"), false);
+      assert.equal(fetchMock.calls.some((call) => call.kind === "supabase.workspace_update"), false);
     });
   });
 });
@@ -1335,7 +1843,7 @@ test("google ads campaign write requires confirmation and enabled write flag", a
       const res = await productionApp.request("/google/customers/1234567890/campaigns/987654321/status", {
         method: "POST",
         headers: authHeaders(),
-        body: JSON.stringify({ status: "PAUSED", confirmed: true, approvalNote: "CPA悪化のため停止し、24時間後にCPA改善がなければ戻す。" }),
+        body: JSON.stringify({ status: "PAUSED", expectedCurrentStatus: "ENABLED", confirmed: true, approvalNote: "CPA悪化のため停止し、24時間後にCPA改善がなければ戻す。" }),
       });
       const body = (await res.json()) as { error: string };
 
@@ -1360,7 +1868,7 @@ test("google ads campaign write requires approval note for auditability", async 
       const res = await productionApp.request("/google/customers/1234567890/campaigns/987654321/status", {
         method: "POST",
         headers: authHeaders(),
-        body: JSON.stringify({ status: "PAUSED", confirmed: true }),
+        body: JSON.stringify({ status: "PAUSED", expectedCurrentStatus: "ENABLED", confirmed: true }),
       });
       const body = (await res.json()) as { error: string };
 
@@ -1386,7 +1894,7 @@ test("google ads campaign write requires rollback condition in approval note", a
       const res = await productionApp.request("/google/customers/1234567890/campaigns/987654321/status", {
         method: "POST",
         headers: authHeaders(),
-        body: JSON.stringify({ status: "PAUSED", confirmed: true, approvalNote: "CPA悪化のため一時停止して様子を見る。" }),
+        body: JSON.stringify({ status: "PAUSED", expectedCurrentStatus: "ENABLED", confirmed: true, approvalNote: "CPA悪化のため一時停止して様子を見る。" }),
       });
       const body = (await res.json()) as { error: string };
 
@@ -1413,7 +1921,7 @@ test("google ads campaign write requires connected customer in workspace", async
       const res = await productionApp.request("/google/customers/1234567890/campaigns/987654321/status", {
         method: "POST",
         headers: authHeaders(),
-        body: JSON.stringify({ status: "PAUSED", confirmed: true, approvalNote: "CPA悪化のため停止し、24時間後にCPA改善がなければ戻す。" }),
+        body: JSON.stringify({ status: "PAUSED", expectedCurrentStatus: "ENABLED", confirmed: true, approvalNote: "CPA悪化のため停止し、24時間後にCPA改善がなければ戻す。" }),
       });
       const body = (await res.json()) as { error: string };
 
@@ -1441,7 +1949,7 @@ test("google ads campaign status write calls mutate only after explicit approval
       const res = await productionApp.request("/google/customers/123-456-7890/campaigns/987654321/status", {
         method: "POST",
         headers: authHeaders(),
-        body: JSON.stringify({ status: "PAUSED", confirmed: true, approvalNote: "CPA悪化のため停止し、24時間後にCPA改善がなければ戻す。" }),
+        body: JSON.stringify({ status: "PAUSED", expectedCurrentStatus: "ENABLED", confirmed: true, approvalNote: "CPA悪化のため停止し、24時間後にCPA改善がなければ戻す。" }),
       });
       const body = (await res.json()) as {
         mode: string;
@@ -1484,6 +1992,38 @@ test("google ads campaign status write calls mutate only after explicit approval
   });
 });
 
+test("MCC child campaign preview and write reuse the connected manager customer header", async () => {
+  await withMockProductionEnv(async () => {
+    process.env.GOOGLE_ADS_WRITE_ENABLED = "true";
+    process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID = "9999999999";
+    const { encryptToken } = await import("./crypto.js");
+    const fetchMock = createProductionFetchMock({
+      billingSubscription: activeBillingSubscription(),
+      encryptedGoogleAccessToken: encryptToken("google-access-token"),
+      googleAdAccount: {
+        id: "google-ad-account-row",
+        status: "connected",
+        manager_customer_id: "111-222-3333",
+      },
+    });
+
+    await withMockFetch(fetchMock.fetch, async () => {
+      const { app: productionApp } = await importFreshIndex("google-write-mcc-header");
+      const res = await productionApp.request("/google/customers/1234567890/campaigns/987654321/status", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ status: "PAUSED", expectedCurrentStatus: "ENABLED", confirmed: true, approvalNote: "CPA悪化のため停止し、24時間後に改善がなければ戻す。" }),
+      });
+      const search = fetchMock.calls.find((call) => call.kind === "google.campaign_budget_search");
+      const mutate = fetchMock.calls.find((call) => call.kind === "google.campaign_status_mutate");
+
+      assert.equal(res.status, 200);
+      assert.equal(search?.loginCustomerId, "1112223333");
+      assert.equal(mutate?.loginCustomerId, "1112223333");
+    });
+  });
+});
+
 test("google ads campaign status write redacts secret-like approval note before audit", async () => {
   await withMockProductionEnv(async () => {
     process.env.GOOGLE_ADS_WRITE_ENABLED = "true";
@@ -1500,6 +2040,7 @@ test("google ads campaign status write redacts secret-like approval note before 
         headers: authHeaders(),
         body: JSON.stringify({
           status: "PAUSED",
+          expectedCurrentStatus: "ENABLED",
           confirmed: true,
           approvalNote:
             "CPA悪化のため停止し、24時間後にCPA改善がなければ戻す。sk-test-secret-value-forbidden Authorization: Bearer google-access-token-forbidden client_secret=client-secret-value-forbidden",
@@ -1536,7 +2077,7 @@ test("google ads campaign status write audits provider failures without secrets"
       const res = await productionApp.request("/google/customers/1234567890/campaigns/987654321/status", {
         method: "POST",
         headers: authHeaders(),
-        body: JSON.stringify({ status: "PAUSED", confirmed: true, approvalNote: "CPA悪化のため停止し、24時間後にCPA改善がなければ戻す。" }),
+        body: JSON.stringify({ status: "PAUSED", expectedCurrentStatus: "ENABLED", confirmed: true, approvalNote: "CPA悪化のため停止し、24時間後にCPA改善がなければ戻す。" }),
       });
       const body = (await res.json()) as { error: string };
       const failureAudit = fetchMock.calls.find(
@@ -1574,7 +2115,7 @@ test("google ads campaign status write rejects non-reversible REMOVED status", a
       const res = await productionApp.request("/google/customers/1234567890/campaigns/987654321/status", {
         method: "POST",
         headers: authHeaders(),
-        body: JSON.stringify({ status: "REMOVED", confirmed: true, approvalNote: "削除相当の変更は不可逆なので、停止で代替して24時間後に戻す。" }),
+        body: JSON.stringify({ status: "REMOVED", expectedCurrentStatus: "ENABLED", confirmed: true, approvalNote: "削除相当の変更は不可逆なので、停止で代替して24時間後に戻す。" }),
       });
       const body = (await res.json()) as { error: string };
 
@@ -1602,7 +2143,7 @@ test("google ads campaign write refreshes expired access tokens before mutation"
       const res = await productionApp.request("/google/customers/1234567890/campaigns/987654321/status", {
         method: "POST",
         headers: authHeaders(),
-        body: JSON.stringify({ status: "PAUSED", confirmed: true, approvalNote: "CPA悪化のため停止し、24時間後にCPA改善がなければ戻す。" }),
+        body: JSON.stringify({ status: "PAUSED", expectedCurrentStatus: "ENABLED", confirmed: true, approvalNote: "CPA悪化のため停止し、24時間後にCPA改善がなければ戻す。" }),
       });
       const refreshCall = fetchMock.calls.find((call) => call.kind === "google.oauth_token_refresh");
       const connectionUpsert = fetchMock.calls.find((call) => call.kind === "supabase.google_connection_upsert");
@@ -1640,7 +2181,7 @@ test("google ads campaign budget write resolves budget resource and audits execu
       const res = await productionApp.request("/google/customers/1234567890/campaigns/987654321/budget", {
         method: "POST",
         headers: authHeaders(),
-        body: JSON.stringify({ amount: 20000, confirmed: true, approvalNote: "CPA改善見込みのため増額し、24時間後にCPA悪化なら戻す。" }),
+        body: JSON.stringify({ amount: 20000, expectedCurrentAmount: 10000, confirmed: true, approvalNote: "CPA改善見込みのため増額し、24時間後にCPA悪化なら戻す。" }),
       });
       const body = (await res.json()) as {
         mode: string;
@@ -1682,6 +2223,35 @@ test("google ads campaign budget write resolves budget resource and audits execu
   });
 });
 
+test("google ads campaign budget write rejects explicitly shared budgets", async () => {
+  await withMockProductionEnv(async () => {
+    process.env.GOOGLE_ADS_WRITE_ENABLED = "true";
+    const { encryptToken } = await import("./crypto.js");
+    const fetchMock = createProductionFetchMock({
+      billingSubscription: activeBillingSubscription(),
+      encryptedGoogleAccessToken: encryptToken("google-access-token"),
+      googleBudgetExplicitlyShared: true,
+    });
+
+    await withMockFetch(fetchMock.fetch, async () => {
+      const { app: productionApp } = await importFreshIndex("google-budget-shared-rejected");
+      const res = await productionApp.request("/google/customers/1234567890/campaigns/987654321/budget", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ amount: 20000, expectedCurrentAmount: 10000, confirmed: true, approvalNote: "CPA改善のため増額し、24時間後に悪化したら戻す。" }),
+      });
+      const audit = fetchMock.calls.find(
+        (call) => call.kind === "supabase.audit" && call.json?.event_type === "google_ads.shared_campaign_budget_rejected",
+      );
+
+      assert.equal(res.status, 409);
+      assert.match(String((await res.json() as { error: string }).error), /共有予算/);
+      assert.equal(fetchMock.calls.some((call) => call.kind === "google.campaign_budget_mutate"), false);
+      assert.ok(audit);
+    });
+  });
+});
+
 test("google ads campaign budget write rejects amounts above the configured safety cap", async () => {
   await withMockProductionEnv(async () => {
     process.env.GOOGLE_ADS_WRITE_ENABLED = "true";
@@ -1697,7 +2267,7 @@ test("google ads campaign budget write rejects amounts above the configured safe
       const res = await productionApp.request("/google/customers/1234567890/campaigns/987654321/budget", {
         method: "POST",
         headers: authHeaders(),
-        body: JSON.stringify({ amount: 30001, confirmed: true, approvalNote: "CPA改善見込みのため増額し、24時間後にCPA悪化なら戻す。" }),
+        body: JSON.stringify({ amount: 30001, expectedCurrentAmount: 10000, confirmed: true, approvalNote: "CPA改善見込みのため増額し、24時間後にCPA悪化なら戻す。" }),
       });
       const body = (await res.json()) as { error: string };
 
@@ -1757,6 +2327,23 @@ test("billing gate blocks authenticated product APIs before Google Ads write exe
       assert.equal(body.access, "billing_required");
       assert.equal(fetchMock.calls.some((call) => call.kind === "google.campaign_status_mutate"), false);
       assert.equal(fetchMock.calls.some((call) => call.kind === "supabase.audit"), false);
+    });
+  });
+});
+
+test("pending-payment workspaces cannot read product content or begin Google Ads OAuth", async () => {
+  await withMockProductionEnv(async () => {
+    const fetchMock = createProductionFetchMock({ billingSubscription: null });
+
+    await withMockFetch(fetchMock.fetch, async () => {
+      const { app: productionApp } = await importFreshIndex("billing-gated-product-reads");
+      for (const path of ["/help/articles", "/columns", "/connections", "/oauth/google/start-url"]) {
+        const res = await productionApp.request(path, { headers: authHeaders() });
+        const body = (await res.json()) as { code: string };
+        assert.equal(res.status, 402, path);
+        assert.equal(body.code, "billing_required", path);
+      }
+      assert.equal(fetchMock.calls.some((call) => call.kind.startsWith("google.")), false);
     });
   });
 });
@@ -1893,6 +2480,80 @@ test("configured staging product APIs require login before mock fallback", async
   });
 });
 
+test("production dashboard hierarchy is workspace scoped and propagates every query filter to Supabase", async () => {
+  await withMockProductionEnv(async () => {
+    process.env.APP_ENV = "production";
+    const fetchMock = createProductionFetchMock({
+      billingSubscription: activeBillingSubscription(),
+      dashboardHierarchy: true,
+    });
+
+    await withMockFetch(fetchMock.fetch, async () => {
+      const { app: productionApp } = await importFreshIndex("dashboard-hierarchy-production");
+      const hierarchyQuery = new URLSearchParams({
+        platform: "google",
+        adAccountId: "db-account",
+        campaignId: "db-campaign",
+        adGroupId: "db-group",
+        adId: "db-ad",
+      });
+      const optionsRes = await productionApp.request(`/dashboard/filter-options?${hierarchyQuery}`, {
+        headers: authHeaders(),
+      });
+      const optionsBody = (await optionsRes.json()) as {
+        accounts: Array<{ id: string }>;
+        campaigns: Array<{ id: string; adAccountId: string }>;
+        adGroups: Array<{ id: string; campaignId: string }>;
+        ads: Array<{ id: string; adGroupId: string }>;
+      };
+      assert.equal(optionsRes.status, 200);
+      assert.deepEqual(optionsBody.accounts.map((item) => item.id), ["db-account"]);
+      assert.deepEqual(optionsBody.campaigns, [{
+        id: "db-campaign",
+        name: "DB Campaign",
+        adAccountId: "db-account",
+        platform: "google",
+        status: "ENABLED",
+      }]);
+      assert.equal(optionsBody.adGroups[0]?.campaignId, "db-campaign");
+      assert.equal(optionsBody.ads[0]?.adGroupId, "db-group");
+
+      const dashboardRes = await productionApp.request(
+        `/dashboard?${hierarchyQuery}&from=2026-07-01&to=2026-07-07`,
+        { headers: authHeaders() },
+      );
+      const dashboardBody = (await dashboardRes.json()) as {
+        campaignId: string;
+        adGroupId: string;
+        adId: string;
+        campaigns: Array<{ campaignId: string }>;
+      };
+      assert.equal(dashboardRes.status, 200);
+      assert.equal(dashboardBody.campaignId, "db-campaign");
+      assert.equal(dashboardBody.adGroupId, "db-group");
+      assert.equal(dashboardBody.adId, "db-ad");
+      assert.deepEqual(dashboardBody.campaigns.map((item) => item.campaignId), ["db-campaign"]);
+
+      const metricCalls = fetchMock.calls.filter((call) => call.kind === "supabase.dashboard_metrics");
+      assert.ok(metricCalls.length >= 3);
+      for (const call of metricCalls) {
+        const url = new URL(call.url);
+        assert.equal(url.searchParams.get("workspace_id"), `eq.${testWorkspaceId}`);
+        assert.equal(url.searchParams.get("ad_account_id"), "eq.db-account");
+        assert.equal(url.searchParams.get("external_campaign_id"), "eq.db-campaign");
+        assert.equal(url.searchParams.get("external_ad_group_id"), "eq.db-group");
+        assert.equal(url.searchParams.get("external_ad_id"), "eq.db-ad");
+      }
+
+      const crossWorkspaceRes = await productionApp.request(
+        "/dashboard/filter-options?platform=google&adAccountId=other-workspace-account",
+        { headers: authHeaders() },
+      );
+      assert.equal(crossWorkspaceRes.status, 403);
+    });
+  });
+});
+
 const testUserId = "11111111-1111-4111-8111-111111111111";
 const testWorkspaceId = "22222222-2222-4222-8222-222222222222";
 const supabaseUrl = "https://supabase.test";
@@ -1902,7 +2563,10 @@ const productionEnvKeys = [
   "SUPABASE_ANON_KEY",
   "SUPABASE_SERVICE_ROLE_KEY",
   "STRIPE_SECRET_KEY",
+  "STRIPE_API_KEY",
   "STRIPE_PRICE_ID",
+  "BILLING_PLANS_JSON",
+  "MODEL_COST_CATALOG_JSON",
   "STRIPE_WEBHOOK_SECRET",
   "WEB_ORIGIN",
   "API_PUBLIC_ORIGIN",
@@ -1914,8 +2578,11 @@ const productionEnvKeys = [
   "GOOGLE_ADS_CLIENT_SECRET",
   "GOOGLE_ADS_REDIRECT_URI",
   "GOOGLE_ADS_DEVELOPER_TOKEN",
+  "GOOGLE_ADS_API_VERSION",
+  "GOOGLE_ADS_LOGIN_CUSTOMER_ID",
   "GOOGLE_ADS_WRITE_ENABLED",
   "GOOGLE_ADS_MAX_BUDGET_AMOUNT",
+  "PREMIUM_ONBOARDING_BOOKING_URL",
   "GOOGLE_OAUTH_STATE_STORE",
   "TOKEN_ENCRYPTION_KEY",
   "TOKEN_ENCRYPTION_KEY_ID",
@@ -1935,6 +2602,13 @@ const productionEnvKeys = [
   "OPENAI_AGENT_STAGING_E2E_PASSED_AT",
   "GOOGLE_ADS_STAGING_E2E_PASSED_AT",
   "STRIPE_STAGING_E2E_PASSED_AT",
+  "SUPABASE_STAGING_E2E_PASSED_AT",
+  "REPORT_EMAIL_STAGING_E2E_PASSED_AT",
+  "CLOUDFLARE_ACCOUNT_ID",
+  "CLOUDFLARE_EMAIL_API_TOKEN",
+  "REPORT_EMAIL_DOMAIN",
+  "APP_PUBLIC_URL",
+  "NOTIFICATION_SIGNING_SECRET",
   "DEPLOYMENT_RUNBOOK_ACK",
 ] as const;
 
@@ -1946,6 +2620,7 @@ type ProductionFetchCall = {
   params?: URLSearchParams;
   authorization?: string | null;
   developerToken?: string | null;
+  loginCustomerId?: string | null;
 };
 
 type ProductionFetchMockOptions = {
@@ -1955,9 +2630,13 @@ type ProductionFetchMockOptions = {
   encryptedGoogleRefreshToken?: string;
   googleTokenExpiresAt?: string | null;
   googleAdAccount?: Record<string, unknown> | null;
+  googleCustomerManager?: boolean;
+  googleBudgetExplicitlyShared?: boolean;
   failGoogleStatusMutate?: boolean;
   failGoogleCustomerList?: boolean;
   failStripeCheckout?: boolean;
+  stripeWebhookClaimed?: boolean;
+  dashboardHierarchy?: boolean;
 };
 
 function activeBillingSubscription(overrides: Record<string, unknown> = {}) {
@@ -1966,7 +2645,9 @@ function activeBillingSubscription(overrides: Record<string, unknown> = {}) {
     workspace_id: testWorkspaceId,
     stripe_customer_id: "cus_test_active",
     stripe_subscription_id: "sub_test_active",
-    stripe_price_id: "price_test",
+    stripe_price_id: "price_standard_month",
+    plan_id: "standard",
+    billing_interval: "month",
     status: "active",
     current_period_end: "2026-07-04T00:00:00.000Z",
     cancel_at_period_end: false,
@@ -2003,7 +2684,18 @@ async function withMockProductionEnv(run: () => Promise<void>) {
   process.env.SUPABASE_ANON_KEY = "anon-key";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "service-role-key";
   process.env.STRIPE_SECRET_KEY = "sk_test_stripe";
-  process.env.STRIPE_PRICE_ID = "price_test";
+  process.env.STRIPE_API_KEY = "rk_test_stripe";
+  process.env.BILLING_PLANS_JSON = JSON.stringify([
+    { id: "minimum", setupFee: { stripePriceId: "price_minimum_setup", amount: 50000, currency: "jpy" }, prices: { month: { stripePriceId: "price_minimum_month", amount: 9800, currency: "jpy" } } },
+    { id: "standard", chatCreditLimit: 100, estimatedConsultations: 30, setupFee: { stripePriceId: "price_standard_setup", amount: 70000, currency: "jpy" }, prices: { month: { stripePriceId: "price_standard_month", amount: 49800, currency: "jpy" } } },
+    { id: "premium", chatCreditLimit: 300, estimatedConsultations: 90, setupFee: { stripePriceId: "price_premium_setup", amount: 70000, currency: "jpy" }, prices: { month: { stripePriceId: "price_premium_month", amount: 69800, currency: "jpy" } } },
+  ]);
+  process.env.MODEL_COST_CATALOG_JSON = JSON.stringify({ version: "test-v1", currency: "usd", models: { "gpt-test": { inputPerMillion: 1, cachedInputPerMillion: 0.1, outputPerMillion: 2, reasoningPerMillion: 2 } } });
+  process.env.CLOUDFLARE_ACCOUNT_ID = "test-cloudflare-account";
+  process.env.CLOUDFLARE_EMAIL_API_TOKEN = "test-cloudflare-email-token";
+  process.env.REPORT_EMAIL_DOMAIN = "mail.example.test";
+  process.env.APP_PUBLIC_URL = "https://app.example.test";
+  process.env.NOTIFICATION_SIGNING_SECRET = "0123456789abcdef0123456789abcdef";
   process.env.STRIPE_WEBHOOK_SECRET = stripeWebhookSecret;
   process.env.WEB_ORIGIN = "https://app.example.test";
   process.env.API_PUBLIC_ORIGIN = "https://api.example.test";
@@ -2011,13 +2703,25 @@ async function withMockProductionEnv(run: () => Promise<void>) {
   process.env.GOOGLE_ADS_CLIENT_SECRET = "google-ads-client-secret";
   process.env.GOOGLE_ADS_REDIRECT_URI = "https://api.example.test/oauth/google/callback";
   process.env.GOOGLE_ADS_DEVELOPER_TOKEN = "developer-token-test";
+  process.env.GOOGLE_ADS_API_VERSION = "v24.2";
   process.env.GOOGLE_ADS_WRITE_ENABLED = "false";
+  process.env.PREMIUM_ONBOARDING_BOOKING_URL = "";
   process.env.TOKEN_ENCRYPTION_KEY = Buffer.from("0123456789abcdef0123456789abcdef").toString("base64");
   process.env.TOKEN_ENCRYPTION_KEY_ID = "test-key";
   process.env.USE_AGENT_SERVICE = "false";
   process.env.ADK_AGENT_URL = "";
   process.env.USE_ADK_AGENT = "";
   process.env.ADK_AGENT_TIMEOUT_MS = "";
+  for (const key of [
+    "OPENAI_AGENT_STAGING_E2E_PASSED_AT",
+    "GOOGLE_ADS_STAGING_E2E_PASSED_AT",
+    "STRIPE_STAGING_E2E_PASSED_AT",
+    "SUPABASE_STAGING_E2E_PASSED_AT",
+    "REPORT_EMAIL_STAGING_E2E_PASSED_AT",
+    "DEPLOYMENT_RUNBOOK_ACK",
+  ]) {
+    delete process.env[key];
+  }
   try {
     await run();
   } finally {
@@ -2068,6 +2772,36 @@ function createProductionFetchMock(options: ProductionFetchMockOptions = {}) {
     if (parsedUrl.origin === supabaseUrl && parsedUrl.pathname === "/rest/v1/billing_subscriptions" && method === "GET") {
       calls.push({ kind: "supabase.billing_subscription_get", url, method });
       return Response.json(options.billingSubscription === undefined ? [] : options.billingSubscription ? [options.billingSubscription] : []);
+    }
+
+    if (parsedUrl.origin === supabaseUrl && parsedUrl.pathname === "/rest/v1/ai_usage_events") {
+      const json = parseJsonBody(bodyText);
+      calls.push({ kind: `supabase.ai_usage_${method.toLowerCase()}`, url, method, json });
+      return Response.json(method === "GET" ? [] : [{ id: "usage-event", ...json }]);
+    }
+
+    if (parsedUrl.origin === supabaseUrl && parsedUrl.pathname === "/rest/v1/workspaces" && method === "PATCH") {
+      const json = parseJsonBody(bodyText);
+      calls.push({ kind: "supabase.workspace_update", url, method, json });
+      return Response.json([{ id: testWorkspaceId, ...json }]);
+    }
+
+    if (parsedUrl.origin === supabaseUrl && parsedUrl.pathname === "/rest/v1/report_schedules") {
+      const json = parseJsonBody(bodyText);
+      calls.push({ kind: "supabase.report_schedule", url, method, json });
+      return Response.json(method === "GET" ? [] : [{ workspace_id: testWorkspaceId, ...json }]);
+    }
+
+    if (parsedUrl.origin === supabaseUrl && parsedUrl.pathname === "/rest/v1/rpc/claim_stripe_webhook_event") {
+      const json = parseJsonBody(bodyText);
+      calls.push({ kind: "supabase.stripe_webhook_claim", url, method, json });
+      return Response.json(options.stripeWebhookClaimed ?? true);
+    }
+
+    if (parsedUrl.origin === supabaseUrl && parsedUrl.pathname === "/rest/v1/rpc/finish_stripe_webhook_event") {
+      const json = parseJsonBody(bodyText);
+      calls.push({ kind: "supabase.stripe_webhook_finish", url, method, json });
+      return new Response(null, { status: 204 });
     }
 
     if (parsedUrl.origin === supabaseUrl && parsedUrl.pathname === "/rest/v1/workspace_profiles" && method === "GET") {
@@ -2134,6 +2868,28 @@ function createProductionFetchMock(options: ProductionFetchMockOptions = {}) {
 
     if (parsedUrl.origin === supabaseUrl && parsedUrl.pathname === "/rest/v1/ad_accounts" && method === "GET") {
       calls.push({ kind: "supabase.ad_account_get", url, method });
+      if (options.dashboardHierarchy) {
+        const requestedId = parsedUrl.searchParams.get("id")?.replace(/^eq\./, "");
+        if (requestedId === "other-workspace-account") {
+          return Response.json([{ workspace_id: "33333333-3333-4333-8333-333333333333", platform: "google" }]);
+        }
+        if (requestedId) {
+          return Response.json(requestedId === "db-account"
+            ? [{ workspace_id: testWorkspaceId, platform: "google" }]
+            : []);
+        }
+        return Response.json([{
+          id: "db-account",
+          external_account_id: "1234567890",
+          platform: "google",
+          name: "DB Google Account",
+          currency: "JPY",
+          timezone: "Asia/Tokyo",
+          status: "connected",
+          created_at: "2026-07-01T00:00:00.000Z",
+          updated_at: "2026-07-20T00:00:00.000Z",
+        }]);
+      }
       if (options.googleAdAccount === null) return Response.json([]);
       return Response.json([
         options.googleAdAccount ?? {
@@ -2141,6 +2897,53 @@ function createProductionFetchMock(options: ProductionFetchMockOptions = {}) {
           status: "connected",
         },
       ]);
+    }
+
+    if (options.dashboardHierarchy && parsedUrl.origin === supabaseUrl && parsedUrl.pathname === "/rest/v1/campaign_snapshots") {
+      calls.push({ kind: "supabase.dashboard_campaigns", url, method });
+      return Response.json([{
+        id: "campaign-snapshot-row",
+        ad_account_id: "db-account",
+        external_campaign_id: "db-campaign",
+        name: "DB Campaign",
+        platform: "google",
+        status: "ENABLED",
+      }]);
+    }
+
+    if (options.dashboardHierarchy && parsedUrl.origin === supabaseUrl && parsedUrl.pathname === "/rest/v1/ad_group_snapshots") {
+      calls.push({ kind: "supabase.dashboard_ad_groups", url, method });
+      return Response.json([{
+        ad_account_id: "db-account",
+        campaign_snapshot_id: "campaign-snapshot-row",
+        external_ad_group_id: "db-group",
+        name: "DB Ad Group",
+        platform: "google",
+        status: "ENABLED",
+      }]);
+    }
+
+    if (options.dashboardHierarchy && parsedUrl.origin === supabaseUrl && parsedUrl.pathname === "/rest/v1/ad_daily_metrics") {
+      const isOptionQuery = parsedUrl.searchParams.get("select")?.includes("external_ad_id")
+        && parsedUrl.searchParams.get("select") !== "*";
+      calls.push({ kind: isOptionQuery ? "supabase.dashboard_ads" : "supabase.dashboard_metrics", url, method });
+      return Response.json([{
+        ad_account_id: "db-account",
+        external_campaign_id: "db-campaign",
+        campaign_name: "DB Campaign",
+        external_ad_group_id: "db-group",
+        ad_group_name: "DB Ad Group",
+        external_ad_id: "db-ad",
+        ad_name: "DB Ad",
+        platform: "google",
+        raw: { ad_status: "ENABLED" },
+        date: "2026-07-07",
+        impressions: 1000,
+        clicks: 100,
+        cost: 10000,
+        conversions: 10,
+        revenue: 30000,
+      }]);
     }
 
     if (url === "https://oauth2.googleapis.com/token") {
@@ -2158,13 +2961,14 @@ function createProductionFetchMock(options: ProductionFetchMockOptions = {}) {
       return Response.json({ access_token: "google-access-token-refreshed", expires_in: 3600, scope: "https://www.googleapis.com/auth/adwords" });
     }
 
-    if (url === "https://googleads.googleapis.com/v22/customers:listAccessibleCustomers") {
+    if (url === "https://googleads.googleapis.com/v24/customers:listAccessibleCustomers") {
       calls.push({
         kind: "google.customers_list",
         url,
         method,
         authorization: headers.get("Authorization"),
         developerToken: headers.get("developer-token"),
+        loginCustomerId: headers.get("login-customer-id"),
       });
       if (options.failGoogleCustomerList) {
         return new Response("access_token=raw-provider-token Authorization: Bearer google-access-token developer-token=developer-token-test", { status: 403 });
@@ -2219,7 +3023,7 @@ function createProductionFetchMock(options: ProductionFetchMockOptions = {}) {
       return Response.json({ id: "bps_test", url: "https://billing.stripe.test/session" });
     }
 
-    if (url === "https://googleads.googleapis.com/v22/customers/1234567890/campaigns:mutate") {
+    if (url === "https://googleads.googleapis.com/v24/customers/1234567890/campaigns:mutate") {
       const json = parseJsonBody(bodyText);
       calls.push({
         kind: "google.campaign_status_mutate",
@@ -2228,6 +3032,7 @@ function createProductionFetchMock(options: ProductionFetchMockOptions = {}) {
         json,
         authorization: headers.get("Authorization"),
         developerToken: headers.get("developer-token"),
+        loginCustomerId: headers.get("login-customer-id"),
       });
       if (options.failGoogleStatusMutate) {
         return new Response("provider error access_token=raw-provider-token developer-token=developer-token-test", { status: 400 });
@@ -2235,8 +3040,28 @@ function createProductionFetchMock(options: ProductionFetchMockOptions = {}) {
       return Response.json({ results: [{ resourceName: "customers/1234567890/campaigns/987654321" }] });
     }
 
-    if (url === "https://googleads.googleapis.com/v22/customers/1234567890/googleAds:searchStream") {
+    if (url === "https://googleads.googleapis.com/v24/customers/1234567890/googleAds:searchStream") {
       const json = parseJsonBody(bodyText);
+      if (/\bFROM\s+customer\s/i.test(String(json.query ?? ""))) {
+        calls.push({
+          kind: "google.customer_detail",
+          url,
+          method,
+          json,
+          authorization: headers.get("Authorization"),
+          developerToken: headers.get("developer-token"),
+          loginCustomerId: headers.get("login-customer-id"),
+        });
+        return Response.json([{ results: [{
+          customer: {
+            id: "1234567890",
+            descriptiveName: "Test Google Ads Account",
+            manager: options.googleCustomerManager ?? false,
+            currencyCode: "JPY",
+            timeZone: "Asia/Tokyo",
+          },
+        }] }]);
+      }
       calls.push({
         kind: "google.campaign_budget_search",
         url,
@@ -2244,11 +3069,20 @@ function createProductionFetchMock(options: ProductionFetchMockOptions = {}) {
         json,
         authorization: headers.get("Authorization"),
         developerToken: headers.get("developer-token"),
+        loginCustomerId: headers.get("login-customer-id"),
       });
-      return Response.json([{ results: [{ campaign: { campaignBudget: "customers/1234567890/campaignBudgets/555" } }] }]);
+      return Response.json([{ results: [{
+        customer: { currencyCode: "JPY", timeZone: "Asia/Tokyo" },
+        campaign: { id: "987654321", name: "Test Campaign", status: "ENABLED", campaignBudget: "customers/1234567890/campaignBudgets/555" },
+        campaignBudget: {
+          resourceName: "customers/1234567890/campaignBudgets/555",
+          amountMicros: 10_000_000_000,
+          explicitlyShared: options.googleBudgetExplicitlyShared ?? false,
+        },
+      }] }]);
     }
 
-    if (url === "https://googleads.googleapis.com/v22/customers/1234567890/campaignBudgets:mutate") {
+    if (url === "https://googleads.googleapis.com/v24/customers/1234567890/campaignBudgets:mutate") {
       const json = parseJsonBody(bodyText);
       calls.push({
         kind: "google.campaign_budget_mutate",
@@ -2257,6 +3091,7 @@ function createProductionFetchMock(options: ProductionFetchMockOptions = {}) {
         json,
         authorization: headers.get("Authorization"),
         developerToken: headers.get("developer-token"),
+        loginCustomerId: headers.get("login-customer-id"),
       });
       return Response.json({ results: [{ resourceName: "customers/1234567890/campaignBudgets/555" }] });
     }

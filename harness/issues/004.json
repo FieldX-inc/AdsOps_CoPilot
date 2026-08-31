@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "manifestVersion": 2,
+  "issue": {"number": 4, "url": "https://github.com/FieldX-inc/AdsOps_CoPilot/issues/4", "title": "キャラクター実装", "slug": "advisor-character"},
+  "state": "browser_verified",
+  "wave": "wave-4-product-surface",
+  "summary": "Add a calm advisor character to useful guidance and state surfaces without weakening operational clarity or accessibility.",
+  "decisions": ["The character supports trust and guidance; it does not imply autonomous execution.", "Operational status, numbers, and approval controls remain primary.", "Decorative art is hidden from assistive technology; meaningful status has text."],
+  "scope": {"in": ["Approved character assets", "Guidance/empty/loading placements", "Responsive sizing", "Accessible labels or decorative semantics"], "out": ["Chatbot persona that claims platform authority", "Animation that blocks workflow", "Generic sci-fi visual language"]},
+  "requirementRefs": ["DESIGN.md#1-プロダクトの感触", "DESIGN.md#6-表示とアクセシビリティ"],
+  "dependencies": [],
+  "blockers": [],
+  "risks": [
+    {"id": "authority-confusion", "level": "medium", "description": "The character may suggest the AI executes changes itself.", "mitigation": "Pair action copy with explicit human approval language and never depict autonomous mutation."},
+    {"id": "visual-noise", "level": "low", "description": "Art may compete with metrics and controls.", "mitigation": "Use restrained size and only approved state placements."}
+  ],
+  "gates": [
+    {"id": "character-visual-approval", "type": "product_decision", "requiredAt": "before_browser_verification", "status": "pending", "owner": "user", "description": "Approve the final visual and placements from desktop/mobile screenshots."}
+  ],
+  "ownership": {"primaryAgent": "product-ui-agent", "reviewAgents": ["contract-guard", "qa-release-agent"], "allowedPaths": ["apps/web/public/brand/**", "apps/web/src/main.tsx", "apps/web/src/styles.css", "DESIGN.md"], "forbiddenPaths": ["apps/api/**", "services/adk-agent/**", "supabase/**"]},
+  "acceptanceCriteria": ["Character placement never obscures data or approval controls.", "Meaningful states remain understandable with images disabled.", "Decorative images are ignored by assistive technology and meaningful images have concise labels.", "Desktop and mobile screenshots are explicitly approved."],
+  "verification": {"commands": ["npm --workspace @adops/web run typecheck", "npm --workspace @adops/web run build", "npm run e2e:browser"], "scenarioIds": ["dashboard-chat-character", "release-read-only-smoke"]},
+  "evidence": {"requiredArtifacts": ["screenshot", "playwright-trace", "decision-record"], "retention": "release-lifetime"},
+  "rollback": {"strategy": "Remove the character component and asset references while preserving all status text and workflow controls.", "verification": "Browser journeys pass with the character feature disabled."}
+}

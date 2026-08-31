@@ -1,15 +1,31 @@
 import { serve } from "@hono/node-server";
-import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { type Context, Hono } from "hono";
 import { cors } from "hono/cors";
 
+import {
+  billingConfigurationIssues,
+  findBillingPlanByPriceId,
+  getBillingPlan,
+  getBillingPrice,
+  isBillingCatalogConfigured,
+  publicBillingPlans,
+  stripeApiKey,
+  stripeApiVersion,
+  type PlanEntitlements,
+} from "./billing.js";
 import { loadLocalEnv } from "./env.js";
+import { emailConfigurationIssues } from "./email.js";
+import { calculateUsageCharge, parseAgentUsage, rateCatalogConfigurationIssues } from "./usage.js";
+import { verifyUnsubscribeToken } from "./notification-token.js";
+import { fetchMicroCmsHelpArticle, fetchMicroCmsHelpArticles, isMicroCmsConfigured } from "./help.js";
 import {
   buildGoogleOAuthUrlForRedirect,
   connectGoogleCustomer,
   GoogleAdsWriteError,
   handleGoogleOAuthCallback,
+  getGoogleCampaignChangePreview,
   isGoogleAdsWriteConfigured,
   listAccessibleGoogleCustomers,
   syncGoogleCustomer,
@@ -19,6 +35,7 @@ import {
 import {
   type ChatRequest,
   type ChatResponse,
+  DashboardFilterError,
   appendChatExchange,
   createMockChatResponse,
   ensureChatThread,
@@ -27,11 +44,13 @@ import {
   getConnectionStatus,
   getChatThread,
   getDashboardData,
+  getDashboardFilterOptions,
   getLatestAdData,
   getRequestContext,
   listChatThreads,
   parsePlatform,
   parseRange,
+  type DashboardHierarchyFilters,
 } from "./mock-repository.js";
 import {
   AuthError,
@@ -39,20 +58,35 @@ import {
   appendSetupIntakeMessage,
   assertWorkspaceMembership,
   authenticateRequest,
+  claimStripeWebhookEvent,
   createHumanTask,
   createOperatorFeedback,
   createRecommendation,
   createSetupIntake,
   ensureAgentThread,
+  finishStripeWebhookEvent,
   ensureSetupIntake,
   getAgentThread,
   getSetupIntake,
   getDashboardDataFromDb,
+  getDashboardFilterOptionsFromDb,
   getLatestAdDataFromDb,
   getWorkspaceProfile,
   getBillingCustomer,
   getBillingCustomerByStripeCustomerId,
   getBillingSubscription,
+  getConnectedAdAccount,
+  countWorkspaceAdAccounts,
+  countWorkspaceMembers,
+  countPendingWorkspaceInvitations,
+  createWorkspaceInvitation,
+  acceptWorkspaceInvitation,
+  listWorkspaceInvitations,
+  listWorkspaceMembers,
+  removeWorkspaceMember,
+  revokeWorkspaceInvitation,
+  sendSupabaseAuthInvitation,
+  getAiUsageSummary,
   isSupabaseConfigured,
   listAgentThreads,
   listRecentAuditLogs,
@@ -60,12 +94,18 @@ import {
   listHumanTasks,
   listRecentOperatorFeedback,
   listRecommendations,
+  listReportRuns,
+  getReportRun,
+  getNotificationPreference,
   listSetupIntakes,
   listUserMemories,
   recordAuditLog,
+  recordAiUsageEvent,
+  ensureReportSchedule,
   type SetupIntakeMessageRow,
   type SetupIntakeRow,
   type SetupStepRow,
+  type ReportRunRow,
   updateSetupIntake,
   updateSetupIntakeSession,
   updateSetupIntakeSteps,
@@ -73,6 +113,9 @@ import {
   updateRecommendationStatus,
   upsertBillingCustomer,
   upsertBillingSubscription,
+  upsertNotificationPreference,
+  upsertUserMemory,
+  updateWorkspaceBillingState,
 } from "./supabase.js";
 
 loadLocalEnv();
@@ -134,6 +177,7 @@ type SetupIntakeAgentResult = {
   missingFields: string[];
   readyForSetupSteps: boolean;
   setupSteps: SetupStepRow[];
+  _internalUsage?: unknown;
 };
 
 type ReadinessCheck = {
@@ -144,9 +188,11 @@ type ReadinessCheck = {
 };
 
 const stagingEvidenceKeys = [
+  "SUPABASE_STAGING_E2E_PASSED_AT",
   "OPENAI_AGENT_STAGING_E2E_PASSED_AT",
   "GOOGLE_ADS_STAGING_E2E_PASSED_AT",
   "STRIPE_STAGING_E2E_PASSED_AT",
+  "REPORT_EMAIL_STAGING_E2E_PASSED_AT",
 ] as const;
 const maxStagingEvidenceAgeMs = 90 * 24 * 60 * 60 * 1000;
 const maxStagingEvidenceFutureMs = 24 * 60 * 60 * 1000;
@@ -359,8 +405,8 @@ app.use(
   "*",
   cors({
     origin: (origin) => (origin === webOrigin() ? origin : null),
-    allowMethods: ["GET", "POST", "PATCH", "OPTIONS"],
-    allowHeaders: ["Content-Type", "Authorization", "x-demo-user-id"],
+    allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allowHeaders: ["Content-Type", "Authorization", "Idempotency-Key", "x-demo-user-id"],
   }),
 );
 
@@ -372,6 +418,9 @@ app.get("/health", (c) =>
     agentServiceUrl,
     mediaWriteEnabled: isGoogleAdsWriteConfigured(),
     billingConfigured: isStripeConfigured(),
+    helpContentConfigured: isMicroCmsConfigured(),
+    usageCostConfigured: rateCatalogConfigurationIssues().length === 0,
+    reportEmailConfigured: emailConfigurationIssues().length === 0,
     supabaseConfigured: isSupabaseConfigured(),
     authConfigured: getAuthReadiness().checks.every((check) => check.status === "pass"),
   }),
@@ -396,6 +445,7 @@ app.get("/readiness", (c) => {
   const stagingEvidenceReadiness = getStagingEvidenceReadiness();
   const googleAdsE2ePassed = isEvidenceTimestamp(process.env.GOOGLE_ADS_STAGING_E2E_PASSED_AT);
   const stripeE2ePassed = isEvidenceTimestamp(process.env.STRIPE_STAGING_E2E_PASSED_AT);
+  const reportEmailE2ePassed = isEvidenceTimestamp(process.env.REPORT_EMAIL_STAGING_E2E_PASSED_AT);
   const openAiAgentE2ePassed = isEvidenceTimestamp(process.env.OPENAI_AGENT_STAGING_E2E_PASSED_AT);
   const deploymentOriginIsPublic =
     isPresent(process.env.API_PUBLIC_ORIGIN) &&
@@ -429,10 +479,28 @@ app.get("/readiness", (c) => {
       label: "Stripe Checkout / Portal / Webhookが設定されている",
       status: isStripeConfigured() && stripeE2ePassed ? "pass" as const : "todo" as const,
       evidence: [
-        `STRIPE_SECRET_KEY=${presence(process.env.STRIPE_SECRET_KEY)}`,
-        `STRIPE_PRICE_ID=${presence(process.env.STRIPE_PRICE_ID)}`,
+        `STRIPE_API_KEY=${presence(stripeApiKey())}`,
+        `BILLING_PLANS_JSON=${billingConfigurationIssues().length ? "invalid_or_unapproved" : "approved_monthly_and_setup_catalog"}`,
         `STRIPE_WEBHOOK_SECRET=${presence(process.env.STRIPE_WEBHOOK_SECRET)}`,
         `STRIPE_STAGING_E2E_PASSED_AT=${presence(process.env.STRIPE_STAGING_E2E_PASSED_AT)}`,
+      ],
+    },
+    {
+      id: "usage-cost-ledger",
+      label: "AI usageとversion付き原価表が設定されている",
+      status: rateCatalogConfigurationIssues().length === 0 ? "pass" as const : "todo" as const,
+      evidence: rateCatalogConfigurationIssues().length
+        ? rateCatalogConfigurationIssues()
+        : ["MODEL_COST_CATALOG_JSON is configured; customer APIs expose credits only."],
+    },
+    {
+      id: "scheduled-report-email",
+      label: "3日レポートJobとCloudflare Emailのstaging E2E確認",
+      status: emailConfigurationIssues().length === 0 && reportEmailE2ePassed ? "pass" as const : "todo" as const,
+      evidence: [
+        ...emailConfigurationIssues(),
+        `REPORT_EMAIL_STAGING_E2E_PASSED_AT=${presence(process.env.REPORT_EMAIL_STAGING_E2E_PASSED_AT)}`,
+        "Report credit is separate from chat credit; auth expiry uses reconnect notification.",
       ],
     },
     {
@@ -441,12 +509,12 @@ app.get("/readiness", (c) => {
       status: stagingEvidenceReadiness.valid ? "pass" as const : "todo" as const,
       evidence: stagingEvidenceReadiness.valid
         ? [
-            "OPENAI / Google Ads / Stripe staging evidence timestamps are valid ISO values.",
-            "All three staging evidence timestamps are within the 7-day release validation window and fresher than 90 days.",
+            "Supabase / OpenAI / Google Ads / Stripe / report-email staging evidence timestamps are valid ISO values.",
+            "All staging evidence timestamps are within the 7-day release validation window and fresher than 90 days.",
           ]
         : [
             ...stagingEvidenceReadiness.issues,
-            "Refresh OpenAI Agent, Google Ads, and Stripe staging E2E evidence in the same release validation window.",
+            "Refresh Supabase, OpenAI Agent, Google Ads, Stripe, and report-email staging E2E evidence in the same release validation window.",
           ],
     },
     {
@@ -542,8 +610,8 @@ app.get("/readiness", (c) => {
         label: "Stripe Checkout / Portal / Webhookが設定されている",
         status: isStripeConfigured() ? "pass" : "todo",
         evidence: [
-          `STRIPE_SECRET_KEY=${presence(process.env.STRIPE_SECRET_KEY)}`,
-          `STRIPE_PRICE_ID=${presence(process.env.STRIPE_PRICE_ID)}`,
+          `STRIPE_API_KEY=${presence(stripeApiKey())}`,
+          `BILLING_PLANS_JSON=${billingConfigurationIssues().length ? "invalid_or_unapproved" : "approved_monthly_and_setup_catalog"}`,
           `STRIPE_WEBHOOK_SECRET=${presence(process.env.STRIPE_WEBHOOK_SECRET)}`,
         ],
       },
@@ -568,13 +636,25 @@ app.get("/dashboard", async (c) => {
   if (authGate) return authGate;
   const { workspaceId: demoWorkspaceId } = getRequestContext(c.req.raw);
   const workspaceId = auth?.workspace.id ?? demoWorkspaceId;
-  const range = parseRange(c.req.query("range"));
+  const dateRangeResult = parseDashboardDateRange(c.req.query("from"), c.req.query("to"));
+  if ("error" in dateRangeResult) return c.json({ error: dateRangeResult.error, code: "invalid_date_range" }, 400);
+  const selectedDateRange = dateRangeResult.value;
+  const range = selectedDateRange?.days ?? parseRange(c.req.query("range"));
   const platform = parsePlatform(c.req.query("platform"));
+  const hierarchyFilters = dashboardHierarchyFilters(c);
+  const adAccountId = hierarchyFilters.adAccountId;
   if (auth && isSupabaseConfigured()) {
     try {
       const billingGate = await requireBillingAccess(c, auth);
       if (billingGate) return billingGate;
-      const data = await getDashboardDataFromDb(workspaceId, range, platform);
+      const data = await getDashboardDataFromDb(
+        workspaceId,
+        range,
+        platform,
+        adAccountId,
+        selectedDateRange,
+        hierarchyFilters,
+      );
       if (data) return c.json(data);
       return c.json({
         error: "Google Ads連携と広告データ同期が必要です。",
@@ -582,10 +662,43 @@ app.get("/dashboard", async (c) => {
         workspaceId,
       }, 404);
     } catch (error) {
+      if (error instanceof AuthError) return handleAuthError(c, error);
       if (isStrictProductionMode()) return handleAuthError(c, error);
     }
   }
-  return c.json(getDashboardData(workspaceId, range, platform));
+  try {
+    return c.json({
+      ...getDashboardData(workspaceId, range, platform, hierarchyFilters),
+      dateRange: selectedDateRange ? { from: selectedDateRange.from, to: selectedDateRange.to } : null,
+    });
+  } catch (error) {
+    return handleDashboardFilterError(c, error);
+  }
+});
+
+app.get("/dashboard/filter-options", async (c) => {
+  const auth = await optionalAuth(c);
+  const authGate = requireProductAuth(c, auth);
+  if (authGate) return authGate;
+  const { workspaceId: demoWorkspaceId } = getRequestContext(c.req.raw);
+  const workspaceId = auth?.workspace.id ?? demoWorkspaceId;
+  const platform = parsePlatform(c.req.query("platform"));
+  const filters = dashboardHierarchyFilters(c);
+  if (auth && isSupabaseConfigured()) {
+    try {
+      const billingGate = await requireBillingAccess(c, auth);
+      if (billingGate) return billingGate;
+      return c.json(await getDashboardFilterOptionsFromDb(workspaceId, platform, filters));
+    } catch (error) {
+      if (error instanceof AuthError) return handleAuthError(c, error);
+      if (isStrictProductionMode()) return handleAuthError(c, error);
+    }
+  }
+  try {
+    return c.json(getDashboardFilterOptions(workspaceId, platform, filters));
+  } catch (error) {
+    return handleDashboardFilterError(c, error);
+  }
 });
 
 app.get("/workspace/bootstrap", async (c) => {
@@ -613,31 +726,173 @@ app.get("/workspace/:workspaceId/membership", async (c) => {
   }
 });
 
+app.get("/workspace/members", async (c) => {
+  try {
+    const auth = await authenticateRequest(c.req.raw);
+    requireWorkspaceAdmin(auth);
+    const [members, invitations] = await Promise.all([
+      listWorkspaceMembers(auth.workspace.id),
+      listWorkspaceInvitations(auth.workspace.id),
+    ]);
+    return c.json({ members, invitations });
+  } catch (error) {
+    return handleAuthError(c, error);
+  }
+});
+
+app.post("/workspace/invitations", async (c) => {
+  try {
+    const auth = await authenticateRequest(c.req.raw);
+    requireWorkspaceAdmin(auth);
+    const billingGate = await requireBillingAccess(c, auth);
+    if (billingGate) return billingGate;
+    const access = await activeBillingPlan(auth.workspace.id);
+    if (!access) return billingRequiredResponse(c, auth.workspace.id);
+    const body: { email?: string; role?: string } = await c.req.json().catch(() => ({}));
+    const email = String(body.email ?? "").trim().toLowerCase();
+    const role = body.role === "admin" ? "admin" as const : "member" as const;
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return c.json({ error: "valid email is required" }, 400);
+    const [memberCount, pendingCount] = await Promise.all([
+      countWorkspaceMembers(auth.workspace.id),
+      countPendingWorkspaceInvitations(auth.workspace.id),
+    ]);
+    if (memberCount + pendingCount >= access.plan.entitlements.maxUsers) {
+      return c.json({
+        error: "workspace_member_limit_reached",
+        code: "workspace_member_limit_reached",
+        currentPlan: access.plan.id,
+        limit: access.plan.entitlements.maxUsers,
+      }, 409);
+    }
+    const invitation = await createWorkspaceInvitation({
+      workspaceId: auth.workspace.id,
+      invitedByUserId: auth.user.id,
+      email,
+      role,
+    });
+    if (!invitation) throw new AuthError("招待を作成できませんでした。", 500);
+    const inviteUrl = `${webOrigin()}/?invite=${encodeURIComponent(invitation.token)}`;
+    try {
+      await sendSupabaseAuthInvitation(email, inviteUrl);
+    } catch (error) {
+      await revokeWorkspaceInvitation(auth.workspace.id, invitation.id).catch(() => undefined);
+      throw error;
+    }
+    await recordAuditLog({
+      workspaceId: auth.workspace.id,
+      userId: auth.user.id,
+      eventType: "workspace.invitation_created",
+      payload: { invitationId: invitation.id, role },
+    });
+    return c.json({
+      invitation: {
+        id: invitation.id,
+        email: invitation.email,
+        role: invitation.role,
+        expiresAt: invitation.expires_at,
+      },
+      inviteUrl,
+    }, 201);
+  } catch (error) {
+    return handleAuthError(c, error);
+  }
+});
+
+app.post("/workspace/invitations/accept", async (c) => {
+  try {
+    const auth = await authenticateRequest(c.req.raw);
+    const body: { token?: string } = await c.req.json().catch(() => ({}));
+    const token = String(body.token ?? "").trim();
+    if (!token) return c.json({ error: "invitation token is required" }, 400);
+    const workspace = await acceptWorkspaceInvitation(auth, token);
+    return c.json({ workspace });
+  } catch (error) {
+    return handleAuthError(c, error);
+  }
+});
+
+app.delete("/workspace/members/:userId", async (c) => {
+  try {
+    const auth = await authenticateRequest(c.req.raw);
+    requireWorkspaceOwner(auth);
+    const targetUserId = c.req.param("userId");
+    const members = await listWorkspaceMembers(auth.workspace.id);
+    const target = members.find((member) => member.userId === targetUserId);
+    if (!target) return c.json({ error: "workspace member not found" }, 404);
+    if (target.role === "owner" && members.filter((member) => member.role === "owner").length <= 1) {
+      return c.json({ error: "last_workspace_owner", code: "last_workspace_owner" }, 409);
+    }
+    await removeWorkspaceMember(auth.workspace.id, targetUserId);
+    await recordAuditLog({
+      workspaceId: auth.workspace.id,
+      userId: auth.user.id,
+      eventType: "workspace.member_removed",
+      payload: { removedUserId: targetUserId },
+    });
+    return c.json({ removed: true });
+  } catch (error) {
+    return handleAuthError(c, error);
+  }
+});
+
 app.get("/ad-data/latest", async (c) => {
   const auth = await optionalAuth(c);
   const authGate = requireProductAuth(c, auth);
   if (authGate) return authGate;
   const { workspaceId: demoWorkspaceId } = getRequestContext(c.req.raw);
   const workspaceId = auth?.workspace.id ?? demoWorkspaceId;
-  const range = parseRange(c.req.query("range"));
+  const dateRangeResult = parseDashboardDateRange(c.req.query("from"), c.req.query("to"));
+  if ("error" in dateRangeResult) return c.json({ error: dateRangeResult.error, code: "invalid_date_range" }, 400);
+  const selectedDateRange = dateRangeResult.value;
+  const range = selectedDateRange?.days ?? parseRange(c.req.query("range"));
   const platform = parsePlatform(c.req.query("platform"));
+  const hierarchyFilters = dashboardHierarchyFilters(c);
+  const adAccountId = hierarchyFilters.adAccountId;
   if (auth && isSupabaseConfigured()) {
     try {
       const billingGate = await requireBillingAccess(c, auth);
       if (billingGate) return billingGate;
-      const latestAdData = await getLatestAdDataFromDb(workspaceId, range, platform);
+      const latestAdData = await getLatestAdDataFromDb(
+        workspaceId,
+        range,
+        platform,
+        adAccountId,
+        selectedDateRange,
+        hierarchyFilters,
+      );
       if (latestAdData) return c.json({ latestAdData });
     } catch (error) {
+      if (error instanceof AuthError) return handleAuthError(c, error);
       if (isStrictProductionMode()) return handleAuthError(c, error);
     }
   }
-  return c.json({ latestAdData: getLatestAdData(workspaceId, range, platform) });
+  try {
+    return c.json({
+      latestAdData: {
+        ...getLatestAdData(workspaceId, range, platform, hierarchyFilters),
+        dateRange: selectedDateRange ? { from: selectedDateRange.from, to: selectedDateRange.to } : null,
+      },
+    });
+  } catch (error) {
+    return handleDashboardFilterError(c, error);
+  }
 });
 
-app.get("/connections", (c) => {
-  const { workspaceId } = getRequestContext(c.req.raw);
-  const platform = parsePlatform(c.req.query("platform"));
-  return c.json(getConnectionStatus(workspaceId, platform));
+app.get("/connections", async (c) => {
+  try {
+    const auth = await optionalAuth(c);
+    const authGate = requireProductAuth(c, auth);
+    if (authGate) return authGate;
+    if (auth) {
+      const billingGate = await requireBillingAccess(c, auth);
+      if (billingGate) return billingGate;
+    }
+    const { workspaceId: demoWorkspaceId } = getRequestContext(c.req.raw);
+    const platform = parsePlatform(c.req.query("platform"));
+    return c.json(getConnectionStatus(auth?.workspace.id ?? demoWorkspaceId, platform));
+  } catch (error) {
+    return handleAuthError(c, error);
+  }
 });
 
 app.get("/connections/status", async (c) => {
@@ -669,6 +924,8 @@ app.get("/connections/status", async (c) => {
 app.get("/oauth/google/start", async (c) => {
   try {
     const auth = await authenticateRequest(c.req.raw);
+    const billingGate = await requireBillingAccess(c, auth);
+    if (billingGate) return billingGate;
     return c.redirect(await buildGoogleOAuthUrlForRedirect(auth), 302);
   } catch (error) {
     return handleAuthError(c, error);
@@ -678,6 +935,8 @@ app.get("/oauth/google/start", async (c) => {
 app.get("/oauth/google/start-url", async (c) => {
   try {
     const auth = await authenticateRequest(c.req.raw);
+    const billingGate = await requireBillingAccess(c, auth);
+    if (billingGate) return billingGate;
     return c.json({ url: await buildGoogleOAuthUrlForRedirect(auth) });
   } catch (error) {
     return handleAuthError(c, error);
@@ -687,10 +946,10 @@ app.get("/oauth/google/start-url", async (c) => {
 app.get("/oauth/google/callback", async (c) => {
   try {
     await handleGoogleOAuthCallback(c.req.query("code") ?? null, c.req.query("state") ?? null);
-    return c.redirect(`${process.env.WEB_ORIGIN ?? "http://localhost:5173"}?connection=google&status=connected`, 302);
+    return c.redirect(`${webOrigin()}/?connection=google&status=connected`, 302);
   } catch (error) {
     const message = encodeURIComponent(error instanceof Error ? error.message : "google_oauth_failed");
-    return c.redirect(`${process.env.WEB_ORIGIN ?? "http://localhost:5173"}?connection=google&status=error&message=${message}`, 302);
+    return c.redirect(`${webOrigin()}/?connection=google&status=error&message=${message}`, 302);
   }
 });
 
@@ -724,6 +983,22 @@ app.post("/google/customers/:customerId/connect", async (c) => {
     const auth = await assertWorkspaceMembership(c.req.raw, c.req.query("workspaceId"));
     const billingGate = await requireBillingAccess(c, auth);
     if (billingGate) return billingGate;
+    const planAccess = await activeBillingPlan(auth.workspace.id);
+    if (!planAccess) return billingRequiredResponse(c, auth.workspace.id);
+    const normalizedCustomerId = c.req.param("customerId").replace(/\D/g, "");
+    const existingAccount = await getConnectedAdAccount(auth.workspace.id, "google", normalizedCustomerId);
+    if (!existingAccount) {
+      const accountCount = await countWorkspaceAdAccounts(auth.workspace.id);
+      if (accountCount >= planAccess.plan.entitlements.maxAdAccounts) {
+        return c.json({
+          error: "ad_account_limit_reached",
+          code: "ad_account_limit_reached",
+          currentPlan: planAccess.plan.id,
+          limit: planAccess.plan.entitlements.maxAdAccounts,
+          message: "現在のプランの広告アカウント上限に達しています。",
+        }, 409);
+      }
+    }
     const body: { managerCustomerId?: string | null } = await c.req.json<{ managerCustomerId?: string | null }>().catch(() => ({}));
     const result = await connectGoogleCustomer(auth, c.req.param("customerId"), body.managerCustomerId);
     return c.json(result);
@@ -754,11 +1029,15 @@ app.post("/google/customers/:customerId/campaigns/:campaignId/status", async (c)
     const auth = await authenticateRequest(c.req.raw);
     const billingGate = await requireBillingAccess(c, auth);
     if (billingGate) return billingGate;
-    const body: { status?: string; confirmed?: boolean; approvalNote?: string } = await c.req
-      .json<{ status?: string; confirmed?: boolean; approvalNote?: string }>()
+    const entitlementGate = await requirePlanEntitlement(c, auth, "googleAdsWrite");
+    if (entitlementGate) return entitlementGate;
+    const body: { status?: string; expectedCurrentStatus?: string; confirmed?: boolean; approvalNote?: string; rollbackAuditId?: string } = await c.req
+      .json<{ status?: string; expectedCurrentStatus?: string; confirmed?: boolean; approvalNote?: string; rollbackAuditId?: string }>()
       .catch(() => ({}));
     const status = normalizeGoogleCampaignStatus(body.status);
+    const expectedCurrentStatus = normalizeGoogleCampaignStatus(body.expectedCurrentStatus);
     if (!status) return c.json({ error: "status must be ENABLED or PAUSED" }, 400);
+    if (!expectedCurrentStatus) return c.json({ error: "expectedCurrentStatus must be ENABLED or PAUSED" }, 400);
     const approvalNote = normalizeApprovalNote(body.approvalNote);
     if (!approvalNote) return c.json({ error: "approvalNote is required and must include the reason and rollback condition" }, 400);
     const result = await updateGoogleCampaignStatus({
@@ -766,8 +1045,10 @@ app.post("/google/customers/:customerId/campaigns/:campaignId/status", async (c)
       customerId: c.req.param("customerId"),
       campaignId: c.req.param("campaignId"),
       status,
+      expectedCurrentStatus,
       confirmed: body.confirmed === true,
       approvalNote,
+      rollbackAuditId: normalizeOptionalAuditId(body.rollbackAuditId),
     });
     return c.json({ mode: "executed", policy: googleWritePolicy(), ...result });
   } catch (error) {
@@ -780,8 +1061,10 @@ app.post("/google/customers/:customerId/campaigns/:campaignId/budget", async (c)
     const auth = await authenticateRequest(c.req.raw);
     const billingGate = await requireBillingAccess(c, auth);
     if (billingGate) return billingGate;
-    const body: { amount?: number; confirmed?: boolean; approvalNote?: string } = await c.req
-      .json<{ amount?: number; confirmed?: boolean; approvalNote?: string }>()
+    const entitlementGate = await requirePlanEntitlement(c, auth, "googleAdsWrite");
+    if (entitlementGate) return entitlementGate;
+    const body: { amount?: number; expectedCurrentAmount?: number; confirmed?: boolean; approvalNote?: string; rollbackAuditId?: string } = await c.req
+      .json<{ amount?: number; expectedCurrentAmount?: number; confirmed?: boolean; approvalNote?: string; rollbackAuditId?: string }>()
       .catch(() => ({}));
     const approvalNote = normalizeApprovalNote(body.approvalNote);
     if (!approvalNote) return c.json({ error: "approvalNote is required and must include the reason and rollback condition" }, 400);
@@ -790,10 +1073,26 @@ app.post("/google/customers/:customerId/campaigns/:campaignId/budget", async (c)
       customerId: c.req.param("customerId"),
       campaignId: c.req.param("campaignId"),
       amount: Number(body.amount),
+      expectedCurrentAmount: Number(body.expectedCurrentAmount),
       confirmed: body.confirmed === true,
       approvalNote,
+      rollbackAuditId: normalizeOptionalAuditId(body.rollbackAuditId),
     });
     return c.json({ mode: "executed", policy: googleWritePolicy(), ...result });
+  } catch (error) {
+    return handleAuthError(c, error);
+  }
+});
+
+app.get("/google/customers/:customerId/campaigns/:campaignId/change-preview", async (c) => {
+  try {
+    const auth = await authenticateRequest(c.req.raw);
+    const billingGate = await requireBillingAccess(c, auth);
+    if (billingGate) return billingGate;
+    const entitlementGate = await requirePlanEntitlement(c, auth, "googleAdsWrite");
+    if (entitlementGate) return entitlementGate;
+    const preview = await getGoogleCampaignChangePreview(auth, c.req.param("customerId"), c.req.param("campaignId"));
+    return c.json({ preview, policy: googleWritePolicy() });
   } catch (error) {
     return handleAuthError(c, error);
   }
@@ -813,12 +1112,21 @@ app.get("/audit-logs/recent", async (c) => {
   }
 });
 
+app.get("/billing/plans", (c) => c.json({ plans: publicBillingPlans(), configured: isBillingCatalogConfigured() }));
+
 app.post("/billing/checkout-session", async (c) => {
   try {
     const auth = await authenticateRequest(c.req.raw);
     const configuredGate = requireStripeConfigured(c, auth.workspace.id);
     if (configuredGate) return configuredGate;
-    const session = await createStripeCheckoutSession(auth);
+    const body: { planId?: string; interval?: string } = await c.req
+      .json<{ planId?: string; interval?: string }>()
+      .catch(() => ({}));
+    const selection = getBillingPrice(body.planId, body.interval);
+    if (!selection) {
+      return c.json({ error: "planId and interval(month) must match the configured billing catalog." }, 400);
+    }
+    const session = await createStripeCheckoutSession(auth, selection.plan.id, selection.interval);
     return c.json({ url: session.url, id: session.id });
   } catch (error) {
     return handleAuthError(c, error);
@@ -833,6 +1141,8 @@ app.get("/billing/status", async (c) => {
       getBillingSubscription(auth.workspace.id),
     ]);
     const active = subscription ? isUsableSubscriptionStatus(subscription.status) : false;
+    const plan = active ? getBillingPlan(subscription?.plan_id) : null;
+    const usage = plan ? await customerUsageSummary(auth.workspace.id, plan.entitlements.chatCreditLimit, plan.estimatedConsultations) : null;
     return c.json({
       workspaceId: auth.workspace.id,
       configured: isStripeConfigured(),
@@ -847,12 +1157,111 @@ app.get("/billing/status", async (c) => {
             id: subscription.id,
             stripeSubscriptionId: subscription.stripe_subscription_id,
             status: subscription.status,
+            planId: subscription.plan_id,
+            interval: subscription.billing_interval,
             currentPeriodEnd: subscription.current_period_end,
             cancelAtPeriodEnd: subscription.cancel_at_period_end,
           }
         : null,
-      access: active ? "active" : "billing_required",
+      plan: plan ? {
+        id: plan.id,
+        label: plan.label,
+        interval: subscription?.billing_interval ?? null,
+        entitlements: plan.entitlements,
+        estimatedConsultations: plan.estimatedConsultations,
+      } : null,
+      usage,
+      premiumOnboardingBookingUrl: plan?.entitlements.humanOnboarding
+        ? premiumOnboardingBookingUrl()
+        : null,
+      access: active && plan ? "active" : "billing_required",
     });
+  } catch (error) {
+    return handleAuthError(c, error);
+  }
+});
+
+app.get("/usage/current", async (c) => {
+  try {
+    const auth = await authenticateRequest(c.req.raw);
+    const access = await activeBillingPlan(auth.workspace.id);
+    if (!access) return billingRequiredResponse(c, auth.workspace.id);
+    return c.json(await customerUsageSummary(
+      auth.workspace.id,
+      access.plan.entitlements.chatCreditLimit,
+      access.plan.estimatedConsultations,
+    ));
+  } catch (error) {
+    return handleAuthError(c, error);
+  }
+});
+
+app.get("/notification-preferences", async (c) => {
+  try {
+    const auth = await authenticateRequest(c.req.raw);
+    const enabledByDefault = auth.workspace.role === "owner" || auth.workspace.role === "admin";
+    const preference = await getNotificationPreference(auth.workspace.id, auth.user.id)
+      ?? await upsertNotificationPreference({
+        workspaceId: auth.workspace.id,
+        userId: auth.user.id,
+        enabled: enabledByDefault,
+      });
+    return c.json({ reportEmailEnabled: preference?.report_email_enabled !== false });
+  } catch (error) {
+    return handleAuthError(c, error);
+  }
+});
+
+app.patch("/notification-preferences", async (c) => {
+  try {
+    const auth = await authenticateRequest(c.req.raw);
+    const body: { reportEmailEnabled?: boolean } = await c.req.json().catch(() => ({}));
+    if (typeof body.reportEmailEnabled !== "boolean") return c.json({ error: "reportEmailEnabled must be boolean" }, 400);
+    const preference = await upsertNotificationPreference({
+      workspaceId: auth.workspace.id,
+      userId: auth.user.id,
+      enabled: body.reportEmailEnabled,
+    });
+    return c.json({ reportEmailEnabled: preference?.report_email_enabled !== false });
+  } catch (error) {
+    return handleAuthError(c, error);
+  }
+});
+
+const unsubscribeHandler = async (c: Context) => {
+  try {
+    const token = c.req.query("token");
+    const payload = verifyUnsubscribeToken(token);
+    if (!payload) return c.json({ error: "unsubscribe token is invalid or expired" }, 400);
+    await upsertNotificationPreference({ workspaceId: payload.workspaceId, userId: payload.userId, enabled: false });
+    return c.html("<!doctype html><html lang=\"ja\"><meta charset=\"utf-8\"><title>配信停止</title><body><h1>レポートメールを停止しました</h1><p>アプリの設定からいつでも再開できます。</p></body></html>");
+  } catch (error) {
+    return handleAuthError(c, error);
+  }
+};
+app.get("/notification-preferences/unsubscribe", unsubscribeHandler);
+app.post("/notification-preferences/unsubscribe", unsubscribeHandler);
+
+app.get("/reports", async (c) => {
+  try {
+    const auth = await authenticateRequest(c.req.raw);
+    const billingGate = await requireBillingAccess(c, auth);
+    if (billingGate) return billingGate;
+    const reports = await listReportRuns(auth.workspace.id, Number(c.req.query("limit") ?? "20"));
+    return c.json({ reports: reports.map(customerReport) });
+  } catch (error) {
+    return handleAuthError(c, error);
+  }
+});
+
+app.get("/reports/:reportId", async (c) => {
+  try {
+    const auth = await authenticateRequest(c.req.raw);
+    const billingGate = await requireBillingAccess(c, auth);
+    if (billingGate) return billingGate;
+    const report = await getReportRun(auth.workspace.id, c.req.param("reportId"));
+    if (!report) return c.json({ error: "report not found" }, 404);
+    return c.json({ report: customerReport(report) });
   } catch (error) {
     return handleAuthError(c, error);
   }
@@ -873,14 +1282,36 @@ app.post("/billing/portal-session", async (c) => {
 });
 
 app.post("/billing/webhook", async (c) => {
+  let claimedEventId: string | null = null;
   try {
     const rawBody = await c.req.text();
     const signature = c.req.header("stripe-signature") ?? "";
     verifyStripeWebhookSignature(rawBody, signature);
-    const event = JSON.parse(rawBody) as StripeEvent;
+    let event: StripeEvent;
+    try {
+      event = JSON.parse(rawBody) as StripeEvent;
+    } catch {
+      throw new StripeWebhookError("Stripe webhook payload must be valid JSON.");
+    }
+    if (!event?.id || !event.type || !event.data?.object || typeof event.data.object !== "object") {
+      throw new StripeWebhookError("Stripe webhook payload is missing id, type, or data.object.");
+    }
+    if (handledStripeWebhookTypes.has(event.type)) {
+      const claimed = await claimStripeWebhookEvent({
+        eventId: event.id,
+        eventType: event.type,
+        stripeCreatedAt: stripeEventCreatedAt(event.created),
+      });
+      if (!claimed) return c.json({ received: true, handled: true, duplicate: true, eventType: event.type });
+      claimedEventId = event.id;
+    }
     const result = await handleStripeWebhookEvent(event);
+    if (claimedEventId) await finishStripeWebhookEvent(claimedEventId, true);
     return c.json({ received: true, ...result });
   } catch (error) {
+    if (claimedEventId) {
+      await finishStripeWebhookEvent(claimedEventId, false, stripeWebhookFailureCode(error)).catch(() => undefined);
+    }
     if (error instanceof StripeWebhookError) {
       return c.json({ error: error.message }, 400);
     }
@@ -888,15 +1319,53 @@ app.post("/billing/webhook", async (c) => {
   }
 });
 
-app.get("/columns", (c) => {
+app.get("/help/articles", async (c) => {
+  const gate = await productReadGate(c);
+  if (gate) return gate;
   const tags = splitTags(c.req.query("tags"));
-  return c.json({ articles: getColumns(tags) });
+  try {
+    const articles = await fetchMicroCmsHelpArticles(tags);
+    if (articles?.length) return c.json({ articles, source: "microcms" });
+  } catch {
+    // The server-side curated fallback keeps Help usable without exposing provider details.
+  }
+  return c.json({
+    articles: getColumns(tags),
+    source: "fallback",
+    providerConfigured: isMicroCmsConfigured(),
+  });
 });
 
-app.get("/columns/:id", (c) => {
+app.get("/help/articles/:id", async (c) => {
+  const gate = await productReadGate(c);
+  if (gate) return gate;
+  try {
+    const article = await fetchMicroCmsHelpArticle(c.req.param("id"));
+    if (article) {
+      const related = (await fetchMicroCmsHelpArticles(article.tags) ?? [])
+        .filter((item) => item.id !== article.id)
+        .slice(0, 3);
+      return c.json({ article, related, source: "microcms" });
+    }
+  } catch {
+    // Fall through to the curated server-side Help content.
+  }
   const result = getColumnById(c.req.param("id"));
   if (!result) return c.json({ error: "記事が見つかりません。" }, 404);
-  return c.json(result);
+  return c.json({ ...result, source: "fallback", providerConfigured: isMicroCmsConfigured() });
+});
+
+app.get("/columns", async (c) => {
+  const gate = await productReadGate(c);
+  if (gate) return gate;
+  const query = c.req.url.includes("?") ? `?${c.req.url.split("?")[1]}` : "";
+  return c.redirect(`/help/articles${query}`, 308);
+});
+
+app.get("/columns/:id", async (c) => {
+  const gate = await productReadGate(c);
+  if (gate) return gate;
+  return c.redirect(`/help/articles/${encodeURIComponent(c.req.param("id"))}`, 308);
 });
 
 app.get("/tasks", async (c) => {
@@ -1173,12 +1642,53 @@ app.patch("/setup/intake", async (c) => {
   }
 });
 
+app.post("/setup/intake/answer", async (c) => {
+  try {
+    const auth = await authenticateRequest(c.req.raw);
+    const billingGate = await requireBillingAccess(c, auth);
+    if (billingGate) return billingGate;
+    const body = await c.req.json<{ intakeId?: string; field?: string; value?: string; note?: string }>();
+    const field = String(body.field ?? "");
+    const value = String(body.value ?? "").trim();
+    const note = String(body.note ?? "").trim();
+    if (!body.intakeId) return c.json({ error: "intakeId is required" }, 400);
+    if (!isStructuredSetupField(field)) return c.json({ error: "field is invalid" }, 400);
+    if (!value) return c.json({ error: "value is required" }, 400);
+    if (value.length > 500 || note.length > 2_000) return c.json({ error: "回答が長すぎます。" }, 400);
+
+    const current = await getSetupIntake(auth.workspace.id, auth.user.id, body.intakeId);
+    if (!current) return c.json({ error: "setup intakeが見つかりません。" }, 404);
+    const result = buildStructuredSetupAnswerResult({
+      field,
+      value,
+      note,
+      previousFacts: current.intake.facts ?? {},
+      previousMissingFields: current.intake.missing_fields ?? setupFieldOrder,
+    });
+    const updated = await updateSetupIntake({
+      intakeId: current.intake.id,
+      workspaceId: auth.workspace.id,
+      userId: auth.user.id,
+      title: deriveSetupIntakeTitle(current.intake.title, result.extractedFacts),
+      status: result.readyForSetupSteps ? "ready" : "in_progress",
+      score: result.score,
+      dimensionScores: result.dimensionScores,
+      facts: result.extractedFacts,
+      missingFields: result.missingFields,
+      generatedSteps: result.setupSteps,
+    });
+    return c.json(serializeSetupIntake(updated, current.messages));
+  } catch (error) {
+    return handleAuthError(c, error);
+  }
+});
+
 app.post("/setup/intake/message", async (c) => {
   try {
     const auth = await authenticateRequest(c.req.raw);
     const billingGate = await requireBillingAccess(c, auth);
     if (billingGate) return billingGate;
-    const body = await c.req.json<{ message?: string; intakeId?: string }>();
+    const body = await c.req.json<{ message?: string; intakeId?: string; requestId?: string }>();
     const message = String(body.message ?? "").trim();
     if (!message) return c.json({ error: "message is required" }, 400);
     if (!body.intakeId) return c.json({ error: "intakeId is required" }, 400);
@@ -1200,6 +1710,34 @@ app.post("/setup/intake/message", async (c) => {
       workspaceId: auth.workspace.id,
       userId: auth.user.id,
     });
+    const setupUsage = parseAgentUsage(agentResult._internalUsage);
+    if (!setupUsage && isStrictProductionMode()) {
+      throw new Error("OpenAI Agent Service response did not include setup usage totals.");
+    }
+    if (setupUsage) {
+      const charge = calculateUsageCharge(setupUsage);
+      if (charge.rateVersion === "unconfigured" && isStrictProductionMode()) {
+        throw new Error("MODEL_COST_CATALOG_JSON is required before production AI usage can be recorded.");
+      }
+      const requestId = normalizedIdempotencyKey(c.req.header("Idempotency-Key") || body.requestId) ?? randomUUID();
+      await recordAiUsageEvent({
+        workspaceId: auth.workspace.id,
+        userId: auth.user.id,
+        sourceType: "setup",
+        sourceId: current.intake.id,
+        model: setupUsage.model,
+        requests: setupUsage.requests,
+        inputTokens: setupUsage.inputTokens,
+        cachedInputTokens: setupUsage.cachedInputTokens,
+        outputTokens: setupUsage.outputTokens,
+        reasoningTokens: setupUsage.reasoningTokens,
+        totalTokens: setupUsage.totalTokens,
+        estimatedCostMicrounits: charge.estimatedCostMicrounits,
+        creditUnits: charge.creditUnits,
+        rateVersion: charge.rateVersion,
+        idempotencyKey: `setup:${requestId}`,
+      });
+    }
     const updated = await updateSetupIntake({
       intakeId: current.intake.id,
       workspaceId: auth.workspace.id,
@@ -1273,6 +1811,9 @@ async function handleChat(c: Context) {
       400,
     );
   }
+  const chatDateRangeError = validateChatDateRange(body);
+  if (chatDateRangeError) return c.json({ error: chatDateRangeError, code: "invalid_date_range" }, 400);
+  body.requestId = normalizedIdempotencyKey(c.req.header("Idempotency-Key") || body.requestId) ?? randomUUID();
 
   const auth = await optionalAuth(c);
   const authGate = requireProductAuth(c, auth);
@@ -1280,6 +1821,10 @@ async function handleChat(c: Context) {
   if (auth) {
     const billingGate = await requireBillingAccess(c, auth);
     if (billingGate) return billingGate;
+    const entitlementGate = await requirePlanEntitlement(c, auth, "aiChat");
+    if (entitlementGate) return entitlementGate;
+    const quotaGate = await requireChatQuota(c, auth.workspace.id);
+    if (quotaGate) return quotaGate;
     body = {
       ...body,
       workspaceId: auth.workspace.id,
@@ -1316,6 +1861,9 @@ async function handleChatStream(c: Context) {
       400,
     );
   }
+  const chatDateRangeError = validateChatDateRange(body);
+  if (chatDateRangeError) return c.json({ error: chatDateRangeError, code: "invalid_date_range" }, 400);
+  body.requestId = normalizedIdempotencyKey(c.req.header("Idempotency-Key") || body.requestId) ?? randomUUID();
 
   const auth = await optionalAuth(c);
   const authGate = requireProductAuth(c, auth);
@@ -1323,6 +1871,10 @@ async function handleChatStream(c: Context) {
   if (auth) {
     const billingGate = await requireBillingAccess(c, auth);
     if (billingGate) return billingGate;
+    const entitlementGate = await requirePlanEntitlement(c, auth, "aiChat");
+    if (entitlementGate) return entitlementGate;
+    const quotaGate = await requireChatQuota(c, auth.workspace.id);
+    if (quotaGate) return quotaGate;
     body = {
       ...body,
       workspaceId: auth.workspace.id,
@@ -1364,9 +1916,10 @@ async function handleChatStream(c: Context) {
   }
 
   const needsAdData = requiresLatestAdData(body.message);
-  const range = parseRange(body.context?.range?.toString() ?? rangeFromDateRange(body.context?.dateRange));
+  const selectedDateRange = chatDateRange(body);
+  const range = selectedDateRange?.days ?? parseRange(body.context?.range?.toString() ?? rangeFromDateRange(body.context?.dateRange));
   const platform = parsePlatform(body.context?.platform);
-  const latestAdData = needsAdData ? await loadLatestAdData(body.workspaceId, range, platform, Boolean(auth)) : undefined;
+  const latestAdData = needsAdData ? await loadLatestAdData(body.workspaceId, range, platform, Boolean(auth), selectedDateRange) : undefined;
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream({
@@ -1415,9 +1968,10 @@ async function processChat(
   options: ProcessChatOptions = {},
 ): Promise<{ payload: Record<string, unknown>; status: 200 | 502 }> {
   const needsAdData = requiresLatestAdData(body.message);
-  const range = parseRange(body.context?.range?.toString() ?? rangeFromDateRange(body.context?.dateRange));
+  const selectedDateRange = chatDateRange(body);
+  const range = selectedDateRange?.days ?? parseRange(body.context?.range?.toString() ?? rangeFromDateRange(body.context?.dateRange));
   const platform = parsePlatform(body.context?.platform);
-  const latestAdData = options.latestAdData ?? (needsAdData ? await loadLatestAdData(body.workspaceId, range, platform, Boolean(options.auth)) : undefined);
+  const latestAdData = options.latestAdData ?? (needsAdData ? await loadLatestAdData(body.workspaceId, range, platform, Boolean(options.auth), selectedDateRange) : undefined);
   const productionContext = options.auth ? await buildProductionAgentContext(options.auth.workspaceId, options.auth.userId) : {};
 
   if (!useAgentService) {
@@ -1449,6 +2003,8 @@ async function processChat(
     context: {
       dateRange: body.context?.dateRange ?? `last_${range}_days`,
       comparisonRange: body.context?.comparisonRange ?? `previous_${range}_days`,
+      from: selectedDateRange?.from,
+      to: selectedDateRange?.to,
       range,
       platform,
       advisorMode: advisorModeFromContext(body.context),
@@ -1480,7 +2036,41 @@ async function processChat(
       };
     }
 
-    const data = (await res.json()) as ChatResponse;
+    const rawData = (await res.json()) as ChatResponse & { _internalUsage?: unknown };
+    const usage = parseAgentUsage(rawData._internalUsage);
+    if (options.auth) {
+      if (!usage && isStrictProductionMode()) {
+        throw new Error("OpenAI Agent Service response did not include usage totals.");
+      }
+      if (usage) {
+        const charge = calculateUsageCharge(usage);
+        if (charge.rateVersion === "unconfigured" && isStrictProductionMode()) {
+          throw new Error("MODEL_COST_CATALOG_JSON is required before production AI usage can be recorded.");
+        }
+        await recordAiUsageEvent({
+          workspaceId: options.auth.workspaceId,
+          userId: options.auth.userId,
+          sourceType: "chat",
+          sourceId: body.threadId,
+          model: usage.model,
+          requests: usage.requests,
+          inputTokens: usage.inputTokens,
+          cachedInputTokens: usage.cachedInputTokens,
+          outputTokens: usage.outputTokens,
+          reasoningTokens: usage.reasoningTokens,
+          totalTokens: usage.totalTokens,
+          estimatedCostMicrounits: charge.estimatedCostMicrounits,
+          creditUnits: charge.creditUnits,
+          rateVersion: charge.rateVersion,
+          idempotencyKey: `chat:${body.requestId ?? randomUUID()}`,
+        });
+      }
+    }
+    const { _internalUsage: _omittedUsage, ...rawClientData } = rawData;
+    const data = sanitizeAgentResponse(rawClientData, latestAdData);
+    if (options.auth) {
+      await persistStableMemoryCandidates(options.auth, body.threadId, data.structuredOutput?.memory_candidates);
+    }
     const thread = options.auth
       ? await appendProductionChatExchange(body, data)
       : appendChatExchange(body, data);
@@ -1535,6 +2125,54 @@ function splitTags(value: string | undefined) {
     .split(",")
     .map((tag) => tag.trim())
     .filter(Boolean);
+}
+
+function dashboardHierarchyFilters(c: Context): DashboardHierarchyFilters {
+  return {
+    adAccountId: c.req.query("adAccountId")?.trim() || null,
+    campaignId: c.req.query("campaignId")?.trim() || null,
+    adGroupId: c.req.query("adGroupId")?.trim() || null,
+    adId: c.req.query("adId")?.trim() || null,
+  };
+}
+
+function handleDashboardFilterError(c: Context, error: unknown) {
+  if (error instanceof DashboardFilterError) {
+    return c.json({ error: error.message, code: "invalid_dashboard_filter" }, error.status);
+  }
+  return handleAuthError(c, error);
+}
+
+function parseDashboardDateRange(fromValue: string | undefined, toValue: string | undefined):
+  | { value: { from: string; to: string; days: number } | null }
+  | { error: string } {
+  const from = String(fromValue ?? "").trim();
+  const to = String(toValue ?? "").trim();
+  if (!from && !to) return { value: null };
+  if (!from || !to) return { error: "from and to must be provided together" };
+  if (!isIsoDate(from) || !isIsoDate(to)) return { error: "from and to must be valid YYYY-MM-DD dates" };
+  if (from > to) return { error: "from must be on or before to" };
+  const today = new Date().toISOString().slice(0, 10);
+  if (to > today) return { error: "future dates are not available" };
+  const days = Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000) + 1;
+  if (days > 30) return { error: "date range must be 30 days or less" };
+  return { value: { from, to, days } };
+}
+
+function validateChatDateRange(body: ChatRequest) {
+  const result = parseDashboardDateRange(body.context?.from, body.context?.to);
+  return "error" in result ? result.error : null;
+}
+
+function chatDateRange(body: ChatRequest) {
+  const result = parseDashboardDateRange(body.context?.from, body.context?.to);
+  return "value" in result ? result.value : null;
+}
+
+function isIsoDate(value: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
 function rangeFromDateRange(value: string | undefined) {
@@ -1726,6 +2364,13 @@ function normalizeApprovalNote(value: string | undefined) {
   return normalized.slice(0, 1000);
 }
 
+function normalizeOptionalAuditId(value: string | undefined) {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) return null;
+  if (!isUuid(normalized)) throw new AuthError("rollbackAuditId must be a UUID", 400);
+  return normalized;
+}
+
 function hasRollbackCondition(value: string) {
   return /戻す|戻し|復元|ロールバック|rollback|restore|revert|元に/i.test(value);
 }
@@ -1743,11 +2388,11 @@ function redactSecretLikeText(value: string) {
 }
 
 function isStripeConfigured() {
-  return Boolean(process.env.STRIPE_SECRET_KEY && process.env.STRIPE_PRICE_ID && process.env.STRIPE_WEBHOOK_SECRET);
+  return Boolean(stripeApiKey() && process.env.STRIPE_WEBHOOK_SECRET && isBillingCatalogConfigured());
 }
 
 function isUsableSubscriptionStatus(status: string) {
-  return ["active", "trialing", "checkout_completed"].includes(status);
+  return ["active", "checkout_completed"].includes(status);
 }
 
 function requireStripeConfigured(c: Context, workspaceId: string) {
@@ -1758,7 +2403,8 @@ function requireStripeConfigured(c: Context, workspaceId: string) {
       code: "billing_not_configured",
       workspaceId,
       access: "billing_required",
-      message: "Stripe billing is not configured. Set STRIPE_SECRET_KEY, STRIPE_PRICE_ID, and STRIPE_WEBHOOK_SECRET before billing flows.",
+      message: "Stripe billing is not configured. Set STRIPE_API_KEY, STRIPE_WEBHOOK_SECRET, and the approved monthly plus setup-fee BILLING_PLANS_JSON catalog.",
+      configurationIssues: billingConfigurationIssues(),
     },
     503,
   );
@@ -1769,18 +2415,106 @@ async function requireBillingAccess(c: Context, auth: Awaited<ReturnType<typeof 
     if (!isStrictProductionMode()) return null;
     return requireStripeConfigured(c, auth.workspace.id);
   }
-  const subscription = await getBillingSubscription(auth.workspace.id);
-  if (subscription && isUsableSubscriptionStatus(subscription.status)) return null;
+  const access = await activeBillingPlan(auth.workspace.id);
+  if (access) return null;
+  return billingRequiredResponse(c, auth.workspace.id);
+}
+
+async function activeBillingPlan(workspaceId: string) {
+  const subscription = await getBillingSubscription(workspaceId);
+  if (!subscription || !isUsableSubscriptionStatus(subscription.status)) return null;
+  const plan = getBillingPlan(subscription.plan_id);
+  if (!plan || !subscription.billing_interval) return null;
+  return { subscription, plan };
+}
+
+function billingRequiredResponse(c: Context, workspaceId: string) {
   return c.json(
     {
       error: "billing_required",
       code: "billing_required",
-      workspaceId: auth.workspace.id,
+      workspaceId,
       access: "billing_required",
       message: "この機能を利用するにはStripe Checkoutで課金を有効化してください。",
     },
     402,
   );
+}
+
+async function requirePlanEntitlement(
+  c: Context,
+  auth: Awaited<ReturnType<typeof authenticateRequest>>,
+  entitlement: keyof Pick<PlanEntitlements, "aiChat" | "googleAdsWrite">,
+) {
+  const access = await activeBillingPlan(auth.workspace.id);
+  if (!access) return billingRequiredResponse(c, auth.workspace.id);
+  if (access.plan.entitlements[entitlement]) return null;
+  return c.json({
+    error: "upgrade_required",
+    code: "upgrade_required",
+    workspaceId: auth.workspace.id,
+    feature: entitlement,
+    currentPlan: access.plan.id,
+    message: "この機能は現在のプランでは利用できません。アップグレードしてください。",
+  }, 403);
+}
+
+function currentBillingMonth(now = new Date()) {
+  const from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const to = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  return { from: from.toISOString(), to: to.toISOString(), resetAt: to.toISOString() };
+}
+
+async function customerUsageSummary(workspaceId: string, limit: number, estimatedConsultations: number | null) {
+  const period = currentBillingMonth();
+  const usage = await getAiUsageSummary(workspaceId, "chat", period.from, period.to);
+  const used = usage.creditUnits;
+  const usageRate = limit > 0 ? Math.min(1, used / limit) : 0;
+  const remainingRatio = Math.max(0, 1 - usageRate);
+  return {
+    usageRate,
+    usagePercent: Math.round(usageRate * 100),
+    remainingConsultationsEstimate: estimatedConsultations === null
+      ? null
+      : Math.max(0, Math.floor(estimatedConsultations * remainingRatio)),
+    resetAt: period.resetAt,
+    chatAvailable: limit > 0 && used < limit,
+  };
+}
+
+async function requireChatQuota(c: Context, workspaceId: string) {
+  const access = await activeBillingPlan(workspaceId);
+  if (!access) return billingRequiredResponse(c, workspaceId);
+  const limit = access.plan.entitlements.chatCreditLimit;
+  const period = currentBillingMonth();
+  const usage = await getAiUsageSummary(workspaceId, "chat", period.from, period.to);
+  if (limit > 0 && usage.creditUnits < limit) return null;
+  return c.json({
+    error: "chat_usage_limit_reached",
+    code: "chat_usage_limit_reached",
+    workspaceId,
+    usagePercent: 100,
+    resetAt: period.resetAt,
+    message: "今月のAI相談利用枠に達しました。履歴と定期レポートは引き続き利用できます。",
+  }, 429);
+}
+
+function normalizedIdempotencyKey(value: string | undefined) {
+  const normalized = String(value ?? "").trim();
+  return /^[A-Za-z0-9._:-]{8,160}$/.test(normalized) ? normalized : null;
+}
+
+function customerReport(report: ReportRunRow) {
+  return {
+    id: report.id,
+    periodStart: report.period_start,
+    periodEnd: report.period_end,
+    status: report.status,
+    content: report.content,
+    emailStatus: report.email_status,
+    createdAt: report.created_at,
+    updatedAt: report.updated_at,
+  };
 }
 
 function requireProductAuth(c: Context, auth: Awaited<ReturnType<typeof optionalAuth>>) {
@@ -1793,6 +2527,25 @@ function requireProductAuth(c: Context, auth: Awaited<ReturnType<typeof optional
     },
     401,
   );
+}
+
+async function productReadGate(c: Context) {
+  try {
+    const auth = await optionalAuth(c);
+    const authGate = requireProductAuth(c, auth);
+    if (authGate) return authGate;
+    return auth ? await requireBillingAccess(c, auth) : null;
+  } catch (error) {
+    return handleAuthError(c, error);
+  }
+}
+
+function requireWorkspaceAdmin(auth: Awaited<ReturnType<typeof authenticateRequest>>) {
+  if (!["owner", "admin"].includes(auth.workspace.role)) throw new AuthError("workspace owner/admin権限が必要です。", 403);
+}
+
+function requireWorkspaceOwner(auth: Awaited<ReturnType<typeof authenticateRequest>>) {
+  if (auth.workspace.role !== "owner") throw new AuthError("workspace owner権限が必要です。", 403);
 }
 
 async function agentServiceHeaders(): Promise<HeadersInit> {
@@ -1831,24 +2584,57 @@ async function fetchGoogleIdentityToken(audience: string): Promise<string> {
 type StripeEvent = {
   id: string;
   type: string;
+  created?: number;
   data: { object: Record<string, unknown> };
 };
 
+const handledStripeWebhookTypes = new Set([
+  "checkout.session.completed",
+  "customer.subscription.created",
+  "customer.subscription.updated",
+  "customer.subscription.deleted",
+]);
+
 class StripeWebhookError extends Error {}
 
-async function createStripeCheckoutSession(auth: Awaited<ReturnType<typeof authenticateRequest>>) {
+function stripeEventCreatedAt(value: number | undefined) {
+  if (!Number.isFinite(value) || Number(value) <= 0) return null;
+  return new Date(Number(value) * 1000).toISOString();
+}
+
+function stripeWebhookFailureCode(error: unknown) {
+  if (error instanceof StripeWebhookError) return "stripe_webhook_rejected";
+  if (error instanceof AuthError) return `supabase_http_${error.status}`;
+  return "stripe_webhook_processing_failed";
+}
+
+async function createStripeCheckoutSession(
+  auth: Awaited<ReturnType<typeof authenticateRequest>>,
+  planId: "minimum" | "standard" | "premium",
+  interval: "month",
+) {
+  const selection = getBillingPrice(planId, interval);
+  if (!selection) throw new Error("指定された課金プランは未設定です。");
   const existingCustomer = await getBillingCustomer(auth.workspace.id);
   const params = new URLSearchParams({
     mode: "subscription",
-    "line_items[0][price]": requiredStripeEnv("STRIPE_PRICE_ID"),
+    "line_items[0][price]": selection.price.stripePriceId!,
     "line_items[0][quantity]": "1",
-    success_url: `${webOrigin()}/?billing=success`,
+    "line_items[1][price]": selection.setupFee.stripePriceId!,
+    "line_items[1][quantity]": "1",
+    success_url: `${webOrigin()}/?billing=success&session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${webOrigin()}/?billing=cancelled`,
     client_reference_id: auth.workspace.id,
     "metadata[workspace_id]": auth.workspace.id,
     "metadata[user_id]": auth.user.id,
+    "metadata[plan_id]": planId,
+    "metadata[billing_interval]": interval,
+    "metadata[stripe_price_id]": selection.price.stripePriceId!,
+    "metadata[stripe_setup_fee_price_id]": selection.setupFee.stripePriceId!,
     "subscription_data[metadata][workspace_id]": auth.workspace.id,
     "subscription_data[metadata][user_id]": auth.user.id,
+    "subscription_data[metadata][plan_id]": planId,
+    "subscription_data[metadata][billing_interval]": interval,
   });
   if (existingCustomer?.stripe_customer_id) {
     params.set("customer", existingCustomer.stripe_customer_id);
@@ -1860,7 +2646,13 @@ async function createStripeCheckoutSession(auth: Awaited<ReturnType<typeof authe
     workspaceId: auth.workspace.id,
     userId: auth.user.id,
     eventType: "stripe.checkout_session_created",
-    payload: { sessionId: session.id },
+    payload: {
+      sessionId: session.id,
+      planId,
+      interval,
+      monthlyPriceId: selection.price.stripePriceId,
+      setupFeePriceId: selection.setupFee.stripePriceId,
+    },
   });
   return session;
 }
@@ -1887,8 +2679,9 @@ async function stripeRequest<T>(path: string, params: URLSearchParams): Promise<
   const res = await fetch(`https://api.stripe.com${path}`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${requiredStripeEnv("STRIPE_SECRET_KEY")}`,
+      Authorization: `Bearer ${requiredStripeEnv("STRIPE_API_KEY")}`,
       "Content-Type": "application/x-www-form-urlencoded",
+      "Stripe-Version": stripeApiVersion(),
     },
     body: params,
   });
@@ -1935,14 +2728,42 @@ async function handleStripeWebhookEvent(event: StripeEvent) {
     const customerId = stringValue(session, "customer");
     if (!customerId) throw new StripeWebhookError("Stripe checkout.session.completed webhook requires customer.");
     await assertStripeCustomerWorkspace(customerId, workspaceId, event.type);
+    const planId = stringValue(session.metadata, "plan_id");
+    const billingInterval = stringValue(session.metadata, "billing_interval");
+    const configuredPriceId = stringValue(session.metadata, "stripe_price_id");
+    const configuredSetupFeePriceId = stringValue(session.metadata, "stripe_setup_fee_price_id");
+    const selection = getBillingPrice(planId, billingInterval);
+    if (
+      !selection
+      || selection.price.stripePriceId !== configuredPriceId
+      || selection.setupFee.stripePriceId !== configuredSetupFeePriceId
+    ) {
+      throw new StripeWebhookError("checkout.session.completed webhook plan/monthly/setup-fee Prices do not match the approved catalog.");
+    }
     await upsertBillingCustomer({ workspaceId, userId, stripeCustomerId: customerId });
+    const stripeSubscriptionId = stringValue(session, "subscription");
+    const existingSubscription = await getBillingSubscription(workspaceId);
+    const preserveExistingState = Boolean(
+      stripeSubscriptionId
+      && existingSubscription?.stripe_subscription_id === stripeSubscriptionId
+      && isUsableSubscriptionStatus(existingSubscription.status),
+    );
     await upsertBillingSubscription({
       workspaceId,
       stripeCustomerId: customerId,
-      stripeSubscriptionId: stringValue(session, "subscription"),
-      status: "checkout_completed",
-      raw: { eventId: event.id, type: event.type },
+      stripeSubscriptionId,
+      stripePriceId: selection.price.stripePriceId,
+      planId: selection.plan.id,
+      billingInterval: selection.interval,
+      status: preserveExistingState ? existingSubscription!.status : "checkout_completed",
+      currentPeriodEnd: preserveExistingState ? existingSubscription?.current_period_end : null,
+      cancelAtPeriodEnd: preserveExistingState ? existingSubscription?.cancel_at_period_end : false,
+      raw: preserveExistingState && String(existingSubscription?.raw?.type ?? "").startsWith("customer.subscription.")
+        ? existingSubscription!.raw
+        : { eventId: event.id, type: event.type },
     });
+    await updateWorkspaceBillingState(workspaceId, "active");
+    await ensureReportSchedule(workspaceId);
     return { handled: true, eventType: event.type };
   }
 
@@ -1953,21 +2774,61 @@ async function handleStripeWebhookEvent(event: StripeEvent) {
     const subscriptionId = stringValue(subscription, "id");
     if (!customerId) throw new StripeWebhookError(`${event.type} webhook requires customer.`);
     if (!subscriptionId) throw new StripeWebhookError(`${event.type} webhook requires subscription id.`);
-    await assertStripeCustomerWorkspace(customerId, workspaceId, event.type);
+    const stripePriceId = stripeSubscriptionPriceId(subscription);
+    const selection = findBillingPlanByPriceId(stripePriceId);
+    if (!selection) throw new StripeWebhookError(`${event.type} webhook contains an unknown Price.`);
+    const metadataPlanId = stringValue(subscription.metadata, "plan_id");
+    const metadataInterval = stringValue(subscription.metadata, "billing_interval");
+    if (event.type === "customer.subscription.created"
+      && ((metadataPlanId && metadataPlanId !== selection.plan.id) || (metadataInterval && metadataInterval !== selection.interval))) {
+      throw new StripeWebhookError(`${event.type} webhook metadata does not match its Price.`);
+    }
+    const status = stringValue(subscription, "status") || "unknown";
+    const linkedCustomer = await assertStripeCustomerWorkspace(customerId, workspaceId, event.type);
+    if (!linkedCustomer) {
+      const userId = optionalStripeWebhookUuid(stringValue(subscription.metadata, "user_id"), "metadata.user_id", event.type);
+      if (!userId) {
+        throw new StripeWebhookError(`${event.type} webhook requires metadata.user_id before the customer is linked.`);
+      }
+      await upsertBillingCustomer({ workspaceId, userId, stripeCustomerId: customerId });
+    }
+    const existingSubscription = await getBillingSubscription(workspaceId);
+    const previousEventCreated = String(existingSubscription?.raw?.type ?? "").startsWith("customer.subscription.")
+      ? Number(existingSubscription?.raw?.stripeEventCreated ?? 0)
+      : 0;
+    if (event.created && Number.isFinite(previousEventCreated) && previousEventCreated > event.created) {
+      return { handled: true, stale: true, eventType: event.type };
+    }
     await upsertBillingSubscription({
       workspaceId,
       stripeCustomerId: customerId,
       stripeSubscriptionId: subscriptionId,
-      stripePriceId: stripeSubscriptionPriceId(subscription),
-      status: stringValue(subscription, "status") || "unknown",
+      stripePriceId,
+      planId: selection.plan.id,
+      billingInterval: selection.interval,
+      status,
       currentPeriodEnd: stripePeriodEnd(subscription),
       cancelAtPeriodEnd: Boolean(subscription.cancel_at_period_end),
-      raw: { eventId: event.id, type: event.type },
+      raw: { eventId: event.id, type: event.type, stripeEventCreated: event.created ?? null },
     });
+    await updateWorkspaceBillingState(workspaceId, billingStateForStripeStatus(status, event.type));
+    if (isUsableSubscriptionStatus(status)) await ensureReportSchedule(workspaceId);
     return { handled: true, eventType: event.type };
   }
 
   return { handled: false, ignored: true, eventType: event.type };
+}
+
+function billingStateForStripeStatus(
+  status: string,
+  eventType: string,
+): "pending_payment" | "active" | "past_due" | "cancelled" {
+  if (eventType === "customer.subscription.deleted" || ["canceled", "unpaid", "incomplete_expired"].includes(status)) {
+    return "cancelled";
+  }
+  if (status === "active") return "active";
+  if (["past_due", "paused"].includes(status)) return "past_due";
+  return "pending_payment";
 }
 
 async function assertStripeCustomerWorkspace(stripeCustomerId: string, workspaceId: string, eventType: string) {
@@ -1975,6 +2836,7 @@ async function assertStripeCustomerWorkspace(stripeCustomerId: string, workspace
   if (existing && existing.workspace_id !== workspaceId) {
     throw new StripeWebhookError(`${eventType} webhook customer is already linked to another workspace.`);
   }
+  return existing;
 }
 
 function stripeCheckoutWebhookWorkspaceId(session: Record<string, unknown>, eventType: string) {
@@ -2011,7 +2873,11 @@ function stripeSubscriptionPriceId(subscription: Record<string, unknown>) {
 }
 
 function stripePeriodEnd(subscription: Record<string, unknown>) {
-  const value = Number(subscription.current_period_end);
+  const items = subscription.items;
+  const firstItem = items && typeof items === "object" && Array.isArray((items as { data?: unknown[] }).data)
+    ? (items as { data: Array<Record<string, unknown>> }).data[0]
+    : null;
+  const value = Number(subscription.current_period_end ?? firstItem?.current_period_end);
   if (!Number.isFinite(value) || value <= 0) return null;
   return new Date(value * 1000).toISOString();
 }
@@ -2026,8 +2892,20 @@ function webOrigin() {
   return (process.env.WEB_ORIGIN ?? "http://localhost:5173").replace(/\/+$/, "");
 }
 
+function premiumOnboardingBookingUrl() {
+  const fallback = "https://example.com";
+  const configured = process.env.PREMIUM_ONBOARDING_BOOKING_URL?.trim();
+  if (!configured) return fallback;
+  try {
+    const url = new URL(configured);
+    return url.protocol === "https:" ? url.toString() : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 function requiredStripeEnv(key: string) {
-  const value = process.env[key];
+  const value = key === "STRIPE_API_KEY" ? stripeApiKey() : process.env[key];
   if (!value) throw new Error(`${key} is required`);
   return value;
 }
@@ -2057,10 +2935,16 @@ function isStrictProductionMode() {
   return process.env.APP_ENV === "production" || process.env.AUTH_REQUIRED === "true";
 }
 
-async function loadLatestAdData(workspaceId: string, range: number, platform: ReturnType<typeof parsePlatform>, preferDb: boolean) {
+async function loadLatestAdData(
+  workspaceId: string,
+  range: number,
+  platform: ReturnType<typeof parsePlatform>,
+  preferDb: boolean,
+  selectedDateRange?: { from: string; to: string } | null,
+) {
   if (preferDb && isSupabaseConfigured()) {
     try {
-      const dbData = await getLatestAdDataFromDb(workspaceId, range, platform);
+      const dbData = await getLatestAdDataFromDb(workspaceId, range, platform, null, selectedDateRange);
       if (dbData) return dbData as LatestAdData;
     } catch {
       if (isStrictProductionMode()) throw new AuthError("実広告データの取得に失敗しました。", 500);
@@ -2126,6 +3010,80 @@ function sanitizeAgentContext(value: unknown): unknown {
     return "[REDACTED]";
   }
   return value;
+}
+
+function sanitizeAgentResponse(data: ChatResponse, latestAdData: LatestAdData | undefined): ChatResponse {
+  if (!data.structuredOutput) return data;
+  const output = { ...data.structuredOutput };
+  output.write_candidate = validatedWriteCandidate(output.write_candidate, latestAdData);
+  output.memory_candidates = stableMemoryCandidates(output.memory_candidates);
+  return { ...data, structuredOutput: output };
+}
+
+function validatedWriteCandidate(
+  value: NonNullable<ChatResponse["structuredOutput"]>["write_candidate"],
+  latestAdData: LatestAdData | undefined,
+) {
+  if (!value || !latestAdData) return null;
+  const candidate = value as NonNullable<typeof value>;
+  const customerId = String(candidate.customer_id ?? "").replace(/\D/g, "");
+  const campaignId = String(candidate.campaign_id ?? "").replace(/\D/g, "");
+  const campaigns = latestAdData.campaigns as Array<Record<string, unknown>>;
+  const existsInScopedContext = campaigns.some((campaign) => (
+    String(campaign.platform ?? "") === "google"
+    && String(campaign.customerId ?? "").replace(/\D/g, "") === customerId
+    && String(campaign.campaignId ?? "").replace(/\D/g, "") === campaignId
+  ));
+  if (!existsInScopedContext) return null;
+  return {
+    ...candidate,
+    customer_id: customerId,
+    campaign_id: campaignId,
+    approval_reason: redactSecretLikeText(String(candidate.approval_reason ?? "")).slice(0, 1000),
+    rollback_condition: redactSecretLikeText(String(candidate.rollback_condition ?? "")).slice(0, 1000),
+  };
+}
+
+function stableMemoryCandidates(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  const allowedTypes = new Set(["preference", "communication_preference", "business_context", "ongoing_policy"]);
+  return value.flatMap((candidate) => {
+    if (!candidate || typeof candidate !== "object") return [];
+    const item = candidate as Record<string, unknown>;
+    const memoryType = String(item.memory_type ?? item.memoryType ?? "").trim().toLowerCase();
+    const content = String(item.content ?? "").trim().replace(/\s+/g, " ").slice(0, 500);
+    const confidence = Number(item.confidence ?? 0);
+    const unstableOrSensitive = (
+      detectSecretLikeInput(content).length > 0
+      || /(?:\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b|\b0\d{1,4}-?\d{1,4}-?\d{3,4}\b)/.test(content)
+      || /(?:customer list|顧客一覧|トークン|秘密情報|個人情報)/i.test(content)
+      || /(?:今日|昨日|今週|今月|直近|CPA|ROAS|CTR|CVR|CPC)\b/i.test(content)
+    );
+    if (!allowedTypes.has(memoryType) || !content || confidence < 0.8 || unstableOrSensitive) return [];
+    return [{ memory_type: memoryType, content, confidence: Math.min(confidence, 1) }];
+  });
+}
+
+async function persistStableMemoryCandidates(
+  auth: { workspaceId: string; userId: string },
+  threadId: string,
+  candidates: Array<Record<string, unknown>> | undefined,
+) {
+  for (const candidate of stableMemoryCandidates(candidates)) {
+    const content = String(candidate.content);
+    const memoryType = String(candidate.memory_type);
+    await upsertUserMemory({
+      workspaceId: auth.workspaceId,
+      userId: auth.userId,
+      memoryType,
+      content,
+      sourceThreadId: isUuid(threadId) ? threadId : null,
+      sourceType: "agent_candidate",
+      sourceRef: isUuid(threadId) ? threadId : null,
+      dedupeKey: createHash("sha256").update(`${memoryType}:${content.toLowerCase()}`).digest("hex"),
+      confidence: Number(candidate.confidence),
+    });
+  }
 }
 
 async function appendProductionChatExchange(body: ChatRequest, data: ChatResponse) {
@@ -2310,9 +3268,11 @@ function createLightweightChatResponse(body?: ChatRequest): ChatResponse {
 }
 
 function serializeSetupIntake(intake: SetupIntakeRow, messages: SetupIntakeMessageRow[]) {
-  const score = normalizeScore(intake.score);
+  const score = normalizeSetupScore(intake.score);
   const storedSteps = normalizeSetupSteps(intake.generated_steps ?? []);
-  const setupSteps = score >= 80 && shouldRegenerateSetupSteps(storedSteps)
+  const questionnaire = normalizeStructuredQuestionnaireState(intake.facts ?? {}, intake.dimension_scores ?? {});
+  const readyForSetupSteps = intake.status === "ready" && questionnaire.missingFields.length === 0;
+  const setupSteps = readyForSetupSteps && shouldRegenerateSetupSteps(storedSteps)
     ? buildSetupStepsFromFacts(intake.facts ?? {})
     : storedSteps;
   return {
@@ -2321,10 +3281,10 @@ function serializeSetupIntake(intake: SetupIntakeRow, messages: SetupIntakeMessa
       title: intake.title,
       status: intake.status,
       score,
-      dimensionScores: normalizeDimensionScores(intake.dimension_scores),
+      dimensionScores: questionnaire.dimensionScores,
       facts: intake.facts ?? {},
-      missingFields: intake.missing_fields ?? [],
-      readyForSetupSteps: score >= 80,
+      missingFields: questionnaire.missingFields,
+      readyForSetupSteps,
       setupSteps,
       archivedAt: intake.archived_at ?? null,
       createdAt: intake.created_at,
@@ -2340,13 +3300,14 @@ function serializeSetupIntake(intake: SetupIntakeRow, messages: SetupIntakeMessa
 }
 
 function serializeSetupIntakeSummary(intake: SetupIntakeRow) {
-  const score = normalizeScore(intake.score);
+  const score = normalizeSetupScore(intake.score);
+  const questionnaire = normalizeStructuredQuestionnaireState(intake.facts ?? {}, intake.dimension_scores ?? {});
   return {
     id: intake.id,
     title: intake.title,
     status: intake.status,
     score,
-    readyForSetupSteps: score >= 80,
+    readyForSetupSteps: intake.status === "ready" && questionnaire.missingFields.length === 0,
     archivedAt: intake.archived_at ?? null,
     createdAt: intake.created_at,
     updatedAt: intake.updated_at,
@@ -2407,9 +3368,9 @@ async function runSetupIntakeAgent(input: {
 export function buildLocalSetupIntakeResult(message: string, previousFacts: Record<string, unknown>, messages: SetupIntakeMessageRow[] = []): SetupIntakeAgentResult {
   const facts = extractSetupFacts(message, previousFacts, messages);
   const dimensionScores = scoreSetupFacts(facts);
-  const score = Object.values(dimensionScores).reduce((sum, value) => sum + value, 0);
+  const score = normalizeSetupScore(Object.values(dimensionScores).reduce((sum, value) => sum + value, 0));
   const missingFields = setupMissingFields(dimensionScores);
-  const readyForSetupSteps = score >= 80;
+  const readyForSetupSteps = score >= 8;
   const nextField = readyForSetupSteps ? "" : nextSetupField(missingFields, facts);
   facts._intakeState = setupStateFor(facts, dimensionScores, nextField);
   const setupSteps = readyForSetupSteps ? buildSetupStepsFromFacts(facts) : [];
@@ -2424,8 +3385,114 @@ export function buildLocalSetupIntakeResult(message: string, previousFacts: Reco
   };
 }
 
+const setupDimensionMaximums: Record<SetupField, number> = {
+  goal: 15,
+  product: 20,
+  audience: 20,
+  budget: 15,
+  platforms: 10,
+  measurement: 20,
+};
+
+const structuredSetupFieldOrder = [
+  "basicInfo",
+  "product",
+  "goal",
+  "area",
+  "audience",
+  "strengths",
+  "keyMessage",
+  "budget",
+  "destination",
+  "assets",
+  "acquisitionMethods",
+  "adExperience",
+] as const;
+type StructuredSetupField = typeof structuredSetupFieldOrder[number];
+
+const structuredSetupDimensionMaximums: Record<StructuredSetupField, number> = {
+  basicInfo: 10,
+  product: 10,
+  goal: 10,
+  area: 10,
+  audience: 10,
+  strengths: 10,
+  keyMessage: 10,
+  budget: 10,
+  destination: 5,
+  assets: 5,
+  acquisitionMethods: 5,
+  adExperience: 5,
+};
+
+export function buildStructuredSetupAnswerResult(input: {
+  field: StructuredSetupField;
+  value: string;
+  note?: string;
+  previousFacts?: Record<string, unknown>;
+  previousMissingFields?: readonly string[];
+}): SetupIntakeAgentResult {
+  const facts = { ...(input.previousFacts ?? {}) };
+  const previousQuestionnaire = facts._questionnaire && typeof facts._questionnaire === "object"
+    ? facts._questionnaire as Record<string, unknown>
+    : {};
+  const previousAnswers = previousQuestionnaire.answers && typeof previousQuestionnaire.answers === "object"
+    ? previousQuestionnaire.answers as Record<string, unknown>
+    : {};
+  const currentQuestionnaire = previousQuestionnaire.version === "housing-v1";
+  const completedFields = new Set<StructuredSetupField>(
+    currentQuestionnaire && Array.isArray(previousQuestionnaire.completedFields)
+      ? previousQuestionnaire.completedFields.map(String).filter(isStructuredSetupField)
+      : structuredSetupFieldOrder.filter((field) => hasStructuredSetupFact(facts, field)),
+  );
+  const value = input.value.trim();
+  const note = String(input.note ?? "").trim();
+  const factValue = note ? `${value}。補足: ${note}` : value;
+
+  delete facts._intakeState;
+  facts[input.field] = factValue;
+  if (input.field === "adExperience" || input.field === "acquisitionMethods") {
+    facts.platforms = inferSetupPlatforms(`${facts.adExperience ?? ""} ${facts.acquisitionMethods ?? ""}`);
+  }
+
+  completedFields.add(input.field);
+  const orderedCompletedFields = structuredSetupFieldOrder.filter((field) => completedFields.has(field));
+  const missingFields = structuredSetupFieldOrder.filter((field) => !completedFields.has(field));
+  const dimensionScores = normalizeStructuredDimensionScores({});
+  orderedCompletedFields.forEach((field) => {
+    dimensionScores[field] = structuredSetupDimensionMaximums[field];
+  });
+  const score = normalizeSetupScore(Object.values(dimensionScores).reduce((sum, item) => sum + item, 0));
+  const readyForSetupSteps = missingFields.length === 0;
+  const nextField = missingFields[0] ?? "";
+  facts._questionnaire = {
+    version: "housing-v1",
+    completedFields: orderedCompletedFields,
+    answers: {
+      ...previousAnswers,
+      [input.field]: { value, ...(note ? { note } : {}) },
+    },
+  };
+  facts._intakeState = {
+    activeField: nextField,
+    lastAskedFields: nextField ? [nextField] : [],
+    answeredFields: orderedCompletedFields,
+    fieldConfidence: dimensionScores,
+  };
+  const setupSteps = readyForSetupSteps ? buildSetupStepsFromFacts(facts) : [];
+  return {
+    assistantMessage: "",
+    extractedFacts: facts,
+    dimensionScores,
+    score,
+    missingFields,
+    readyForSetupSteps,
+    setupSteps,
+  };
+}
+
 function setupWelcomeMessage() {
-  return "広告準備専用のヒアリングを始めます。まず、何を広告で増やしたいか、商材、誰に届けたいかをざっくり教えてください。まだ曖昧で大丈夫です。";
+  return "住宅会社向けの広告準備ヒアリングを開始しました。12項目の質問票に沿って、回答を一つずつ保存します。";
 }
 
 const setupFieldOrder = ["goal", "product", "audience", "budget", "platforms", "measurement"] as const;
@@ -2566,8 +3633,7 @@ function scoreSetupMeasurement(value: unknown) {
 }
 
 function setupMissingFields(scores: Record<string, number>) {
-  const requiredMax: Record<string, number> = { goal: 15, product: 20, audience: 20, budget: 15, platforms: 10, measurement: 20 };
-  return Object.entries(requiredMax)
+  return Object.entries(setupDimensionMaximums)
     .filter(([key, max]) => (scores[key] ?? 0) < Math.ceil(max * 0.7))
     .map(([key]) => key);
 }
@@ -2588,11 +3654,11 @@ function setupStateFor(facts: Record<string, unknown>, scores: Record<string, nu
 
 function buildSetupAssistantMessage(facts: Record<string, unknown>, score: number, missingFields: string[], ready: boolean, nextField = "") {
   if (ready) {
-    return `準備スコアは ${score}/100 です。出稿ステップを確認できる状態になりました。次は計測、媒体設定、初回7日間の観察ルールを確認してください。`;
+    return `準備スコアは ${score}/10 です。出稿ステップを確認できる状態になりました。次は計測、媒体設定、初回7日間の観察ルールを確認してください。`;
   }
   const question = setupQuestionForField(nextField || missingFields[0] || "");
   return [
-    `準備スコアは ${score}/100 です。ここまでの内容は保存しました。`,
+    `準備スコアは ${score}/10 です。ここまでの内容は保存しました。`,
     setupCapturedSummary(facts),
     "",
     `次に1つだけ確認します。${question}`,
@@ -2636,6 +3702,22 @@ function hasSetupFact(facts: Record<string, unknown>, field: SetupField) {
 
 function isSetupField(value: string): value is SetupField {
   return (setupFieldOrder as readonly string[]).includes(value);
+}
+
+function isStructuredSetupField(value: string): value is StructuredSetupField {
+  return (structuredSetupFieldOrder as readonly string[]).includes(value);
+}
+
+function hasStructuredSetupFact(facts: Record<string, unknown>, field: StructuredSetupField) {
+  return Boolean(String(facts[field] ?? "").trim());
+}
+
+function inferSetupPlatforms(value: string) {
+  const platforms: string[] = [];
+  if (/google|グーグル/i.test(value)) platforms.push("google");
+  if (/meta|facebook|instagram|インスタ|fb/i.test(value)) platforms.push("meta");
+  if (/yahoo|ヤフー/i.test(value)) platforms.push("yahoo");
+  return [...new Set(platforms)];
 }
 
 function hasBudgetAmount(text: string) {
@@ -2708,10 +3790,10 @@ function buildSetupInstructionConfig(facts: Record<string, unknown>): SetupInstr
   const conversionEvent = setupConversionEvent(facts);
   const keywords = setupKeywordIdeas(facts);
   const exclusions = setupExclusionIdeas(facts);
-  const area = setupAreaIdea(facts);
+  const area = compactSetupFact(facts.area, setupAreaIdea(facts));
   const dailyBudget = setupDailyBudget(budget);
   const campaignName = setupCampaignName(product, goal);
-  const adCopy = setupAdCopyIdeas(product, goal, audience);
+  const adCopy = setupAdCopyIdeas(product, goal, audience, facts);
   return { platforms, goal, product, audience, budget, measurement, conversionEvent, campaignName, keywords, exclusions, area, dailyBudget, adCopy };
 }
 
@@ -2874,8 +3956,12 @@ function setupConversionEvent(facts: Record<string, unknown>) {
 }
 
 function setupKeywordIdeas(facts: Record<string, unknown>) {
-  const text = `${facts.product ?? ""} ${facts.audience ?? ""}`;
+  const text = `${facts.product ?? ""} ${facts.audience ?? ""} ${facts.strengths ?? ""} ${facts.keyMessage ?? ""}`;
   const ideas = new Set<string>();
+  if (/注文住宅|規格住宅|建売住宅|リフォーム/.test(text)) {
+    const product = /リフォーム/.test(text) ? "リフォーム" : /建売住宅/.test(text) ? "建売住宅" : /規格住宅/.test(text) ? "規格住宅" : "注文住宅";
+    [product, `${product} 工務店`, `${product} 相談`, `${product} 見学会`].forEach((item) => ideas.add(item));
+  }
   if (/賃貸|管理会社|管理戸数|オーナー/.test(text)) {
     ["賃貸管理 AI", "賃貸管理 問い合わせ 自動化", "管理会社 AIエージェント", "不動産管理 業務効率化"].forEach((item) => ideas.add(item));
   }
@@ -2914,18 +4000,20 @@ function setupDailyBudget(budget: string) {
   return `¥${Math.max(1000, Math.round(monthly / 30)).toLocaleString("ja-JP")}`;
 }
 
-function setupAdCopyIdeas(product: string, goal: string, audience: string) {
+function setupAdCopyIdeas(product: string, goal: string, audience: string, facts: Record<string, unknown> = {}) {
   const productShort = product.slice(0, 24);
   const goalShort = goal.replace(/獲得|増加/g, "").slice(0, 18);
-  const audienceHint = /賃貸|管理会社/.test(audience) ? "賃貸管理会社向け" : "法人向け";
+  const audienceHint = /賃貸|管理会社/.test(audience) ? "賃貸管理会社向け" : /20代|30代|40代|50代|夫婦|子ども|住宅/.test(audience) ? "住まいを検討中の方へ" : "法人向け";
+  const keyMessage = compactSetupFact(facts.keyMessage, "");
+  const strength = compactSetupFact(facts.strengths, "");
   return {
     headlines: [
-      `${audienceHint}AI支援`,
+      keyMessage ? keyMessage.slice(0, 30) : `${audienceHint}${productShort}`,
       `${goalShort}を増やす`,
       `${productShort}を相談`,
     ],
     descriptions: [
-      `${audienceHint}に、${productShort}で業務負担を減らす提案です。`,
+      strength ? `${strength.slice(0, 45)}を強みにした${productShort}をご提案します。` : `${audienceHint}に、${productShort}をご提案します。`,
       `${goalShort}につながる導入相談を受け付けています。`,
     ],
   };
@@ -2941,17 +4029,18 @@ function shouldRegenerateSetupSteps(steps: SetupStepRow[]) {
 function normalizeSetupAgentResult(value: unknown): SetupIntakeAgentResult {
   const source = (value && typeof value === "object" ? value : {}) as Partial<SetupIntakeAgentResult>;
   const dimensionScores = normalizeDimensionScores(source.dimensionScores ?? {});
-  const score = normalizeScore(source.score ?? Object.values(dimensionScores).reduce((sum, item) => sum + item, 0));
+  const score = normalizeSetupScore(source.score ?? Object.values(dimensionScores).reduce((sum, item) => sum + item, 0));
   const facts = typeof source.extractedFacts === "object" && source.extractedFacts ? source.extractedFacts as Record<string, unknown> : {};
   const missingFields = Array.isArray(source.missingFields) ? source.missingFields.map(String) : setupMissingFields(dimensionScores);
   return {
-    assistantMessage: String(source.assistantMessage ?? buildSetupAssistantMessage(facts, score, missingFields, score >= 80)),
+    assistantMessage: String(source.assistantMessage ?? buildSetupAssistantMessage(facts, score, missingFields, score >= 8)),
     extractedFacts: facts,
     dimensionScores,
     score,
     missingFields,
-    readyForSetupSteps: Boolean(source.readyForSetupSteps ?? score >= 80),
-    setupSteps: normalizeSetupSteps(source.setupSteps ?? (score >= 80 ? buildSetupStepsFromFacts(facts) : [])),
+    readyForSetupSteps: Boolean(source.readyForSetupSteps ?? score >= 8),
+    setupSteps: normalizeSetupSteps(source.setupSteps ?? (score >= 8 ? buildSetupStepsFromFacts(facts) : [])),
+    _internalUsage: source._internalUsage,
   };
 }
 
@@ -2966,10 +4055,43 @@ function normalizeDimensionScores(value: Record<string, unknown>) {
   };
 }
 
+function normalizeStructuredDimensionScores(value: Record<string, unknown>) {
+  return Object.fromEntries(structuredSetupFieldOrder.map((field) => [
+    field,
+    normalizeScore(value[field], structuredSetupDimensionMaximums[field]),
+  ])) as Record<StructuredSetupField, number>;
+}
+
+function normalizeStructuredQuestionnaireState(facts: Record<string, unknown>, scores: Record<string, unknown>) {
+  const questionnaire = facts._questionnaire && typeof facts._questionnaire === "object"
+    ? facts._questionnaire as Record<string, unknown>
+    : {};
+  const completed = new Set<StructuredSetupField>(
+    questionnaire.version === "housing-v1" && Array.isArray(questionnaire.completedFields)
+      ? questionnaire.completedFields.map(String).filter(isStructuredSetupField)
+      : structuredSetupFieldOrder.filter((field) => hasStructuredSetupFact(facts, field)),
+  );
+  const dimensionScores = normalizeStructuredDimensionScores(scores);
+  completed.forEach((field) => {
+    dimensionScores[field] = structuredSetupDimensionMaximums[field];
+  });
+  return {
+    dimensionScores,
+    missingFields: structuredSetupFieldOrder.filter((field) => !completed.has(field)),
+  };
+}
+
 function normalizeScore(value: unknown, max = 100) {
   const numeric = Number(value ?? 0);
   if (!Number.isFinite(numeric)) return 0;
   return Math.max(0, Math.min(max, Math.round(numeric)));
+}
+
+function normalizeSetupScore(value: unknown) {
+  const numeric = Number(value ?? 0);
+  if (!Number.isFinite(numeric)) return 0;
+  const scaled = numeric > 10 ? numeric / 10 : numeric;
+  return Math.max(0, Math.min(10, Math.round(scaled)));
 }
 
 function normalizeSetupSteps(value: unknown): SetupStepRow[] {

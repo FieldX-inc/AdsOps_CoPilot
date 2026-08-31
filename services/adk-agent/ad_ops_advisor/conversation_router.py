@@ -35,14 +35,14 @@ class RoutePlan:
 
 
 _AGENTS_BY_INTENT: dict[IntentLabel, tuple[str, ...]] = {
-    IntentLabel.GREETING_CASUAL: ("router_agent",),
-    IntentLabel.STATUS_SUMMARY: ("context_agent", "performance_analyst_agent", "qa_agent"),
-    IntentLabel.DIAGNOSIS: ("context_agent", "performance_analyst_agent", "action_plan_agent", "qa_agent"),
-    IntentLabel.SETUP: ("setup_advisor_agent", "qa_agent"),
-    IntentLabel.BUDGET_DELIVERY_LEARNING: ("context_agent", "budget_learning_agent", "action_plan_agent", "qa_agent"),
-    IntentLabel.MEDIA_SPEC: ("media_spec_agent", "qa_agent"),
-    IntentLabel.ACTION_PLAN: ("context_agent", "performance_analyst_agent", "action_plan_agent", "qa_agent"),
-    IntentLabel.GENERAL_ADVICE: ("router_agent", "qa_agent"),
+    IntentLabel.GREETING_CASUAL: ("root_agent",),
+    IntentLabel.STATUS_SUMMARY: ("root_agent", "performance_analyst_agent", "qa_agent"),
+    IntentLabel.DIAGNOSIS: ("root_agent", "performance_analyst_agent", "action_plan_agent", "qa_agent"),
+    IntentLabel.SETUP: ("root_agent", "setup_advisor_agent", "qa_agent"),
+    IntentLabel.BUDGET_DELIVERY_LEARNING: ("root_agent", "performance_analyst_agent", "action_plan_agent", "qa_agent"),
+    IntentLabel.MEDIA_SPEC: ("root_agent", "setup_advisor_agent", "qa_agent"),
+    IntentLabel.ACTION_PLAN: ("root_agent", "performance_analyst_agent", "action_plan_agent", "qa_agent"),
+    IntentLabel.GENERAL_ADVICE: ("root_agent", "qa_agent"),
 }
 
 _RUNTIME_AGENTS_BY_INTENT: dict[IntentLabel, tuple[str, ...]] = {

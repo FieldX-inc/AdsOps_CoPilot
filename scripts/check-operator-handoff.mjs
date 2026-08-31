@@ -74,7 +74,13 @@ const requiredSnippets = [
   "production decision `Go`",
   "agent-service-modern-env",
   "mode=agent-proxy",
+  "mediaWriteEnabled=false",
   "mediaWriteEnabled=true",
+  "EXPECT_GOOGLE_ADS_WRITE_ACTIVATION=true",
+  "GOOGLE_ADS_WRITE_ENABLED=false",
+  "GOOGLE_WRITE_KIND=budget",
+  "provider live preview",
+  "audit rows alone are insufficient",
   "billingConfigured=true",
   "supabaseConfigured=true",
   "authConfigured=true",
@@ -123,8 +129,12 @@ if (!/Do not treat the release as production-ready until[\s\S]*npm run deploy:pr
   issues.push(`${handoffPath}: must explicitly block production-ready claims until preflight, staging evidence, and final production smoke pass`);
 }
 
-if (!/Google Ads write evidence[\s\S]*reversible[\s\S]*confirmed=true[\s\S]*CONFIRM_GOOGLE_WRITE=true[\s\S]*restore value different from the write value[\s\S]*approvalType=explicit_user_confirmation[\s\S]*approvedByUserId[\s\S]*approvedAt[\s\S]*audit review panel[\s\S]*GOOGLE_ADS_STAGING_E2E_PASSED_AT/.test(content)) {
+if (!/Google Ads write evidence[\s\S]*reversible[\s\S]*GOOGLE_WRITE_KIND=budget[\s\S]*provider-fake\/contract-test only[\s\S]*confirmed=true[\s\S]*CONFIRM_GOOGLE_WRITE=true[\s\S]*restore value different from the write value[\s\S]*approvalType=explicit_user_confirmation[\s\S]*approvedByUserId[\s\S]*approvedAt[\s\S]*provider live preview[\s\S]*audit rows alone are insufficient[\s\S]*audit review panel[\s\S]*GOOGLE_ADS_STAGING_E2E_PASSED_AT/.test(content)) {
   issues.push(`${handoffPath}: must preserve human-approved reversible Google Ads write evidence requirements`);
+}
+
+if (!/initial production Go[\s\S]*mediaWriteEnabled=false[\s\S]*Google Ads write activation is not part[\s\S]*Post-Go Google Ads Write Activation[\s\S]*EXPECT_GOOGLE_ADS_WRITE_ACTIVATION=true[\s\S]*mediaWriteEnabled=true[\s\S]*restore `GOOGLE_ADS_WRITE_ENABLED=false`/.test(content)) {
+  issues.push(`${handoffPath}: must separate initial production Go from the later Google Ads write activation gate`);
 }
 
 if (!/Stripe[\s\S]*CONFIRM_STRIPE_FULL_E2E=true[\s\S]*hosted Checkout[\s\S]*existing Stripe customer reuse[\s\S]*customer=<existing customer>[\s\S]*without `customer_email`[\s\S]*webhook[\s\S]*CHECK_BILLING_GATE=true[\s\S]*UNPAID_AUTH_TOKEN[\s\S]*billing gate/.test(content)) {

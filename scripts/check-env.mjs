@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 const defaultEnvFiles = [".env", ".env.example", "services/adk-agent/.env", "services/adk-agent/.env.example"];
 const requestedEnvFiles = process.argv.slice(2).filter((arg) => !arg.startsWith("-"));
 const envFiles = requestedEnvFiles.length ? requestedEnvFiles : defaultEnvFiles;
+const expectGoogleAdsWriteActivation = process.env.EXPECT_GOOGLE_ADS_WRITE_ACTIVATION === "true";
 
 const browserSafeKeys = new Set([
   "VITE_API_BASE_URL",
@@ -35,9 +36,12 @@ const serverSecretKeys = [
   "TOKEN_ENCRYPTION_KEY",
   "GOOGLE_ADS_CLIENT_SECRET",
   "GOOGLE_ADS_DEVELOPER_TOKEN",
+  "STRIPE_API_KEY",
   "STRIPE_SECRET_KEY",
   "STRIPE_WEBHOOK_SECRET",
   "OPENAI_API_KEY",
+  "CLOUDFLARE_EMAIL_API_TOKEN",
+  "NOTIFICATION_SIGNING_SECRET",
 ];
 
 const productionRequiredKeysBySurface = {
@@ -60,9 +64,14 @@ const productionRequiredKeysBySurface = {
     "GOOGLE_OAUTH_STATE_STORE",
     "GOOGLE_ADS_WRITE_ENABLED",
     "GOOGLE_ADS_MAX_BUDGET_AMOUNT",
-    "STRIPE_SECRET_KEY",
-    "STRIPE_PRICE_ID",
+    "STRIPE_API_KEY",
+    "BILLING_PLANS_JSON",
     "STRIPE_WEBHOOK_SECRET",
+    "MODEL_COST_CATALOG_JSON",
+    "CLOUDFLARE_ACCOUNT_ID",
+    "CLOUDFLARE_EMAIL_API_TOKEN",
+    "REPORT_EMAIL_DOMAIN",
+    "NOTIFICATION_SIGNING_SECRET",
     "API_PUBLIC_ORIGIN",
     "AGENT_SERVICE_URL",
     "AGENT_SERVICE_AUTH_MODE",
@@ -76,6 +85,8 @@ const productionRequiredKeysBySurface = {
     "OPENAI_AGENT_STAGING_E2E_PASSED_AT",
     "GOOGLE_ADS_STAGING_E2E_PASSED_AT",
     "STRIPE_STAGING_E2E_PASSED_AT",
+    "SUPABASE_STAGING_E2E_PASSED_AT",
+    "REPORT_EMAIL_STAGING_E2E_PASSED_AT",
     "DEPLOYMENT_RUNBOOK_ACK",
   ],
   api: [
@@ -97,9 +108,14 @@ const productionRequiredKeysBySurface = {
     "GOOGLE_OAUTH_STATE_STORE",
     "GOOGLE_ADS_WRITE_ENABLED",
     "GOOGLE_ADS_MAX_BUDGET_AMOUNT",
-    "STRIPE_SECRET_KEY",
-    "STRIPE_PRICE_ID",
+    "STRIPE_API_KEY",
+    "BILLING_PLANS_JSON",
     "STRIPE_WEBHOOK_SECRET",
+    "MODEL_COST_CATALOG_JSON",
+    "CLOUDFLARE_ACCOUNT_ID",
+    "CLOUDFLARE_EMAIL_API_TOKEN",
+    "REPORT_EMAIL_DOMAIN",
+    "NOTIFICATION_SIGNING_SECRET",
     "API_PUBLIC_ORIGIN",
     "AGENT_SERVICE_URL",
     "AGENT_SERVICE_AUTH_MODE",
@@ -108,6 +124,8 @@ const productionRequiredKeysBySurface = {
     "OPENAI_AGENT_STAGING_E2E_PASSED_AT",
     "GOOGLE_ADS_STAGING_E2E_PASSED_AT",
     "STRIPE_STAGING_E2E_PASSED_AT",
+    "SUPABASE_STAGING_E2E_PASSED_AT",
+    "REPORT_EMAIL_STAGING_E2E_PASSED_AT",
     "DEPLOYMENT_RUNBOOK_ACK",
   ],
   agent: [
@@ -125,9 +143,11 @@ const productionRequiredKeys = productionRequiredKeysBySurface.combined;
 
 const validDeploySurfaces = new Set(Object.keys(productionRequiredKeysBySurface));
 const productionEvidenceKeys = [
+  "SUPABASE_STAGING_E2E_PASSED_AT",
   "OPENAI_AGENT_STAGING_E2E_PASSED_AT",
   "GOOGLE_ADS_STAGING_E2E_PASSED_AT",
   "STRIPE_STAGING_E2E_PASSED_AT",
+  "REPORT_EMAIL_STAGING_E2E_PASSED_AT",
 ];
 const legacyAgentApiKeys = ["ADK_AGENT_URL", "USE_ADK_AGENT", "ADK_AGENT_TIMEOUT_MS"];
 const productionGeminiAgentKeys = [
@@ -155,9 +175,12 @@ const agentForbiddenApiKeys = [
   "GOOGLE_ADS_CLIENT_SECRET",
   "GOOGLE_ADS_DEVELOPER_TOKEN",
   "GOOGLE_ADS_REDIRECT_URI",
+  "STRIPE_API_KEY",
   "STRIPE_SECRET_KEY",
   "STRIPE_PRICE_ID",
   "STRIPE_WEBHOOK_SECRET",
+  "CLOUDFLARE_EMAIL_API_TOKEN",
+  "NOTIFICATION_SIGNING_SECRET",
   "AGENT_SERVICE_URL",
   "AGENT_SERVICE_AUTH_TOKEN",
 ];
@@ -333,11 +356,9 @@ function inspectApiProductionEnv(env, deploySurface) {
   if (stripTrailingSlash(env.SUPABASE_AUTH_SITE_URL) !== stripTrailingSlash(env.WEB_ORIGIN)) {
     issues.push("production env: SUPABASE_AUTH_SITE_URL must match WEB_ORIGIN");
   }
-  if (env.GOOGLE_ADS_WRITE_ENABLED === "true") {
-    const maxBudgetAmount = Number(env.GOOGLE_ADS_MAX_BUDGET_AMOUNT);
-    if (!Number.isFinite(maxBudgetAmount) || maxBudgetAmount <= 0) {
-      issues.push("production env: GOOGLE_ADS_MAX_BUDGET_AMOUNT must be a positive number when GOOGLE_ADS_WRITE_ENABLED=true");
-    }
+  const maxBudgetAmount = Number(env.GOOGLE_ADS_MAX_BUDGET_AMOUNT);
+  if (!Number.isFinite(maxBudgetAmount) || maxBudgetAmount <= 0) {
+    issues.push("production env: GOOGLE_ADS_MAX_BUDGET_AMOUNT must be a positive number");
   }
   if (!isBase64Bytes(env.TOKEN_ENCRYPTION_KEY, 32)) {
     issues.push("production env: TOKEN_ENCRYPTION_KEY must be 32 bytes base64");
@@ -345,14 +366,22 @@ function inspectApiProductionEnv(env, deploySurface) {
   if (!isProductionTokenKeyId(env.TOKEN_ENCRYPTION_KEY_ID)) {
     issues.push("production env: TOKEN_ENCRYPTION_KEY_ID must be a production key id and must not be local/test");
   }
-  if (String(env.STRIPE_SECRET_KEY ?? "").startsWith("sk_test_") || String(env.STRIPE_SECRET_KEY ?? "").startsWith("rk_test_")) {
-    issues.push("production env: STRIPE_SECRET_KEY must not be a Stripe test key");
-  }
-  if (!String(env.STRIPE_PRICE_ID ?? "").startsWith("price_")) {
-    issues.push("production env: STRIPE_PRICE_ID must be a Stripe price id");
+  if (!String(env.STRIPE_API_KEY ?? "").startsWith("rk_live_")) {
+    issues.push("production env: STRIPE_API_KEY must be a live Restricted API Key (rk_live_)");
   }
   if (!String(env.STRIPE_WEBHOOK_SECRET ?? "").startsWith("whsec_")) {
     issues.push("production env: STRIPE_WEBHOOK_SECRET must be a Stripe webhook signing secret");
+  }
+  inspectBillingCatalog(env.BILLING_PLANS_JSON);
+  inspectModelCostCatalog(env.MODEL_COST_CATALOG_JSON);
+  if (String(env.PREMIUM_ONBOARDING_BOOKING_URL ?? "").trim() && !isHttpsUrl(env.PREMIUM_ONBOARDING_BOOKING_URL)) {
+    issues.push("production env: PREMIUM_ONBOARDING_BOOKING_URL must be an https URL when set");
+  }
+  if (!/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(String(env.REPORT_EMAIL_DOMAIN ?? ""))) {
+    issues.push("production env: REPORT_EMAIL_DOMAIN must be a valid domain");
+  }
+  if (String(env.NOTIFICATION_SIGNING_SECRET ?? "").length < 32) {
+    issues.push("production env: NOTIFICATION_SIGNING_SECRET must be at least 32 characters");
   }
   const expectedAuthCallback = `${stripTrailingSlash(env.WEB_ORIGIN)}/auth/callback`;
   const redirectUrls = splitEnvList(env.SUPABASE_AUTH_REDIRECT_URLS).map(stripTrailingSlash);
@@ -365,8 +394,13 @@ function inspectApiProductionEnv(env, deploySurface) {
   if (env.SUPABASE_AUTH_GOOGLE_CLIENT_SECRET && env.SUPABASE_AUTH_GOOGLE_CLIENT_SECRET === env.GOOGLE_ADS_CLIENT_SECRET) {
     issues.push("production env: SUPABASE_AUTH_GOOGLE_CLIENT_SECRET must be separate from GOOGLE_ADS_CLIENT_SECRET");
   }
-  if (env.GOOGLE_ADS_WRITE_ENABLED !== "true") {
-    issues.push("production env: GOOGLE_ADS_WRITE_ENABLED must be true after staging write E2E passes");
+  const expectedWriteEnabled = expectGoogleAdsWriteActivation ? "true" : "false";
+  if (env.GOOGLE_ADS_WRITE_ENABLED !== expectedWriteEnabled) {
+    issues.push(
+      expectGoogleAdsWriteActivation
+        ? "production env: GOOGLE_ADS_WRITE_ENABLED must be true only for the separately approved Google Ads write activation gate"
+        : "production env: GOOGLE_ADS_WRITE_ENABLED must be false for the initial production Go gate; validate a later approved activation with EXPECT_GOOGLE_ADS_WRITE_ACTIVATION=true",
+    );
   }
   if (stripTrailingSlash(env.GOOGLE_ADS_REDIRECT_URI) !== `${stripTrailingSlash(env.API_PUBLIC_ORIGIN)}/oauth/google/callback`) {
     issues.push("production env: GOOGLE_ADS_REDIRECT_URI must equal <API_PUBLIC_ORIGIN>/oauth/google/callback");
@@ -378,6 +412,49 @@ function inspectApiProductionEnv(env, deploySurface) {
     issues.push("production env: DEPLOYMENT_RUNBOOK_ACK must be true after staging URLs, env ownership, and logs are documented");
   }
   inspectEvidenceTimestamps(env);
+}
+
+function inspectBillingCatalog(raw) {
+  try {
+    const plans = JSON.parse(String(raw ?? ""));
+    if (!Array.isArray(plans) || plans.length !== 3) throw new Error();
+    const expected = new Set(["minimum", "standard", "premium"]);
+    const approvedPricing = {
+      minimum: { month: 9800, setupFee: 50000 },
+      standard: { month: 49800, setupFee: 70000 },
+      premium: { month: 69800, setupFee: 70000 },
+    };
+    const priceIds = new Set();
+    for (const plan of plans) {
+      if (!plan || !expected.delete(plan.id)) throw new Error();
+      const pricedItems = [
+        { price: plan.prices?.month, amount: approvedPricing[plan.id].month },
+        { price: plan.setupFee, amount: approvedPricing[plan.id].setupFee },
+      ];
+      for (const item of pricedItems) {
+        const price = item.price;
+        if (!String(price?.stripePriceId ?? "").startsWith("price_") || Number(price?.amount) !== item.amount || String(price?.currency ?? "").toLowerCase() !== "jpy") throw new Error();
+        if (priceIds.has(price.stripePriceId)) throw new Error();
+        priceIds.add(price.stripePriceId);
+      }
+      if (plan.id === "minimum" && Number(plan.chatCreditLimit) !== 0) throw new Error();
+      if (plan.id !== "minimum" && (!Number.isInteger(Number(plan.chatCreditLimit)) || Number(plan.chatCreditLimit) <= 0 || !Number.isInteger(Number(plan.estimatedConsultations)) || Number(plan.estimatedConsultations) <= 0)) throw new Error();
+    }
+    if (expected.size || priceIds.size !== 6) throw new Error();
+  } catch {
+    issues.push("production env: BILLING_PLANS_JSON must contain the approved 3 monthly and 3 setup-fee Prices with exact JPY amounts, plus approved Standard/Premium limits");
+  }
+}
+
+function inspectModelCostCatalog(raw) {
+  try {
+    const catalog = JSON.parse(String(raw ?? ""));
+    if (!catalog?.version || !catalog?.models || typeof catalog.models !== "object") throw new Error();
+    const rates = Object.values(catalog.models);
+    if (!rates.length || rates.some((rate) => !rate || ["inputPerMillion", "cachedInputPerMillion", "outputPerMillion", "reasoningPerMillion"].some((key) => !Number.isFinite(Number(rate[key])) || Number(rate[key]) < 0) || Number(rate.inputPerMillion) + Number(rate.outputPerMillion) <= 0)) throw new Error();
+  } catch {
+    issues.push("production env: MODEL_COST_CATALOG_JSON must contain a versioned model rate catalog");
+  }
 }
 
 function inspectAgentProductionEnv(env, deploySurface) {

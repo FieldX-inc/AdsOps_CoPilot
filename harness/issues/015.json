@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "manifestVersion": 3,
+  "issue": {"number": 15, "url": "https://github.com/FieldX-inc/AdsOps_CoPilot/issues/15", "title": "[Dashboard] 森さんのチャット要件をダッシュボードへ反映する", "slug": "mori-dashboard-requirements"},
+  "state": "browser_verified",
+  "wave": "wave-4-product-surface",
+  "summary": "Implement Mori-san's approved decision-first Dashboard hierarchy: briefing, up to four recommended actions, alert comparison, trend, and primary/secondary KPI evidence with draft-only AI handoff.",
+  "decisions": ["Treat the two Dashboard images shared by the requester on 2026-07-24 as the approved stakeholder intent.", "Keep the Dashboard decision-first instead of expanding it into a large BI surface.", "Reuse the existing right-side AI chat drawer; card and alert CTAs create a scoped draft but never auto-send.", "Keep trend, KPI, alerts, recommendations, and chat drafts on the same period/account/campaign hierarchy scope.", "Preserve human-in-the-loop: no provider mutation or Agent execution is added."],
+  "scope": {"in": ["Briefing speech bubble", "Up to four recommended action cards", "Alert table and severity summary", "Draft-only AI drawer handoff from cards and alert rows", "Trend before KPI evidence", "Primary and secondary KPI hierarchy", "Responsive and explicit data states", "Browser assertions for scope and no auto-send"], "out": ["Standalone AI chat page", "Large BI builder", "Auto-sending chat messages", "Provider mutation", "Meta Ads or Yahoo Ads support"]},
+  "requirementRefs": ["REQUIREMENTS.md#8-広告データとui", "DESIGN.md#ダッシュボード", "docs/mori-dashboard-requirement-map.md"],
+  "dependencies": [],
+  "blockers": [],
+  "risks": [
+    {"id": "unscoped-insight", "level": "high", "description": "A briefing or chat draft could cite a different period or advertising scope than the visible metrics.", "mitigation": "Derive every section and handoff from the active period/account/campaign hierarchy filters and assert this in Browser E2E."},
+    {"id": "implicit-execution", "level": "high", "description": "A recommendation CTA could be mistaken for an action that sends a message or mutates an ad platform.", "mitigation": "Use explicit AI consultation wording, populate a draft only, and require a separate send or approved write flow."},
+    {"id": "mobile-information-loss", "level": "medium", "description": "The alert table or KPI hierarchy may lose required information on narrow screens.", "mitigation": "Preserve semantic order, provide table overflow or row cards, and test at 320px and a mobile browser profile."}
+  ],
+  "gates": [
+    {"id": "mori-source-chat", "type": "external_prerequisite", "requiredAt": "before_specified", "status": "satisfied", "owner": "user", "description": "The requester supplied the two Dashboard images and stated that they represent Mori-san's intended layout on 2026-07-24."},
+    {"id": "mori-acceptance-map", "type": "product_decision", "requiredAt": "before_ready", "status": "satisfied", "owner": "user", "description": "The requester approved proceeding; the screen/state/test map is recorded in docs/mori-dashboard-requirement-map.md."}
+  ],
+  "ownership": {"primaryAgent": "contract-guard", "reviewAgents": ["product-ui-agent", "qa-release-agent"], "allowedPaths": ["REQUIREMENTS.md", "DESIGN.md", "docs/**", "harness/issues/015.json", "apps/web/src/main.tsx", "apps/web/src/styles.css", "tests/e2e/**"], "forbiddenPaths": ["apps/api/**", "services/adk-agent/**", "supabase/**", ".env*"]},
+  "acceptanceCriteria": ["A scoped briefing speech bubble appears first and states the KPI, comparison basis, and change when evidence exists; insufficient evidence is explicit.", "Up to four recommended action cards show target, action, reason, and priority or observation; missing recommendations are not fabricated.", "The alert table and nearby severity summary expose date, target scope, change, state, detail, and severity counts without color-only meaning.", "A recommendation card or alert row/button opens the existing right-side AI drawer with the selected item and current scope as a draft, and opening it does not send or append a message.", "The trend appears before KPI cards and uses the active scope; primary KPIs are cost, conversions, CPA, and CTR while impressions, clicks, CPC, and CVR are visually secondary.", "Desktop and mobile preserve the semantic order and all data; keyboard users can open and close the drawer and 320px layout has no page-level horizontal overflow.", "Loading, empty, error, partial, and mock states are explicit and never resemble complete live data.", "No provider mutation, autonomous Agent execution, or standalone AI chat page is introduced."],
+  "verification": {"commands": ["npm run harness:validate", "npm --workspace @adops/web run typecheck", "npm run e2e:browser"], "scenarioIds": ["dashboard-chat-character", "release-read-only-smoke"]},
+  "evidence": {"requiredArtifacts": ["decision-record", "screenshot", "playwright-trace"], "retention": "permanent"},
+  "rollback": {"strategy": "Revert only the mapped Dashboard changes and retain the approved requirement record for reassessment.", "verification": "Pre-change Dashboard scenarios pass and no unrelated child issue behavior is removed."}
+}

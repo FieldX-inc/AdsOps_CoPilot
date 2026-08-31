@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "manifestVersion": 2,
+  "issue": {"number": 10, "url": "https://github.com/FieldX-inc/AdsOps_CoPilot/issues/10", "title": "質問票をラジオボタン化し、承認付きキャンペーン作成までつなぐる", "slug": "setup-questionnaire-draft"},
+  "state": "browser_verified",
+  "wave": "wave-5-onboarding-billing",
+  "summary": "Convert structured setup choices to accessible radio inputs and produce a campaign draft plus human execution procedure; defer campaign-create API mutation.",
+  "decisions": ["Split the issue: implement radio questionnaire, scoped draft, review, and human procedure now.", "Campaign creation API is excluded because current policy allows only campaign status and budget writes.", "Any future campaign-create route requires a new explicit product/security approval and requirements change."],
+  "scope": {"in": ["Accessible single-choice questionnaire", "Answer persistence", "Setup score", "Campaign draft", "Review summary", "Human Google Ads procedure"], "out": ["Google Ads campaign-create mutation", "Agent execution tool", "Automatic publishing"]},
+  "requirementRefs": ["DESIGN.md#広告準備", "REQUIREMENTS.md#9-agent提案記憶", "REQUIREMENTS.md#10-google-ads承認付きwrite", "docs/adk-design.md#setup-intake"],
+  "dependencies": [3, 11],
+  "blockers": [],
+  "risks": [
+    {"id": "scope-creep-to-create", "level": "critical", "description": "Implementation may accidentally add a forbidden campaign mutation.", "mitigation": "Contract and tests assert draft-only output and absence of campaign-create provider calls."},
+    {"id": "lost-answers", "level": "medium", "description": "Auth or navigation may lose questionnaire progress.", "mitigation": "Persist scoped intake answers and cover resume behavior in browser tests."}
+  ],
+  "gates": [
+    {"id": "draft-only-scope", "type": "product_decision", "requiredAt": "before_implementation", "status": "satisfied", "owner": "user", "description": "The accepted scope is questionnaire, draft, and human procedure only."},
+    {"id": "campaign-create-expansion", "type": "security_review", "requiredAt": "not_in_current_issue", "status": "not_applicable", "owner": "user", "description": "A separate approval is required if campaign-create mutation is proposed later."}
+  ],
+  "ownership": {"primaryAgent": "product-ui-agent", "reviewAgents": ["contract-guard", "runtime-agent-engineer", "api-db-provider-agent", "qa-release-agent"], "allowedPaths": ["apps/web/src/main.tsx", "apps/web/src/styles.css", "apps/api/src/index.ts", "apps/api/src/**/*setup*.test.ts", "services/adk-agent/ad_ops_advisor/setup_intake_runtime.py", "services/adk-agent/tests/*setup*", "docs/adk-design.md", "REQUIREMENTS.md", "DESIGN.md"], "forbiddenPaths": ["apps/api/src/google-ads.ts", "**/*campaign-create*", ".env*"]},
+  "acceptanceCriteria": ["Single-choice questions use labelled keyboard-operable radios.", "Answers persist within the correct user/workspace intake and resume safely.", "Setup score is clamped to 0-10.", "Completion returns a structured campaign draft and explicit human procedure.", "No Agent tool or API route can create a Google Ads campaign."],
+  "verification": {"commands": ["npm --workspace @adops/web run typecheck", "npm --workspace @adops/api test", "python3.11 -m pytest services/adk-agent/tests", "npm run e2e:browser"], "scenarioIds": ["setup-questionnaire", "release-read-only-smoke"]},
+  "evidence": {"requiredArtifacts": ["test-log", "agent-eval", "screenshot", "playwright-trace", "api-contract"], "retention": "release-lifetime"},
+  "rollback": {"strategy": "Return to the prior setup intake renderer while preserving stored answers; never roll forward to provider mutation.", "verification": "Existing intake can resume and provider fakes show zero campaign-create calls."}
+}

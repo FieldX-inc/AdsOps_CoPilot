@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "manifestVersion": 2,
+  "issue": {"number": 20, "url": "https://github.com/FieldX-inc/AdsOps_CoPilot/issues/20", "title": "一言コメントの「AIに相談する」から既存チャットを開く", "slug": "comment-to-chat-drawer"},
+  "state": "browser_verified",
+  "wave": "wave-4-product-surface",
+  "summary": "Open the existing AI advisor drawer from the Dashboard comment CTA with the current scoped filters and comment context, without creating a duplicate chat surface.",
+  "decisions": ["Reuse the existing right-side AI drawer and active thread behavior.", "Pass only redacted, workspace-scoped filter/comment context.", "Opening the drawer does not auto-send a message or consume AI usage."],
+  "scope": {"in": ["Comment CTA", "Drawer open/focus behavior", "Context preview/prefill", "Current thread reuse", "Mobile behavior", "Locked/quota states"], "out": ["Second chat page", "Automatic message send", "Provider mutation", "Raw internal/customer IDs in visible prompt"]},
+  "requirementRefs": ["DESIGN.md#2-アプリケーション構成", "DESIGN.md#ダッシュボード", "REQUIREMENTS.md#9-agent提案記憶"],
+  "dependencies": [],
+  "blockers": [],
+  "risks": [
+    {"id": "duplicate-thread", "level": "medium", "description": "Each click may create duplicate conversations.", "mitigation": "Reuse the current scoped thread until the user explicitly starts a new one."},
+    {"id": "context-leak", "level": "high", "description": "Unscoped IDs or hidden data could be injected into the chat.", "mitigation": "Build a redacted display/context DTO after workspace scope validation."},
+    {"id": "unexpected-usage", "level": "medium", "description": "Opening the drawer may auto-send and consume quota.", "mitigation": "Require an explicit user send and test zero usage on open."}
+  ],
+  "gates": [],
+  "ownership": {"primaryAgent": "product-ui-agent", "reviewAgents": ["runtime-agent-engineer", "api-db-provider-agent", "qa-release-agent"], "allowedPaths": ["apps/web/src/main.tsx", "apps/web/src/styles.css", "apps/api/src/index.ts", "apps/api/src/index.test.ts", "services/adk-agent/tests/**", "DESIGN.md"], "forbiddenPaths": ["apps/api/src/google-ads.ts", "supabase/migrations/**", ".env*"]},
+  "acceptanceCriteria": ["CTA opens the existing right drawer and moves keyboard focus into it.", "The current workspace/account/date/comment context is shown in redacted human-readable form.", "No message is sent and no AI quota is consumed until explicit submit.", "Current thread is reused; explicit new-thread behavior remains available.", "Minimum-plan lock and exhausted-quota states remain visible and usable for history/settings.", "Mobile drawer can be opened, closed, and returned from without losing Dashboard state."],
+  "verification": {"commands": ["npm --workspace @adops/api test", "npm --workspace @adops/web run typecheck", "npm run e2e:browser"], "scenarioIds": ["dashboard-chat-character", "conversation-consistency", "release-read-only-smoke"]},
+  "evidence": {"requiredArtifacts": ["test-log", "screenshot", "playwright-trace", "api-contract"], "retention": "release-lifetime"},
+  "rollback": {"strategy": "Disable the contextual CTA and leave the existing global drawer launcher intact.", "verification": "Existing chat history/send journeys pass and Dashboard state is unchanged."}
+}

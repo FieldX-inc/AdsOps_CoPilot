@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "manifestVersion": 2,
+  "issue": {"number": 2, "url": "https://github.com/FieldX-inc/AdsOps_CoPilot/issues/2", "title": "デモアカウントの用意", "slug": "demo-account"},
+  "state": "local_verified",
+  "wave": "wave-7-reports-demo-release",
+  "summary": "Create separate deterministic synthetic demo fixtures and a reversible staging demonstration workspace/account procedure.",
+  "decisions": ["The automated E2E fixture workspace is separate from the human demonstration Google Ads account.", "Fixtures contain synthetic data only and are resettable.", "A real demonstration account is an external staging prerequisite, not committed test data."],
+  "scope": {"in": ["Synthetic fixture workspace", "Repeatable reset/seed command", "Dashboard/setup/chat/report/write-review states", "Staging demo runbook"], "out": ["Production customer cloning", "Committed OAuth credentials", "Unattended live provider writes"]},
+  "requirementRefs": ["REQUIREMENTS.md#8-広告データとui", "REQUIREMENTS.md#11-セキュリティと受け入れ", "docs/architecture.md#deployment-units"],
+  "dependencies": [1, 9, 10, 11, 18],
+  "blockers": [],
+  "risks": [
+    {"id": "real-data-leak", "level": "critical", "description": "A demo fixture could include customer or credential data.", "mitigation": "Use generated identifiers and scan fixtures/evidence for secrets and real customer data."},
+    {"id": "non-repeatable-demo", "level": "medium", "description": "A previously modified demo workspace may not reproduce the intended flow.", "mitigation": "Provide an idempotent reset and assert stable fixture counts and states."}
+  ],
+  "gates": [
+    {"id": "staging-demo-account", "type": "external_prerequisite", "requiredAt": "before_staging_verification", "status": "pending", "owner": "user", "description": "Provide or approve a non-production Google Ads client account and reversible test campaign."}
+  ],
+  "ownership": {"primaryAgent": "api-db-provider-agent", "reviewAgents": ["product-ui-agent", "qa-release-agent"], "allowedPaths": ["harness/fixtures/**", "apps/api/src/mock-repository.ts", "apps/api/src/**/*fixture*.ts", "apps/web/src/**", "scripts/**/*demo*.mjs", "docs/**", "deploy/**"], "forbiddenPaths": [".env*", "**/*token*", "**/*secret*", "supabase/migrations/**"]},
+  "acceptanceCriteria": ["One command resets the local E2E workspace to documented stable states.", "Fixtures contain no real customer, credential, or token data.", "The fixture covers onboarding, active dashboard, partial/error data, setup, conversation, report, and write-review states.", "The staging runbook identifies safe targets, approval, reset, and cleanup."],
+  "verification": {"commands": ["npm --workspace @adops/api test", "npm run e2e:browser", "npm run e2e:staging"], "scenarioIds": ["demo-reset", "release-read-only-smoke"]},
+  "evidence": {"requiredArtifacts": ["test-log", "screenshot", "decision-record", "provider-confirmation"], "retention": "release-lifetime"},
+  "rollback": {"strategy": "Reset or delete only the explicitly identified synthetic workspace; restore the approved staging campaign through Issue #1 controls.", "verification": "Re-run reset and confirm deterministic state plus zero remaining staging mutations."}
+}

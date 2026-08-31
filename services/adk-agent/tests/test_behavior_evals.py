@@ -14,6 +14,7 @@ from ad_ops_advisor.analysis import build_mock_chat_response
 from ad_ops_advisor.conversation_router import build_route_plan
 from ad_ops_advisor.gemini_runtime import _build_user_prompt
 from ad_ops_advisor.openai_agents_runtime import generate_openai_agents_response
+from ad_ops_advisor.policies.memory_policy import memory_rejection_reason
 from ad_ops_advisor.qa_gate import apply_qa_gate
 
 
@@ -26,6 +27,7 @@ SUPPORTED_RUNNERS = {
     "handle_chat",
     "mock_analysis",
     "openai_orchestration",
+    "memory_policy",
 }
 
 
@@ -83,6 +85,8 @@ def test_executable_agent_behavior_eval(
         output = _run_mock_analysis_eval(scenario)
     elif runner == "openai_orchestration":
         output = _run_openai_orchestration_eval(monkeypatch, scenario)
+    elif runner == "memory_policy":
+        output = _run_memory_policy_eval(scenario)
     else:  # pragma: no cover - schema test should catch this first
         raise AssertionError(f"Unsupported eval runner: {runner}")
 
@@ -98,6 +102,12 @@ def test_executable_agent_behavior_eval(
         assert output.get("trace_include_sensitive_data") is expected["trace_include_sensitive_data"]
     if "tools" in expected:
         assert output.get("tools") == expected["tools"]
+    if "agent_names" in expected:
+        assert output.get("agent_names") == expected["agent_names"]
+    if "status" in expected:
+        assert output.get("status") == expected["status"]
+    _assert_contains(case_id, output.get("root_instructions", ""), expected.get("root_instruction_includes", []))
+    _assert_contains(case_id, output.get("input_prompt", ""), expected.get("input_prompt_includes", []))
     for policy_check in expected.get("policy_checks", []):
         assert policy_check in output.get("policy_checks", [])
 
@@ -184,15 +194,25 @@ def _run_mock_analysis_eval(scenario: dict[str, Any]) -> dict[str, Any]:
     return {"text": json.dumps(result, ensure_ascii=False)}
 
 
+def _run_memory_policy_eval(scenario: dict[str, Any]) -> dict[str, Any]:
+    reason = memory_rejection_reason(scenario["memory_type"], scenario["memory_content"])
+    status = "accepted" if reason is None else "rejected"
+    return {
+        "text": json.dumps({"status": status, "reason": reason}, ensure_ascii=False),
+        "status": status,
+    }
+
+
 def _run_openai_orchestration_eval(monkeypatch: pytest.MonkeyPatch, scenario: dict[str, Any]) -> dict[str, Any]:
     fake_agents_module = pytypes.ModuleType("agents")
 
     class FakeToolAgent:
-        def __init__(self, name, model=None, instructions="", tools=None):  # noqa: ANN001
+        def __init__(self, name, model=None, instructions="", tools=None, output_type=None):  # noqa: ANN001
             self.name = name
             self.model = model
             self.instructions = instructions
             self.tools = tools or []
+            self.output_type = output_type
 
         def as_tool(self, tool_name: str, tool_description: str) -> dict:
             return {"tool_name": tool_name, "tool_description": tool_description, "agent": self.name}
@@ -203,7 +223,7 @@ def _run_openai_orchestration_eval(monkeypatch: pytest.MonkeyPatch, scenario: di
 
     class FakeResult:
         final_output = scenario["fake_model_output"]
-        last_agent = pytypes.SimpleNamespace(name="ad_ops_advisor_orchestrator")
+        last_agent = pytypes.SimpleNamespace(name="root_agent")
 
     class FakeRunner:
         captured = {}
@@ -230,11 +250,15 @@ def _run_openai_orchestration_eval(monkeypatch: pytest.MonkeyPatch, scenario: di
         },
         {},
     )
+    root_agent = FakeRunner.captured["agent"]
     return {
         "text": json.dumps(result, ensure_ascii=False),
         "mode": result["mode"],
         "trace_include_sensitive_data": FakeRunner.captured["run_config"].kwargs["trace_include_sensitive_data"],
-        "tools": [tool["tool_name"] for tool in FakeRunner.captured["agent"].tools],
+        "tools": [tool["tool_name"] for tool in root_agent.tools],
+        "agent_names": result["orchestration"]["agentNames"],
+        "root_instructions": root_agent.instructions,
+        "input_prompt": FakeRunner.captured["input"],
     }
 
 

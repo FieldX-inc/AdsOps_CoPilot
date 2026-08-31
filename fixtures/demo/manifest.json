@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "adops-local-demo-v1",
+  "seedVersion": "2026-07-21.1",
+  "frozenAt": "2026-07-21T00:00:00.000Z",
+  "mode": "local-artifact-only",
+  "synthetic": true,
+  "workspace": {
+    "workspaceId": "demo-workspace-0002",
+    "userId": "demo-user-0002",
+    "displayName": "DEMO賃貸管理（架空）",
+    "timezone": "Asia/Tokyo",
+    "currency": "JPY",
+    "adAccountId": "demo-ad-account-0002",
+    "adAccountName": "DEMO Google Adsアカウント（架空）"
+  },
+  "scenarioFiles": [
+    {"id": "onboarding", "path": "states/onboarding.json"},
+    {"id": "active-dashboard", "path": "states/active-dashboard.json"},
+    {"id": "partial-error", "path": "states/partial-error.json"},
+    {"id": "setup", "path": "states/setup.json"},
+    {"id": "conversation", "path": "states/conversation.json"},
+    {"id": "scheduled-report", "path": "states/scheduled-report.json"},
+    {"id": "write-review", "path": "states/write-review.json"}
+  ]
+}

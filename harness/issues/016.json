@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "manifestVersion": 2,
+  "issue": {"number": 16, "url": "https://github.com/FieldX-inc/AdsOps_CoPilot/issues/16", "title": "Adコラムを終了し、ヘルプページへ置き換える", "slug": "replace-ad-column-with-help"},
+  "state": "browser_verified",
+  "wave": "wave-3-information-architecture",
+  "summary": "Replace the Ad column navigation and route with a practical Help surface backed by the Issue #17 content contract.",
+  "decisions": ["Issue #16 supersedes the current Ad column requirement in REQUIREMENTS.md and DESIGN.md.", "Preserve useful support content through redirects or mapping; do not leave dead links.", "Help prioritizes operational answers, search/browse clarity, and explicit CMS states."],
+  "scope": {"in": ["Navigation rename", "Help index/detail routes", "Legacy route handling", "Loading/empty/error/fallback states", "Source-document update"], "out": ["General marketing blog", "Full customer support ticketing", "Unreviewed AI-generated help publishing"]},
+  "requirementRefs": ["REQUIREMENTS.md#8-広告データとui", "DESIGN.md#2-アプリケーション構成"],
+  "dependencies": [17, 19],
+  "blockers": [],
+  "risks": [
+    {"id": "dead-links", "level": "medium", "description": "Existing Ad column links or bookmarks may break.", "mitigation": "Inventory and redirect/replace internal links; browser-test the legacy route."},
+    {"id": "empty-help", "level": "medium", "description": "CMS outage or no content may produce a blank surface.", "mitigation": "Ship explicit fallback and retry guidance without fabricating content."}
+  ],
+  "gates": [
+    {"id": "help-replaces-column", "type": "product_decision", "requiredAt": "before_implementation", "status": "satisfied", "owner": "user", "description": "The issue is accepted as the new source of truth for this navigation slot."}
+  ],
+  "ownership": {"primaryAgent": "product-ui-agent", "reviewAgents": ["contract-guard", "api-db-provider-agent", "qa-release-agent"], "allowedPaths": ["apps/web/src/**", "apps/api/src/**/*help*.ts", "apps/api/src/index.ts", "REQUIREMENTS.md", "DESIGN.md", "docs/**", "tests/e2e/**"], "forbiddenPaths": ["services/adk-agent/**", "supabase/migrations/**", ".env*"]},
+  "acceptanceCriteria": ["Primary navigation and page title use Help instead of Ad column.", "Help index/detail states are accessible and responsive.", "Legacy route/internal links are redirected or intentionally retired without a dead end.", "CMS loading, empty, error, retry, and fallback behavior is explicit.", "REQUIREMENTS.md and DESIGN.md no longer require Ad column."],
+  "verification": {"commands": ["npm --workspace @adops/web run typecheck", "npm --workspace @adops/web run build", "npm run e2e:browser"], "scenarioIds": ["help-navigation", "release-read-only-smoke"]},
+  "evidence": {"requiredArtifacts": ["test-log", "screenshot", "playwright-trace", "decision-record"], "retention": "release-lifetime"},
+  "rollback": {"strategy": "Restore the prior navigation route behind a local code rollback while preserving CMS content and identifiers.", "verification": "Navigation contains no duplicate entry and every previously published internal link resolves intentionally."}
+}

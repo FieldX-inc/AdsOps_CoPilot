@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "id": "active-dashboard",
+  "synthetic": true,
+  "workspaceId": "demo-workspace-0002",
+  "state": {
+    "dataStatus": "ready",
+    "period": {"start": "2026-07-01", "end": "2026-07-14"},
+    "summary": {
+      "impressions": 48200,
+      "clicks": 1928,
+      "cost": 385600,
+      "conversions": 64,
+      "revenue": 1024000,
+      "ctr": 4,
+      "cvr": 3.32,
+      "cpa": 6025,
+      "roas": 265.56
+    },
+    "campaigns": [
+      {
+        "campaignId": "demo-campaign-search-0002",
+        "campaignName": "DEMO_検索_空室対策（架空）",
+        "status": "ENABLED",
+        "cost": 245600,
+        "conversions": 48
+      },
+      {
+        "campaignId": "demo-campaign-display-0002",
+        "campaignName": "DEMO_ディスプレイ_認知（架空）",
+        "status": "PAUSED",
+        "cost": 140000,
+        "conversions": 16
+      }
+    ]
+  },
+  "assertions": [
+    "dashboard KPIs use the frozen synthetic period",
+    "campaign totals are stable across resets",
+    "active and paused rows are both represented"
+  ]
+}

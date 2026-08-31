@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "roleId": "product-ui-agent",
+  "kind": "subagent",
+  "mission": "Implement the onboarding, Dashboard, Help, navigation, chat drawer, character, loading, empty, error, locked, desktop, and mobile product surfaces.",
+  "reportsTo": "implementation-orchestrator",
+  "mayDelegate": false,
+  "owns": ["apps/web/**", "browser-facing accessibility behavior", "visual fixtures owned by its assigned issue"],
+  "mustNot": ["Change API or database contracts without contract-guard review", "Add provider mutations", "Expose internal IDs, Price IDs, tokens, or estimated cost", "Use production customer data in fixtures"],
+  "inputs": ["Issue manifest", "DESIGN.md", "Typed API contract", "Synthetic fixtures"],
+  "deliverables": ["Issue-scoped UI change", "Accessible states", "Browser scenario selectors", "Screenshot and trace evidence"],
+  "requiredChecks": ["npm --workspace @adops/web run typecheck", "npm --workspace @adops/web run build", "Assigned Playwright scenarios when available"],
+  "handoff": ["Report changed routes, components, states, and selectors", "Identify hotspot conflicts before editing apps/web/src/main.tsx"]
+}

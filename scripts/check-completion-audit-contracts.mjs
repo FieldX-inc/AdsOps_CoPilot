@@ -37,6 +37,8 @@ runContract("reports incomplete when preflight and staging evidence are missing"
     '"id": "staging_provider_evidence"',
     '"id": "final_production_smoke"',
     '"OPENAI_AGENT_STAGING_E2E_PASSED_AT"',
+    '"SUPABASE_STAGING_E2E_PASSED_AT"',
+    '"REPORT_EMAIL_STAGING_E2E_PASSED_AT"',
     '"DEPLOYMENT_RUNBOOK_ACK=true"',
     '"PRODUCTION_SMOKE_PASSED_AT"',
     '"RELEASE_EVIDENCE_COLLECTED_AT"',
@@ -59,6 +61,30 @@ runContract("reports incomplete when preflight and staging evidence are missing"
     '"npm run deploy:commands -- --target=production"',
     '"EXPECT_PRODUCTION_READY=true API_ORIGIN=https://api.example.com AGENT_SERVICE_URL=https://agent.example.com WEB_ORIGIN=https://app.example.com npm run smoke:deploy"',
     '"EXPECT_PRODUCTION_READY=true API_ORIGIN=https://api.example.com AGENT_SERVICE_URL=https://agent.example.com WEB_ORIGIN=https://app.example.com RELEASE_SHA=<git-sha> EVIDENCE_OWNER=<operator-name> npm run collect:release-evidence"',
+  ],
+});
+
+runContract("does not accept legacy three-provider evidence without Supabase and report-email E2E", {
+  args: ["--with-verify", "--json"],
+  preflight: {
+    overallStatus: "pass",
+    failures: [],
+  },
+  extraEnv: {
+    COMPLETION_AUDIT_VERIFY_STATUS: "pass",
+    OPENAI_AGENT_STAGING_E2E_PASSED_AT: hoursAgo(6),
+    GOOGLE_ADS_STAGING_E2E_PASSED_AT: hoursAgo(5),
+    STRIPE_STAGING_E2E_PASSED_AT: hoursAgo(4),
+    SUPABASE_STAGING_E2E_PASSED_AT: "",
+    REPORT_EMAIL_STAGING_E2E_PASSED_AT: "",
+    DEPLOYMENT_RUNBOOK_ACK: "true",
+  },
+  expectStatus: 1,
+  mustIncludeStdout: [
+    '"id": "staging_provider_evidence"',
+    '"status": "missing"',
+    '"SUPABASE_STAGING_E2E_PASSED_AT"',
+    '"REPORT_EMAIL_STAGING_E2E_PASSED_AT"',
   ],
 });
 
@@ -301,13 +327,23 @@ if (issues.length) {
 console.log("Completion audit contract check passed.");
 
 function runContract(name, contract) {
+  const extraEnv = contract.extraEnv ?? {};
+  const derivedExpandedStagingEvidence = extraEnv.OPENAI_AGENT_STAGING_E2E_PASSED_AT
+    ? {
+        SUPABASE_STAGING_E2E_PASSED_AT:
+          extraEnv.SUPABASE_STAGING_E2E_PASSED_AT ?? extraEnv.OPENAI_AGENT_STAGING_E2E_PASSED_AT,
+        REPORT_EMAIL_STAGING_E2E_PASSED_AT:
+          extraEnv.REPORT_EMAIL_STAGING_E2E_PASSED_AT ?? extraEnv.STRIPE_STAGING_E2E_PASSED_AT,
+      }
+    : {};
   const result = spawnSync(process.execPath, ["scripts/completion-audit.mjs", ...contract.args], {
     cwd: process.cwd(),
     encoding: "utf8",
     env: {
       PATH: process.env.PATH,
       DEPLOY_PREFLIGHT_JSON: JSON.stringify(contract.preflight),
-      ...(contract.extraEnv ?? {}),
+      ...derivedExpandedStagingEvidence,
+      ...extraEnv,
     },
   });
   if (result.status !== contract.expectStatus) {
@@ -347,6 +383,7 @@ EXPECT_PRODUCTION_READY=true API_ORIGIN=https://api.example.com AGENT_SERVICE_UR
 
 - Final smoke used WEB_ORIGIN.
 - API \`/readiness\` production decision was \`Go\`:
+- User-approved 3 monthly prices + 3 setup fees, plus separately approved AI limits and consultation estimates, are recorded:
 - PRODUCTION_SMOKE_PASSED_AT: ${productionSmokeAt}
 - RELEASE_EVIDENCE_COLLECTED_AT: ${releaseEvidenceAt}
 `);

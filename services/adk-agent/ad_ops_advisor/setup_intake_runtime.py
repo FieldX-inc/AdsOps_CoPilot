@@ -30,9 +30,9 @@ def handle_setup_intake(payload: dict[str, Any]) -> dict[str, Any]:
     messages = payload.get("messages") if isinstance(payload.get("messages"), list) else []
     extracted = _extract_facts(message, previous, messages)
     dimension_scores = _score_facts(extracted)
-    score = sum(dimension_scores.values())
+    score = max(0, min(10, round(sum(dimension_scores.values()) / 10)))
     missing_fields = _missing_fields(dimension_scores)
-    ready = score >= 80
+    ready = score >= 8
     next_field = None if ready else _next_field(missing_fields, extracted)
     extracted["_intakeState"] = _state_for(extracted, dimension_scores, next_field)
     return {
@@ -258,12 +258,12 @@ def _has_fact(facts: dict[str, Any], field: str) -> bool:
 
 def _assistant_message(facts: dict[str, Any], score: int, missing_fields: list[str], ready: bool, next_field: str | None) -> str:
     if ready:
-        return f"準備スコアは {score}/100 です。出稿ステップを確認できる状態になりました。画面のステップを確認し、必要な文言を編集してください。"
+        return f"準備スコアは {score}/10 です。出稿ステップを確認できる状態になりました。画面のステップを確認し、必要な文言を編集してください。"
     captured = _captured_summary(facts)
     question = QUESTION_TEXT.get(next_field or "", "不足している前提をもう少し教えてください。")
     return "\n".join(
         [
-            f"準備スコアは {score}/100 です。ここまでの内容は保存しました。",
+            f"準備スコアは {score}/10 です。ここまでの内容は保存しました。",
             captured,
             "",
             f"次に1つだけ確認します。{question}",

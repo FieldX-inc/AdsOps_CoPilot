@@ -12,7 +12,7 @@
         "route": "greeting_casual",
         "requires_metrics_context": false,
         "prefers_short_response": true,
-        "target_agents": ["router_agent"],
+        "target_agents": ["root_agent"],
         "response_contract": "light_assistant_response"
       }
     },
@@ -22,7 +22,7 @@
       "expected": {
         "route": "diagnosis",
         "requires_metrics_context": true,
-        "target_agents": ["context_agent", "performance_analyst_agent", "action_plan_agent", "qa_agent"],
+        "target_agents": ["root_agent", "performance_analyst_agent", "action_plan_agent", "qa_agent"],
         "response_contract": "diagnosis_with_evidence",
         "context_contract_includes": ["campaignAdGroupMetricsSummary", "operatorFeedbackSummary"]
       }
@@ -34,7 +34,7 @@
         "route": "media_spec",
         "requires_metrics_context": false,
         "prefers_short_response": true,
-        "target_agents": ["media_spec_agent", "qa_agent"],
+        "target_agents": ["root_agent", "setup_advisor_agent", "qa_agent"],
         "response_contract": "media_spec_confirmation"
       }
     },
@@ -44,7 +44,7 @@
       "expected": {
         "route": "budget_delivery_learning",
         "requires_metrics_context": true,
-        "target_agents": ["context_agent", "budget_learning_agent", "action_plan_agent", "qa_agent"],
+        "target_agents": ["root_agent", "performance_analyst_agent", "action_plan_agent", "qa_agent"],
         "response_contract": "budget_delivery_learning_diagnosis"
       }
     }

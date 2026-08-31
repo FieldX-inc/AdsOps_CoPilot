@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "scheduled-report",
+  "synthetic": true,
+  "workspaceId": "demo-workspace-0002",
+  "state": {
+    "scheduleId": "demo-report-schedule-0002",
+    "frequency": "weekly",
+    "timezone": "Asia/Tokyo",
+    "nextRunAt": "2026-07-27T00:00:00.000Z",
+    "delivery": {
+      "channel": "local_artifact",
+      "destination": "demo-report-preview",
+      "status": "disabled_local_only"
+    },
+    "latestReport": {
+      "reportId": "demo-performance-report-0002",
+      "periodStart": "2026-07-01",
+      "periodEnd": "2026-07-14",
+      "status": "preview_ready",
+      "dataQuality": "complete_synthetic"
+    }
+  },
+  "assertions": [
+    "scheduled report timing is frozen",
+    "delivery targets a local artifact only",
+    "no email or provider job is dispatched"
+  ]
+}

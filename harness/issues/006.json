@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "manifestVersion": 2,
+  "issue": {"number": 6, "url": "https://github.com/FieldX-inc/AdsOps_CoPilot/issues/6", "title": "過去の会話内容から整合したタスクやチェック観点の提案", "slug": "conversation-aware-recommendations"},
+  "state": "local_verified",
+  "wave": "wave-6-agent-and-write",
+  "summary": "Use scoped thread history and safe user memory to propose consistent recommendations, human steps, and checks while surfacing contradictions and uncertainty.",
+  "decisions": ["Keep the five existing product agents; do not create an issue-specific agent.", "Long-term memory stores only stable preferences and continuing policy with source/dedupe metadata.", "Insufficient or contradictory evidence produces an explicit clarification or lower confidence, never fabricated certainty."],
+  "scope": {"in": ["Scoped thread retrieval", "Safe memory read/write candidates", "Consistency and contradiction checks", "Structured tasks and check points", "Behavior eval coverage"], "out": ["Customer-list memory", "Temporary KPI memory", "Secret/token context", "Autonomous platform mutation"]},
+  "requirementRefs": ["REQUIREMENTS.md#9-agent提案記憶", "docs/adk-design.md", "docs/database.md#core-tables"],
+  "dependencies": [20],
+  "blockers": [],
+  "risks": [
+    {"id": "cross-workspace-context", "level": "critical", "description": "Conversation context could cross workspace or user boundaries.", "mitigation": "Scope all retrieval at the API boundary and test nonmember/cross-workspace rejection."},
+    {"id": "unsafe-memory", "level": "high", "description": "Transient data, PII, or secrets could become long-term memory.", "mitigation": "Allowlist stable memory categories and run negative evals for KPI, customer, PII, and secret inputs."},
+    {"id": "false-consistency", "level": "medium", "description": "The Agent may force agreement with outdated conversation.", "mitigation": "Prefer current scoped evidence, cite conflicts, and ask or lower confidence."}
+  ],
+  "gates": [
+    {"id": "memory-security-review", "type": "security_review", "requiredAt": "before_local_verification", "status": "pending", "owner": "contract-guard", "description": "Review context scoping, memory allowlist, redaction, and negative evals."}
+  ],
+  "ownership": {"primaryAgent": "runtime-agent-engineer", "reviewAgents": ["contract-guard", "api-db-provider-agent", "qa-release-agent"], "allowedPaths": ["services/adk-agent/**", "apps/api/src/index.ts", "apps/api/src/**/*agent*.test.ts", "docs/adk-design.md", "docs/database.md"], "forbiddenPaths": ["apps/web/**", ".env*", "**/*secret*", "**/*token*"]},
+  "acceptanceCriteria": ["Only the authenticated user's workspace-scoped thread and allowed memory are used.", "Recommendations include conclusion, evidence, hypotheses, actions, human steps, pre-checks, risks, observation, and confidence.", "Contradictory history is surfaced and does not silently override newer evidence.", "Negative evals reject memory candidates containing temporary KPI, customer list, PII, secret, or token data.", "No Agent receives or invokes a media mutation tool."],
+  "verification": {"commands": ["python3.11 -m pytest services/adk-agent/tests", "npm --workspace @adops/api test"], "scenarioIds": ["conversation-consistency", "release-read-only-smoke"]},
+  "evidence": {"requiredArtifacts": ["test-log", "agent-eval", "api-contract"], "retention": "release-lifetime"},
+  "rollback": {"strategy": "Disable the new retrieval/memory behavior and fall back to current-thread scoped context while preserving stored messages.", "verification": "Regression evals pass in fallback mode and no new unsafe memories are written."}
+}
