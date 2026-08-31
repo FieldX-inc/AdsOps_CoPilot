@@ -387,7 +387,7 @@ def test_handle_chat_skips_metric_prefetch_for_greeting() -> None:
     sent_context = generate.call_args.args[1]
     assert sent_payload["context"]["intent"]["intent"] == "greeting_casual"
     assert sent_payload["context"]["routePlan"]["route"] == "greeting_casual"
-    assert sent_payload["context"]["routePlan"]["targetAgents"] == ["router_agent"]
+    assert sent_payload["context"]["routePlan"]["targetAgents"] == ["root_agent"]
     assert sent_context["intent"]["requires_metrics_context"] is False
     assert sent_context["routePlan"]["requires_metrics_context"] is False
 

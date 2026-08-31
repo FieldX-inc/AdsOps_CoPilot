@@ -1,0 +1,53 @@
+{
+  "name": "memory_policy_contract",
+  "description": "Executable Issue #6 memory cases for durable context and rejection of transient KPI, PII, and secrets.",
+  "status": "executable",
+  "executable": true,
+  "runner": "memory_policy",
+  "scenarios": [
+    {
+      "id": "issue_6_rejects_transient_kpi_snapshot",
+      "user_message": "この数値を覚えて",
+      "memory_type": "business_context",
+      "memory_content": "今週のCPAは12,000円でCVRは2.4%",
+      "expected": {
+        "status": "rejected",
+        "must_include": ["rejected", "temporary"],
+        "must_not_include": []
+      }
+    },
+    {
+      "id": "issue_6_rejects_contact_pii",
+      "user_message": "担当者の連絡先を覚えて",
+      "memory_type": "business_context",
+      "memory_content": "担当者の連絡先は sales@example.com",
+      "expected": {
+        "status": "rejected",
+        "must_include": ["rejected", "personal contact information"],
+        "must_not_include": ["sales@example.com"]
+      }
+    },
+    {
+      "id": "issue_6_rejects_secret",
+      "user_message": "この認証情報を覚えて",
+      "memory_type": "preference",
+      "memory_content": "refresh_token=raw-refresh-token-value-forbidden",
+      "expected": {
+        "status": "rejected",
+        "must_include": ["rejected", "secrets"],
+        "must_not_include": ["raw-refresh-token-value-forbidden"]
+      }
+    },
+    {
+      "id": "issue_6_accepts_stable_communication_preference",
+      "user_message": "回答の好みを覚えて",
+      "memory_type": "communication_preference",
+      "memory_content": "改善案は優先度順に3件までで短く示してほしい",
+      "expected": {
+        "status": "accepted",
+        "must_include": ["accepted"],
+        "must_not_include": ["rejected"]
+      }
+    }
+  ]
+}

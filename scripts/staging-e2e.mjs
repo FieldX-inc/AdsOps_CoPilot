@@ -18,9 +18,7 @@ const config = {
   googleCampaignId: process.env.GOOGLE_CAMPAIGN_ID || "",
   googleWriteKind: process.env.GOOGLE_WRITE_KIND || "status",
   googleWriteStatus: process.env.GOOGLE_WRITE_STATUS || "PAUSED",
-  googleWriteAmount: process.env.GOOGLE_WRITE_AMOUNT || "",
   googleRestoreStatus: process.env.GOOGLE_RESTORE_STATUS || "",
-  googleRestoreAmount: process.env.GOOGLE_RESTORE_AMOUNT || "",
   googleWriteRollback: process.env.GOOGLE_WRITE_ROLLBACK || "",
   stripeFullE2eConfirmation: process.env.STRIPE_FULL_E2E_CONFIRMATION || "",
   checkAgent: envFlag("CHECK_AGENT", true),
@@ -35,7 +33,6 @@ const config = {
 
 const issues = [];
 const passedEvidence = new Set();
-const googleWriteKinds = new Set(["status", "budget"]);
 const googleCampaignStatuses = new Set(["ENABLED", "PAUSED"]);
 
 if (!config.apiOrigin) issues.push("Set API_ORIGIN or VITE_API_BASE_URL.");
@@ -59,8 +56,8 @@ if (!isSafeStagingOrigin(config.apiOrigin) && !stagingTargetOverrideLooksComplet
 if (config.checkGoogleWrite && !config.confirmGoogleWrite) {
   issues.push("Set CONFIRM_GOOGLE_WRITE=true to execute the Google Ads write E2E.");
 }
-if (config.checkGoogleWrite && !googleWriteKinds.has(config.googleWriteKind)) {
-  issues.push("Set GOOGLE_WRITE_KIND to status or budget.");
+if (config.checkGoogleWrite && config.googleWriteKind !== "status") {
+  issues.push("Staging real-provider write E2E allows GOOGLE_WRITE_KIND=status only; budget is provider-fake/contract-test only.");
 }
 if (config.checkGoogleWrite && !config.googleCampaignId) {
   issues.push("Set GOOGLE_CAMPAIGN_ID for the Google Ads write E2E.");
@@ -74,14 +71,8 @@ if (config.checkGoogleWrite && !config.googleWriteRollback.trim()) {
 if (config.checkGoogleWrite && config.googleWriteRollback.trim().length < 20) {
   issues.push("Set GOOGLE_WRITE_ROLLBACK to at least 20 characters with the reason, restore value, and observation window.");
 }
-if (config.checkGoogleWrite && config.googleWriteKind === "budget" && !config.googleRestoreAmount) {
-  issues.push("Set GOOGLE_RESTORE_AMOUNT to the original campaign budget amount before budget write E2E.");
-}
 if (config.checkGoogleWrite && config.googleWriteKind === "status" && !config.googleRestoreStatus) {
   issues.push("Set GOOGLE_RESTORE_STATUS to the original campaign status before status write E2E.");
-}
-if (config.checkGoogleWrite && config.googleWriteKind === "budget" && config.googleWriteAmount && config.googleRestoreAmount && config.googleWriteAmount === config.googleRestoreAmount) {
-  issues.push("Set GOOGLE_WRITE_AMOUNT different from GOOGLE_RESTORE_AMOUNT so the reversible write E2E proves mutation and restore.");
 }
 if (config.checkGoogleWrite && config.googleWriteKind === "status" && config.googleWriteStatus && config.googleRestoreStatus && config.googleWriteStatus === config.googleRestoreStatus) {
   issues.push("Set GOOGLE_WRITE_STATUS different from GOOGLE_RESTORE_STATUS so the reversible write E2E proves mutation and restore.");
@@ -361,46 +352,51 @@ async function checkGoogleAdsRead() {
 
 async function checkGoogleAdsWrite() {
   console.log(`- Google write rollback plan: ${config.googleWriteRollback}`);
-  if (config.googleWriteKind === "budget") {
-    const amount = Number(config.googleWriteAmount);
-    const restoreAmount = Number(config.googleRestoreAmount);
-    if (!Number.isFinite(amount) || amount <= 0) {
-      issues.push("Google budget write: set GOOGLE_WRITE_AMOUNT to a positive number.");
-      return;
-    }
-    if (!Number.isFinite(restoreAmount) || restoreAmount <= 0) {
-      issues.push("Google budget restore: set GOOGLE_RESTORE_AMOUNT to a positive number.");
-      return;
-    }
-    await executeGoogleBudgetWrite(amount, "Google budget write");
-    await checkGoogleWriteAudit("google_ads.campaign_budget_updated", { amount, approvalNote: config.googleWriteRollback });
-    await executeGoogleBudgetWrite(restoreAmount, "Google budget restore");
-    await checkGoogleWriteAudit("google_ads.campaign_budget_updated", { amount: restoreAmount, approvalNote: config.googleWriteRollback });
-  } else {
-    await executeGoogleStatusWrite(config.googleWriteStatus, "Google status write");
-    await checkGoogleWriteAudit("google_ads.campaign_status_updated", { status: config.googleWriteStatus, approvalNote: config.googleWriteRollback });
-    await executeGoogleStatusWrite(config.googleRestoreStatus, "Google status restore");
-    await checkGoogleWriteAudit("google_ads.campaign_status_updated", { status: config.googleRestoreStatus, approvalNote: config.googleWriteRollback });
+  const preview = await getJson(
+    `${config.apiOrigin}/google/customers/${encodeURIComponent(config.googleCustomerId)}/campaigns/${encodeURIComponent(config.googleCampaignId)}/change-preview`,
+    "Google change preview",
+    true,
+  );
+  if (!preview?.preview?.current) {
+    issues.push("Google write: live change preview is required before mutation.");
+    return;
   }
-  passedEvidence.add("GOOGLE_ADS_STAGING_E2E_PASSED_AT");
+  const currentStatus = String(preview.preview.current.status ?? "").toUpperCase();
+  if (currentStatus !== config.googleRestoreStatus) {
+    issues.push(`Google status write: live preview is ${currentStatus || "unknown"}, not configured restore status; no mutation was executed.`);
+    return;
+  }
+  const write = await executeGoogleStatusWrite(config.googleWriteStatus, currentStatus, "Google status write");
+  if (!write) return;
+  try {
+    await checkGoogleWriteAudit("google_ads.campaign_status_updated", { status: config.googleWriteStatus, approvalNote: config.googleWriteRollback });
+  } finally {
+    const restore = await executeGoogleStatusWrite(config.googleRestoreStatus, config.googleWriteStatus, "Google status restore", write.auditId);
+    if (!restore) issues.push("Google status restore failed after a successful mutation; restore manually immediately.");
+  }
+  await checkGoogleWriteAudit("google_ads.campaign_status_updated", { status: config.googleRestoreStatus, approvalNote: config.googleWriteRollback });
+  const finalPreview = await getJson(
+    `${config.apiOrigin}/google/customers/${encodeURIComponent(config.googleCustomerId)}/campaigns/${encodeURIComponent(config.googleCampaignId)}/change-preview`,
+    "Google final live preview",
+    true,
+  );
+  const finalStatus = String(finalPreview?.preview?.current?.status ?? "").toUpperCase();
+  if (finalStatus !== config.googleRestoreStatus) {
+    issues.push(
+      `Google status final live preview: expected restored ${config.googleRestoreStatus}, got ${finalStatus || "unknown"}; audit rows alone are not sufficient evidence.`,
+    );
+  }
+  if (!issues.some((issue) => issue.startsWith("Google "))) passedEvidence.add("GOOGLE_ADS_STAGING_E2E_PASSED_AT");
 }
 
-async function executeGoogleStatusWrite(status, label) {
+async function executeGoogleStatusWrite(status, expectedCurrentStatus, label, rollbackAuditId) {
   const response = await postJson(
     `${config.apiOrigin}/google/customers/${encodeURIComponent(config.googleCustomerId)}/campaigns/${encodeURIComponent(config.googleCampaignId)}/status`,
     label,
-    { status, confirmed: true, approvalNote: config.googleWriteRollback },
+    { status, expectedCurrentStatus, confirmed: true, approvalNote: config.googleWriteRollback, rollbackAuditId },
   );
   if (response?.mode !== "executed") issues.push(`${label}: expected mode=executed`);
-}
-
-async function executeGoogleBudgetWrite(amount, label) {
-  const response = await postJson(
-    `${config.apiOrigin}/google/customers/${encodeURIComponent(config.googleCustomerId)}/campaigns/${encodeURIComponent(config.googleCampaignId)}/budget`,
-    label,
-    { amount, confirmed: true, approvalNote: config.googleWriteRollback },
-  );
-  if (response?.mode !== "executed") issues.push(`${label}: expected mode=executed`);
+  return response?.mode === "executed" ? response : null;
 }
 
 async function checkGoogleWriteAudit(expectedEventType, expectedPayload = {}) {
@@ -561,11 +557,6 @@ Optional Google write E2E:
   GOOGLE_WRITE_STATUS=PAUSED \\
   GOOGLE_RESTORE_STATUS=ENABLED
 
-  or:
-  GOOGLE_WRITE_KIND=budget \\
-  GOOGLE_WRITE_AMOUNT=1000 \\
-  GOOGLE_RESTORE_AMOUNT=800
-
 Section toggles:
   CHECK_AGENT=true|false       Default true
   CHECK_STRIPE=true|false      Default true
@@ -580,5 +571,5 @@ Optional billing gate:
   CONFIRM_STAGING_TARGET=true
   STAGING_TARGET_CONFIRMATION="staging non-production environment confirmed"
 
-The script refuses API_ORIGIN values that do not look like staging/local/test unless CONFIRM_STAGING_TARGET=true and STAGING_TARGET_CONFIRMATION includes staging and non-production. Agent health must report mode=openai/openai_agents and selectedRuntime=openai/openai_agents before printing OPENAI_AGENT_STAGING_E2E_PASSED_AT. It never prints AUTH_TOKEN and only executes Google Ads write when both CHECK_GOOGLE_WRITE=true and CONFIRM_GOOGLE_WRITE=true are set. GOOGLE_WRITE_ROLLBACK is sent as the API approvalNote and must include the reason, restore value, and observation window. Google write E2E executes the requested write, verifies the audit log payload including approvalNote and approval metadata, executes a different restore value, and verifies the restore audit log including approval metadata before printing GOOGLE_ADS_STAGING_E2E_PASSED_AT. STRIPE_STAGING_E2E_PASSED_AT requires CONFIRM_STRIPE_FULL_E2E=true, complete hosted Stripe evidence confirmation, CHECK_BILLING_GATE=true, and UNPAID_AUTH_TOKEN so the script verifies authenticated 402 billing_required.`);
+The script refuses API_ORIGIN values that do not look like staging/local/test unless CONFIRM_STAGING_TARGET=true and STAGING_TARGET_CONFIRMATION includes staging and non-production. Agent health must report mode=openai/openai_agents and selectedRuntime=openai/openai_agents before printing OPENAI_AGENT_STAGING_E2E_PASSED_AT. It never prints AUTH_TOKEN and only executes a dedicated Google Ads campaign ENABLED/PAUSED status round trip when both CHECK_GOOGLE_WRITE=true and CONFIRM_GOOGLE_WRITE=true are set; GOOGLE_WRITE_KIND=budget is rejected because budget write is provider-fake/contract-test only. GOOGLE_WRITE_ROLLBACK is sent as the API approvalNote and must include the reason, restore value, and observation window. Google status write E2E verifies write and restore audit approval metadata, then re-reads the provider live preview and requires the final status to equal GOOGLE_RESTORE_STATUS; audit rows alone cannot produce GOOGLE_ADS_STAGING_E2E_PASSED_AT. STRIPE_STAGING_E2E_PASSED_AT requires CONFIRM_STRIPE_FULL_E2E=true, complete hosted Stripe evidence confirmation, CHECK_BILLING_GATE=true, and UNPAID_AUTH_TOKEN so the script verifies authenticated 402 billing_required.`);
 }

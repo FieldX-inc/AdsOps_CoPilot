@@ -15,20 +15,26 @@ const webOrigin = cleanOrigin(process.env.WEB_ORIGIN || process.env.VITE_WEB_ORI
 const releaseSha = process.env.RELEASE_SHA || process.env.GITHUB_SHA || "";
 const evidenceOwner = process.env.EVIDENCE_OWNER || "";
 const expectProductionReady = process.env.EXPECT_PRODUCTION_READY === "true";
+const expectGoogleAdsWriteActivation = process.env.EXPECT_GOOGLE_ADS_WRITE_ACTIVATION === "true";
+const productionGate = expectGoogleAdsWriteActivation ? "google-ads-write-activation" : expectProductionReady ? "initial-production-go" : "none";
+const requireProductionGate = productionGate !== "none";
 const allowIncomplete = process.env.ALLOW_INCOMPLETE_EVIDENCE === "true";
 const issues = [];
 const evidenceCapturedAt = new Date().toISOString();
 
 if (!apiOrigin) issues.push("Set API_ORIGIN or VITE_API_BASE_URL to the deployed API origin.");
 if (!agentServiceUrl) issues.push("Set AGENT_SERVICE_URL to the deployed OpenAI Agent Service origin.");
-if (expectProductionReady && !webOrigin) {
-  issues.push("Set WEB_ORIGIN to the deployed Cloudflare Pages web origin before collecting final production evidence.");
+if (expectProductionReady && expectGoogleAdsWriteActivation) {
+  issues.push("Choose exactly one production gate: EXPECT_PRODUCTION_READY=true for initial Go or EXPECT_GOOGLE_ADS_WRITE_ACTIVATION=true for later write activation.");
+}
+if (requireProductionGate && !webOrigin) {
+  issues.push("Set WEB_ORIGIN to the deployed Cloudflare Pages web origin before collecting production gate evidence.");
 }
 const legacyAgentAliases = [];
 if (process.env.ADK_AGENT_URL) legacyAgentAliases.push("ADK_AGENT_URL");
 if (process.env.USE_ADK_AGENT === "true") legacyAgentAliases.push("USE_ADK_AGENT");
 if (process.env.ADK_AGENT_TIMEOUT_MS) legacyAgentAliases.push("ADK_AGENT_TIMEOUT_MS");
-if (expectProductionReady && legacyAgentAliases.length) {
+if (requireProductionGate && legacyAgentAliases.length) {
   issues.push(`Remove legacy ADK agent aliases before collecting production release evidence: ${legacyAgentAliases.join(", ")}.`);
 }
 
@@ -40,18 +46,18 @@ const [apiHealth, readiness, agentHealth] = issues.length
       getJson(`${agentServiceUrl}/health`, "Agent health"),
     ]);
 
-const normalSmoke = apiOrigin && agentServiceUrl ? runSmokeDeploy(false) : null;
-const productionSmoke = apiOrigin && agentServiceUrl && expectProductionReady ? runSmokeDeploy(true) : null;
+const normalSmoke = apiOrigin && agentServiceUrl ? runSmokeDeploy("none") : null;
+const productionSmoke = apiOrigin && agentServiceUrl && requireProductionGate ? runSmokeDeploy(productionGate) : null;
 
-if (expectProductionReady) {
-  validateProductionEvidence(apiHealth, readiness, agentHealth);
+if (requireProductionGate) {
+  validateProductionEvidence(apiHealth, readiness, agentHealth, productionGate);
 }
 if (normalSmoke && normalSmoke.status !== 0) issues.push("npm run smoke:deploy did not pass.");
-if (expectProductionReady && productionSmoke && productionSmoke.status !== 0) {
-  issues.push("EXPECT_PRODUCTION_READY=true npm run smoke:deploy did not pass.");
+if (requireProductionGate && productionSmoke && productionSmoke.status !== 0) {
+  issues.push(`${productionGateCommand()} npm run smoke:deploy did not pass.`);
 }
-if (expectProductionReady && !productionSmoke) {
-  issues.push("EXPECT_PRODUCTION_READY=true was set, but final production smoke did not run.");
+if (requireProductionGate && !productionSmoke) {
+  issues.push(`${productionGateCommand()} was set, but the production gate smoke did not run.`);
 }
 
 printEvidence();
@@ -95,7 +101,7 @@ async function getJson(url, label) {
   }
 }
 
-function runSmokeDeploy(requireProductionReady) {
+function runSmokeDeploy(gate) {
   const result = spawnSync(process.execPath, ["scripts/smoke-deploy.mjs"], {
     cwd: process.cwd(),
     encoding: "utf8",
@@ -104,7 +110,8 @@ function runSmokeDeploy(requireProductionReady) {
       API_ORIGIN: apiOrigin,
       AGENT_SERVICE_URL: agentServiceUrl,
       WEB_ORIGIN: webOrigin,
-      EXPECT_PRODUCTION_READY: requireProductionReady ? "true" : "false",
+      EXPECT_PRODUCTION_READY: gate === "initial-production-go" ? "true" : "false",
+      EXPECT_GOOGLE_ADS_WRITE_ACTIVATION: gate === "google-ads-write-activation" ? "true" : "false",
     },
   });
   return {
@@ -114,7 +121,7 @@ function runSmokeDeploy(requireProductionReady) {
   };
 }
 
-function validateProductionEvidence(apiHealthPayload, readinessPayload, agentHealthPayload) {
+function validateProductionEvidence(apiHealthPayload, readinessPayload, agentHealthPayload, gate) {
   if (!apiHealthPayload) {
     issues.push("Production evidence: API health is missing.");
   } else {
@@ -122,7 +129,7 @@ function validateProductionEvidence(apiHealthPayload, readinessPayload, agentHea
       ok: true,
       service: "adops-api",
       mode: "agent-proxy",
-      mediaWriteEnabled: true,
+      mediaWriteEnabled: gate === "google-ads-write-activation",
       billingConfigured: true,
       supabaseConfigured: true,
       authConfigured: true,
@@ -200,6 +207,12 @@ function safeChildEnv() {
   return kept;
 }
 
+function productionGateCommand() {
+  return productionGate === "google-ads-write-activation"
+    ? "EXPECT_GOOGLE_ADS_WRITE_ACTIVATION=true"
+    : "EXPECT_PRODUCTION_READY=true";
+}
+
 function printEvidence() {
   const production = readiness?.scopes?.production;
   const productionChecks = Array.isArray(production?.checks) ? production.checks : [];
@@ -214,6 +227,7 @@ function printEvidence() {
   console.log(`- Release branch or commit SHA: ${releaseSha || "fill manually"}`);
   console.log(`- Evidence owner: ${evidenceOwner || "fill manually"}`);
   console.log(`- Evidence captured at: ${evidenceCapturedAt}`);
+  console.log(`- Production gate: ${productionGate}`);
   console.log(`- API origin: ${apiOrigin ? redactUrl(apiOrigin) : "missing"}`);
   console.log(`- Agent Service origin: ${agentServiceUrl ? redactUrl(agentServiceUrl) : "missing"}`);
   console.log(`- Web origin: ${webOrigin ? redactUrl(webOrigin) : "fill manually"}`);
@@ -239,14 +253,14 @@ function printEvidence() {
   console.log("## Smoke");
   console.log("");
   printSmoke("npm run smoke:deploy", normalSmoke);
-  printSmoke("EXPECT_PRODUCTION_READY=true npm run smoke:deploy", productionSmoke);
+  printSmoke(`${productionGateCommand()} npm run smoke:deploy`, productionSmoke);
   console.log("");
   console.log("## Manual Evidence Still Required");
   console.log("");
   console.log("- `npm run deploy:preflight` pass output from the operator machine.");
   console.log("- `node scripts/check-env.mjs .env.production.api .env.production.agent .env.production.web` pass output.");
   console.log("- `npm run e2e:supabase` pass output after migrations.");
-  console.log("- Google Ads OAuth, approved reversible write, restore, and audit log evidence.");
+  console.log("- Google Ads OAuth, dedicated campaign ENABLED/PAUSED write and restore, final live preview re-read, and audit log evidence; budget stays provider-fake only.");
   console.log("- Stripe hosted Checkout, existing customer reuse, webhook delivery, DB row update, billing gate, and customer/workspace mismatch rejection evidence.");
   console.log("- Rollout owner, rollback owner, and rollback action.");
   if (expectProductionReady && !issues.length) {
@@ -257,6 +271,13 @@ function printEvidence() {
     console.log(`export PRODUCTION_SMOKE_PASSED_AT=${evidenceCapturedAt}`);
     console.log(`export RELEASE_EVIDENCE_COLLECTED_AT=${evidenceCapturedAt}`);
     console.log("export RELEASE_EVIDENCE_NOTE_PATH=<path-to-filled-release-evidence-note>");
+  }
+  if (expectGoogleAdsWriteActivation && !issues.length) {
+    console.log("");
+    console.log("## Google Ads Write Activation Evidence Candidate");
+    console.log("");
+    console.log("Record this only after separate approval, production mediaWriteEnabled=true, and the activation smoke are captured:");
+    console.log(`export GOOGLE_ADS_WRITE_ACTIVATION_PASSED_AT=${evidenceCapturedAt}`);
   }
 }
 
@@ -313,7 +334,8 @@ Optional:
   WEB_ORIGIN=https://app.example.com
   RELEASE_SHA=<git-sha>
   EVIDENCE_OWNER=<operator-name>
-  EXPECT_PRODUCTION_READY=true      Also run the final production smoke gate.
+  EXPECT_PRODUCTION_READY=true               Run the initial production Go gate; requires mediaWriteEnabled=false.
+  EXPECT_GOOGLE_ADS_WRITE_ACTIVATION=true    Run the separate post-Go write activation gate; requires mediaWriteEnabled=true.
   ALLOW_INCOMPLETE_EVIDENCE=true    Print partial evidence even when checks fail.
 
 The command fetches:
@@ -321,6 +343,6 @@ The command fetches:
   <API_ORIGIN>/readiness
   <AGENT_SERVICE_URL>/health
 
-It also runs npm run smoke:deploy, and when EXPECT_PRODUCTION_READY=true it runs the final production smoke gate.
+It also runs npm run smoke:deploy. Choose at most one production gate: initial Go or later Google Ads write activation.
 It prints Markdown evidence to stdout and intentionally excludes secrets, tokens, OAuth codes, and webhook secrets.`);
 }

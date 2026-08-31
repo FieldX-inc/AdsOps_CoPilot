@@ -311,7 +311,7 @@ AIチャット単体では広告媒体の設定を直接変更・停止・作成
 根拠:
 - Agent toolとしての媒体writeは登録せず、AIが実行済みと主張することも禁止です
 - Google Adsのcampaign status / budget writeは、API layerでworkspace scope、confirmed=true、GOOGLE_ADS_WRITE_ENABLED=true、監査ログを満たした場合だけ実行します
-- 入札変更、広告作成、targeting変更、Meta/Yahoo writeは未対応のため、人間向け手順に変換します
+- campaign作成、入札変更、広告作成、targeting変更、Meta/Yahoo writeは未対応のため、提案と人間向け管理画面手順に変換します
 
 原因仮説:
 今回の依頼は、予算・入札・キャンペーン・広告など媒体設定の変更に該当する可能性があります。安全のため、AIが実行したとは扱わず、承認付きwrite候補または人間の確認ステップに変換します。
@@ -329,7 +329,7 @@ AIチャット単体では広告媒体の設定を直接変更・停止・作成
 3. 直近期間と比較期間のCPA、CVR、CPC、CV数を並べる
 4. 変更案、期待効果、戻し条件をメモする
 5. Google Adsのcampaign status / budgetは、担当者が承認した場合のみ承認付きAPI routeで実行する
-6. 未対応writeは、担当者が承認した場合のみ管理画面で手動実行する
+6. campaign作成を含む未対応writeは、担当者が承認した場合のみ管理画面で手動実行する
 
 実施前チェック:
 - CV数が少なすぎる配信単位だけで判断していないか

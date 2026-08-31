@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "manifestVersion": 2,
+  "issue": {"number": 13, "url": "https://github.com/FieldX-inc/AdsOps_CoPilot/issues/13", "title": "期間フィルターをカレンダーの日付範囲選択へ変更", "slug": "calendar-date-range"},
+  "state": "browser_verified",
+  "wave": "wave-2-filters",
+  "summary": "Replace preset-only period selection with an accessible timezone-aware calendar range shared by all data consumers.",
+  "decisions": ["Use inclusive start/end calendar dates interpreted in the selected ad account timezone.", "Presets may remain as shortcuts but the serialized contract is explicit startDate/endDate.", "Invalid, reversed, future-only, or excessive ranges fail predictably."],
+  "scope": {"in": ["Calendar range UI", "Preset shortcuts", "Timezone label", "URL/state persistence", "API validation", "Comparison-period derivation"], "out": ["Per-user timezone override", "Arbitrary timestamp input", "Different date rules per page"]},
+  "requirementRefs": ["DESIGN.md#ダッシュボード", "REQUIREMENTS.md#8-広告データとui", "docs/architecture.md#data-path"],
+  "dependencies": [12],
+  "blockers": [],
+  "risks": [
+    {"id": "timezone-off-by-one", "level": "high", "description": "Browser UTC conversion may shift an account date.", "mitigation": "Serialize date-only values and interpret them in the account timezone server-side."},
+    {"id": "inconsistent-consumers", "level": "high", "description": "Dashboard, Agent, and report may calculate different windows.", "mitigation": "Centralize validation/comparison derivation and contract-test every consumer."}
+  ],
+  "gates": [],
+  "ownership": {"primaryAgent": "product-ui-agent", "reviewAgents": ["api-db-provider-agent", "qa-release-agent"], "allowedPaths": ["apps/web/src/main.tsx", "apps/web/src/styles.css", "apps/api/src/index.ts", "apps/api/src/index.test.ts", "packages/shared-schemas/**", "REQUIREMENTS.md", "DESIGN.md"], "forbiddenPaths": ["services/adk-agent/**", "supabase/migrations/**", ".env*"]},
+  "acceptanceCriteria": ["Users can choose and clear an inclusive date range by pointer and keyboard.", "The UI names the account timezone and persists date-only start/end values.", "Dashboard, Agent, and report receive the same validated range and comparison period.", "Reversed, malformed, future-only, and over-limit ranges have explicit errors.", "Preset shortcuts produce the same contract as manual selection."],
+  "verification": {"commands": ["npm --workspace @adops/api test", "npm --workspace @adops/web run typecheck", "npm run e2e:browser"], "scenarioIds": ["filters-hierarchy", "release-read-only-smoke"]},
+  "evidence": {"requiredArtifacts": ["test-log", "api-contract", "screenshot", "playwright-trace"], "retention": "release-lifetime"},
+  "rollback": {"strategy": "Return the UI to validated presets while keeping server date-range validation backward compatible.", "verification": "Preset windows match the previous KPI queries and do not shift account dates."}
+}

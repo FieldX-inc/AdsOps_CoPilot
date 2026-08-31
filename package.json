@@ -13,6 +13,8 @@
     "typecheck": "npm --workspace @adops/web run typecheck && npm --workspace @adops/api run typecheck",
     "check:env": "node scripts/check-env.mjs",
     "check:env-contracts": "node scripts/check-env-contracts.mjs",
+    "check:demo-fixture": "node scripts/check-demo-fixture-contracts.mjs",
+    "check:harness": "node scripts/check-implementation-harness-contracts.mjs",
     "check:migrations": "node scripts/check-migrations.mjs",
     "check:docker": "node scripts/check-dockerfiles.mjs",
     "check:deploy": "node scripts/check-deploy-config.mjs",
@@ -38,17 +40,24 @@
     "audit:production-candidate": "node scripts/production-candidate-audit.mjs",
     "audit:completion": "node scripts/completion-audit.mjs",
     "audit:completion-note": "node scripts/completion-evidence-note.mjs",
+    "demo:reset": "node scripts/reset-demo-fixture.mjs",
+    "harness:validate": "node scripts/implementation-harness.mjs validate",
+    "harness:list": "node scripts/implementation-harness.mjs list",
+    "harness:plan": "node scripts/implementation-harness.mjs plan",
     "collect:release-evidence": "node scripts/collect-release-evidence.mjs",
     "smoke:deploy": "node scripts/smoke-deploy.mjs",
+    "e2e:browser": "playwright test",
+    "e2e:browser:headed": "playwright test --headed",
     "e2e:staging": "node scripts/staging-e2e.mjs",
     "e2e:supabase": "node scripts/supabase-e2e.mjs",
     "e2e:stripe-webhook": "node scripts/stripe-webhook-e2e.mjs",
     "test:api": "npm --workspace @adops/api test",
     "test:agent": "python3.11 -m pytest services/adk-agent/tests",
     "test": "npm run test:api && npm run test:agent",
-    "verify": "npm run check:env && npm run check:env-contracts && npm run check:migrations && npm run check:docker && npm run check:deploy && npm run check:deploy-preflight && npm run check:operator-prereq-note && npm run check:deploy-next && npm run check:deploy-commands && npm run check:production-candidate-audit && npm run check:completion-audit && npm run check:completion-evidence-note && npm run check:goal && npm run check:handoff && npm run check:release-evidence && npm run check:release-evidence-collector && npm run check:scripts && npm run check:smoke && npm run check:staging-e2e && npm run check:web-contracts && npm run typecheck && npm run build && npm run test"
+    "verify": "npm run check:env && npm run check:env-contracts && npm run check:demo-fixture && npm run check:harness && npm run check:migrations && npm run check:docker && npm run check:deploy && npm run check:deploy-preflight && npm run check:operator-prereq-note && npm run check:deploy-next && npm run check:deploy-commands && npm run check:production-candidate-audit && npm run check:completion-audit && npm run check:completion-evidence-note && npm run check:goal && npm run check:handoff && npm run check:release-evidence && npm run check:release-evidence-collector && npm run check:scripts && npm run check:smoke && npm run check:staging-e2e && npm run check:web-contracts && npm run typecheck && npm run build && npm run test"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "concurrently": "^9.1.2"
   }
 }

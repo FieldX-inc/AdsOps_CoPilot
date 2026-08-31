@@ -1,19 +1,21 @@
 # User Test Readiness
 
+Updated: 2026-07-21
+
 このチェックリストは、実広告API credentialなしで AdOps Advisor のMVP体験を確認するためのものです。対象は mock広告データを使ったローカルユーザーテストです。
 
 ## 関連Requirement / Milestone
 
-- `REQUIREMENTS.md` 4. MVPスコープ
-- `REQUIREMENTS.md` 10. AI回答要件
-- `REQUIREMENTS.md` 12. Tool Policy
-- `REQUIREMENTS.md` 13. AI回答フォーマット
-- `REQUIREMENTS.md` 17. セキュリティ・ガードレール
-- `DESIGN.md` 2. ナビゲーション
-- `DESIGN.md` 5. AIドロワー
-- `docs/architecture.md` 7. 最初に作りたい価値ある体験
-- `docs/adk-design.md` 4. Evaluation観点
-- `docs/database.md` 6. Token Storage
+- `REQUIREMENTS.md` 4. Auth・workspace・課金導線
+- `REQUIREMENTS.md` 8. 広告データとUI
+- `REQUIREMENTS.md` 9. Agent・提案・記憶
+- `REQUIREMENTS.md` 10. Google Ads承認付きwrite
+- `REQUIREMENTS.md` 11. セキュリティと受け入れ
+- `DESIGN.md` 2. アプリケーション構成
+- `DESIGN.md` 3. 画面要件
+- `docs/architecture.md` Product state flow / Data path / Help content
+- `docs/adk-design.md` Initial agent set / Allowed and forbidden capabilities
+- `docs/database.md` Billing constraints / RLS acceptance matrix
 
 ## テストの目的
 
@@ -30,7 +32,9 @@
 対象:
 
 - ローカルWeb UIの主要導線
-- mock広告データによるDashboard / BI分析の理解しやすさ
+- mock広告データによるDashboardの理解しやすさ
+- ラジオボタン中心の初期質問票と、キャンペーン作成案・人間向け手動手順
+- microCMS未設定時の内蔵ヘルプ表示
 - データ連携画面の未接続状態とOAuth導線の見え方
 - AIドロワーの会話体験
 - deterministic mock AI responseの回答構造、根拠、自信度、no-write表現
@@ -186,7 +190,8 @@ No-Goになりうる未解消リスク:
 ### 1. 初期表示 / App Shell
 
 - `http://localhost:5173` を開く。
-- 左ナビが `ダッシュボード / BI分析 / Adコラム / データ連携` になっている。
+- 左ナビが `ダッシュボード / 広告準備 / ヘルプ / データ連携` になっている。
+- BI分析とAdコラムの独立ナビがない。
 - AIチャットが独立ページではなく右下ボタン / 右ドロワーとして扱われている。
 - 画面がLPや説明ページではなく、広告運用の作業画面として見える。
 - mock / demo状態の表示がある場合、実広告データ接続済みとは読めない。
@@ -218,25 +223,25 @@ No-Goになりうる未解消リスク:
 - 「AIに聞くべき次の質問」が自然に思いつくか。
 - Dashboardが高度なBIではなく、AI相談の補助として機能しているか。
 
-### 3. BI分析確認
+### 3. 広告準備とヘルプ確認
 
-- 期間や媒体フィルタを切り替えられる。
-- チャートやキャンペーン比較が崩れない。
-- mockデータでも「どの数字を見ればよいか」が分かる。
-- 媒体 / アカウントの切り替えがある場合、現在の条件が分かる。
-- チャートと表の値が、同じ期間・同じ媒体を見ているように理解できる。
+- 広告準備の初期質問票がラジオボタン中心で、補足が必要な場合だけ自由入力できる。
+- 回答後にキャンペーン作成案、根拠、実施前チェック、Google Ads管理画面で人が行う手順が表示される。
+- キャンペーン作成案に「作成済み」「APIで作成」と誤認させる表現やCTAがない。
+- ヘルプで操作手順、KPI、OAuth、承認付きwriteの基本情報を検索または一覧から探せる。
+- microCMS未設定のローカル環境でも空画面にならず、「基本ヘルプを表示中」と分かる。
 
 タスク例:
 
 ```txt
-悪化していそうなキャンペーンを1つ見つけ、その理由を説明してください。
+質問票に回答し、表示された作成案をGoogle Adsで実行するまでの次の手順を説明してください。
 ```
 
 観察すること:
 
-- 期間比較、媒体比較、キャンペーン比較のどれを見たか。
-- 数字の変化と原因仮説を混同していないか。
-- 表示密度、ラベル、フィルタが業務画面として扱いやすいか。
+- ラジオ選択肢だけで迷わず回答できるか。
+- 作成案と実行を混同せず、人間の確認が必要だと理解できるか。
+- microCMSのフォールバックが障害の生データや開発者向けエラーに見えないか。
 
 ### 4. データ連携確認
 
@@ -375,6 +380,8 @@ secret確認は、実secretを貼らず、ダミー値だけで行う。
 - AI Advisorがmockデータを根拠に、human-in-the-loopの改善提案を返す。
 - データ連携未実装部分が、テスターにとって「未接続 / 次フェーズ」だと分かる。
 - UIが `DESIGN.md` のナビゲーションとAIドロワー方針から外れていない。
+- 広告準備が作成案と手動手順にとどまり、campaign create APIの実行導線がない。
+- microCMSなしでも内蔵ヘルプを確認できる。
 - P0が0件。
 - 未解消P1がある場合でも、テスト目的に影響しない既知制約として説明できる。
 - テスト中に実secret、実広告アカウント、実顧客データを使わない運用になっている。
@@ -383,7 +390,7 @@ secret確認は、実secretを貼らず、ダミー値だけで行う。
 
 以下の場合は、対象シナリオを絞って実施してよい。
 
-- DashboardまたはBI分析の一部表示にP2があるが、AI相談体験は確認できる。
+- Dashboardまたはヘルプの一部表示にP2があるが、AI相談体験は確認できる。
 - データ連携画面の文言に改善余地があるが、APIキーやsecret入力が不要だと説明できる。
 - AI回答の一部セクションが弱いが、no-write、secret exclusion、根拠不足の明示は守れている。
 
@@ -442,7 +449,7 @@ Commit / branch:
 シナリオ結果:
 - 初期表示:
 - Dashboard:
-- BI分析:
+- 広告準備 / ヘルプ:
 - データ連携:
 - AI Advisor:
 - 追加質問:

@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "setup",
+  "synthetic": true,
+  "workspaceId": "demo-workspace-0002",
+  "state": {
+    "questionnaireStatus": "draft_ready",
+    "answers": {
+      "businessType": "賃貸管理（架空）",
+      "goal": "管理受託の問い合わせ",
+      "monthlyTestBudget": 300000,
+      "primaryConversion": "問い合わせフォーム送信"
+    },
+    "campaignDraft": {
+      "campaignName": "DEMO_検索_新規管理受託（架空）",
+      "status": "proposal_only",
+      "execution": "not_requested",
+      "humanReviewRequired": true
+    },
+    "nextAction": "review_draft_and_manual_steps"
+  },
+  "assertions": [
+    "setup output remains a draft",
+    "campaign creation is never executed",
+    "a human review is required before any manual setup"
+  ]
+}

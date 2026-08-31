@@ -1,125 +1,80 @@
-# Architecture Draft
+# Architecture
 
-## 1. 全体方針
+Updated: 2026-07-21
 
-AdOps Advisor は、ダッシュボードSaaSではなくAI広告コンサルタントである。
-
-Web UIは以下を提供する。
-
-- login / onboarding
-- 広告アカウント連携
-- 最低限のKPI確認
-- AI chat
-- recommendation / human task の確認
-
-OpenAI Agent Service は以下を提供する。
-
-- intent routing
-- 広告開始前の設計支援
-- 広告パフォーマンス分析
-- 人間向けaction plan作成
-- QA / policy check
-
-## 2. 推奨インフラ構成
-
-MVP初期は開発速度を優先し、Supabase Auth/Postgresを使う。
+## Runtime topology
 
 ```txt
 Browser
-  -> Cloudflare Pages / Workers
-    -> Supabase Auth
-    -> Supabase Postgres
-    -> OAuth callback
-    -> Lightweight API / BFF
-    -> Cloud Run OpenAI Agent Service
-      -> data tools
-      -> memory tools
-      -> recommendation/task tools
+  ├─ Cloudflare Pages: React/Vite SPA
+  └─ Google Cloud Run: public Hono API
+       ├─ Supabase Auth/Postgres/RLS
+       ├─ Stripe Checkout/Portal/Webhook
+       ├─ microCMS help content + bundled fallback
+       ├─ Google Ads OAuth/read/approved status+budget write
+       ├─ Cloudflare Email Service REST API
+       └─ Google-signed OIDC ID token
+            └─ private Cloud Run: Python OpenAI Agent Service
+
+Cloud Scheduler (hourly)
+  └─ Cloud Run Job: same public API image, report-job entrypoint
+       ├─ claim due workspace in Supabase
+       ├─ private Agent Service
+       └─ Cloudflare Email Service
 ```
 
-公開版 / SaaS本番ではGoogle Cloud中心構成を第一候補にする。
+WebとAPIの境界はHTTPS JSON/NDJSON。APIとprivate Agentの境界はservice-to-service OIDC。AgentにSupabase service role、Stripe、Google Ads OAuth token、Cloudflare Email tokenを与えない。
+
+## Trust boundaries
+
+| Boundary | Authentication | Enforcement |
+|---|---|---|
+| Browser → API | Supabase JWT | membership, billing state, plan entitlement, account scope |
+| Stripe → API | webhook signature | customer/workspace/Price match, idempotency |
+| Google OAuth → API | state + PKCE | one-time DB state, workspace/user binding |
+| API/Job → Agent | Google OIDC ID token | private ingress and `roles/run.invoker` |
+| API/Job → Supabase | service role | server-side only; RLS is also tested for browser paths |
+| Job → Email | Email Sending-only API token | configured sending domain and redacted payload |
+
+## Product state flow
 
 ```txt
-Browser
-  -> Cloud Run API or Cloudflare Pages / Workers
-    -> Cloud Run OpenAI Agent Service
-      -> Cloud SQL for PostgreSQL
-      -> Secret Manager / Cloud KMS
-      -> BigQuery
-      -> Google Ads read/write APIs
-      -> Stripe Billing APIs
+public plan selection
+  → signup/login
+  → workspace(pending_payment, selected plan)
+  → Stripe Checkout
+  → verified webhook
+  → workspace(active)
+  → product APIs
 ```
 
-DB schemaとagent serviceはPostgres-firstで実装し、Supabase固有のAuth/RLSはMVPの境界に閉じ込める。Cloud SQL for PostgreSQLへ移行するときにagent tool contractを変えないことを優先する。
+`GET /billing/plans`は未認証でも取得できる公開表示データとし、Price IDやsecretは含めない。選択値は認証後にAPIが承認済みcatalogで再検証してからpending workspaceとCheckout Sessionに紐付ける。`pending_payment`, `past_due`, `cancelled`, unknown Priceは製品APIでfail closedする。プランによる制限はUIだけでなくAPIとDB triggerで強制する。
 
-## 3. Cloudflareの位置づけ
+## Data path
 
-Cloudflareは以下に向いている。
+Google Adsの30日同期でaccount metadata、campaign status、metrics snapshotをworkspace scopeで保存する。Dashboard、AI、reportは同じ`platform` / `adAccountId`フィルタを使う。Agentに渡すのはscope済みでsecretを除いたcontextだけ。
 
-- Web UI hosting
-- 軽量API
-- OAuth callback
-- edge cache
-- routing / security layer
+Agentが生成するwrite candidateはブラウザへ返す前に、実contextのcustomer/campaign IDと一致するかAPIで検証する。実行時は別のlive preview/write APIがGoogle Adsから現在値を再取得する。
 
-一方、OpenAI Agents SDK runtimeは以下の理由で Cloud Run を第一候補にする。
+広告準備の初期質問票とAgentが生成するキャンペーン作成案は、媒体管理画面で人が実行するための手順に限定する。campaign create endpointもAgent toolも設けない。
 
-- Python runtime / dependency の扱いやすさ
-- agent処理が長くなる可能性
-- logs / monitoring / job化のしやすさ
+## Help content
 
-最初からすべてをCloudflare Workersに載せる必要はない。
+Public APIがmicroCMSから公開済みヘルプを取得し、必要項目に整形してBrowserへ返す。microCMSのAPI keyはserver-sideに閉じる。未設定、timeout、4xx/5xx、schema不整合、空レスポンスでは、同一のレスポンスschemaでバージョン管理された内蔵ヘルプを返す。ヘルプ取得失敗はDashboardやAI Advisorを停止させない。
 
-## 4. データフロー
+## Scheduled reports
 
-1. ユーザーがSupabase Authでログインする。
-2. ユーザーがGoogle / Meta / Yahooの広告アカウントを連携する。
-3. server側でOAuth tokenを暗号化保存する。tokenはAI prompt、tool output、logに出さない。
-4. Google Ads APIで広告アカウント・指標データを取得する。
-5. 最低限のdashboardに状態を表示する。
-6. ユーザーがAI Advisorに質問する。
-7. OpenAI root/orchestrator agentがintentを判定する。
-8. 必要なtoolでworkspace/user scope済みデータを読む。
-9. QA agentが根拠・自信度・承認付きwrite境界を確認する。
-10. AIが提案と人間向け作業手順を返す。
-11. 必要に応じてrecommendation / human_task / feedbackを保存する。
+`report_schedules.next_run_at`はworkspace timezoneの9:00。Scheduler自体は1時間ごとに起動する。JobはDB unique keyとconditioned updateで同一期間を1回だけclaimし、失敗は`REPORT_JOB_MAX_RETRIES`まで次のScheduler起動で再試行する。report usageはchat quotaと分離する。
 
-## 5. OpenAI Agent境界
+## Deployment units
 
-OpenAI Agent Serviceはアプリ認証を直接担当しない。
+- `apps/web`: Cloudflare Pages Direct Upload。`public/_redirects`でSPA fallback
+- `apps/api`: Cloud Run Service。同一imageで`node apps/api/dist/report-job.js`をJob commandに使う
+- `services/adk-agent`: private Cloud Run Service
+- `supabase/migrations`: stagingで先に検証し、承認後にproductionへ同じ順で適用
 
-Web/API layer が user/session を検証し、agentには以下のようなscope済みcontextを渡す。
+Cloud SQL、BigQuery、Meta/Yahooは後続フェーズ。
 
-- `workspace_id`
-- `user_id`
-- `thread_id`
-- `ad_account_id`
-- date range
+## Production gates
 
-agent tools側でも必ずworkspace scopeを検証する。
-
-Agent Serviceの通常DBアクセスでは `SUPABASE_SERVICE_ROLE_KEY` を前提にしない。必要な管理処理で使う場合もserver-side限定とし、agent promptやtool responseには絶対に含めない。
-
-## 6. Write Approval制約
-
-Google Ads writeは、認証済みユーザーが明示承認したAPI routeだけで実行する。
-
-AIは変更候補、理由、戻し条件、観察計画を出す。媒体API mutationはagent toolではなくAPI layerに置き、workspace scope、`confirmed=true`、`GOOGLE_ADS_WRITE_ENABLED=true`、監査ログを必須にする。
-
-## 7. 最初に作りたい価値ある体験
-
-質問例:
-
-```txt
-CPAが悪化している理由を教えて。次に何をすればいい？
-```
-
-期待flow:
-
-1. root_agentがperformance diagnosis intentと判定
-2. performance_analystが対象期間・比較期間の指標を読む
-3. metrics toolがCPA/CVR/CTR/CPC/cost/conversionsを計算
-4. 原因仮説を出す
-5. action_plan_agentが人間向け作業手順に変換
-6. qa_agentが根拠・自信度・危険表現を確認
-7. 最終回答に、結論、根拠、原因仮説、作業手順、リスク、観察計画、自信度を含める
+初回本番Goはread-onlyスモークと主要プロバイダ疎通を必須とし、`GOOGLE_ADS_WRITE_ENABLED=false`で完了できる。status/budget writeの本番開放は、staging往復テスト、監査、復元、管理上限の証跡を確認する別ゲートとする。

@@ -25,6 +25,14 @@ if (issues.length) reportAndExit(issues);
 
 const targets = [
   {
+    name: "workspaces",
+    columns: ["id", "name", "billing_state", "created_at", "updated_at"],
+  },
+  {
+    name: "workspace_members",
+    columns: ["workspace_id", "user_id", "role", "is_primary", "created_at"],
+  },
+  {
     name: "billing_customers",
     columns: ["id", "workspace_id", "user_id", "stripe_customer_id", "created_at", "updated_at"],
   },
@@ -39,6 +47,8 @@ const targets = [
       "status",
       "current_period_end",
       "cancel_at_period_end",
+      "plan_id",
+      "billing_interval",
       "raw",
       "created_at",
       "updated_at",
@@ -46,7 +56,7 @@ const targets = [
   },
   {
     name: "oauth_states",
-    columns: ["id", "state", "workspace_id", "user_id", "code_verifier", "expires_at", "created_at"],
+    columns: ["state", "workspace_id", "user_id", "platform", "code_verifier", "expires_at", "created_at"],
   },
   {
     name: "ad_platform_connections",
@@ -69,7 +79,71 @@ const targets = [
   },
   {
     name: "ad_platform_connection_statuses",
-    columns: ["workspace_id", "user_id", "platform", "status", "external_customer_id", "updated_at"],
+    columns: ["id", "workspace_id", "user_id", "platform", "provider_account_id", "status", "updated_at"],
+  },
+  {
+    name: "ad_accounts",
+    columns: [
+      "id",
+      "workspace_id",
+      "connection_id",
+      "platform",
+      "external_account_id",
+      "currency",
+      "timezone",
+      "status",
+      "manager_customer_id",
+    ],
+  },
+  {
+    name: "user_memories",
+    columns: ["id", "workspace_id", "user_id", "memory_type", "source_type", "source_ref", "dedupe_key"],
+  },
+  {
+    name: "workspace_invitations",
+    columns: ["id", "workspace_id", "email", "role", "token_hash", "expires_at", "accepted_at", "revoked_at"],
+  },
+  {
+    name: "stripe_webhook_events",
+    columns: ["event_id", "event_type", "status", "claimed_at", "processed_at", "error_code"],
+  },
+  {
+    name: "ai_usage_events",
+    columns: [
+      "id",
+      "workspace_id",
+      "user_id",
+      "source_type",
+      "source_id",
+      "model",
+      "total_tokens",
+      "estimated_cost_microunits",
+      "credit_units",
+      "rate_version",
+      "idempotency_key",
+    ],
+  },
+  {
+    name: "report_schedules",
+    columns: ["workspace_id", "interval_days", "timezone", "next_run_at", "last_run_at", "enabled"],
+  },
+  {
+    name: "report_runs",
+    columns: [
+      "id",
+      "workspace_id",
+      "period_start",
+      "period_end",
+      "status",
+      "usage_event_id",
+      "email_status",
+      "retry_count",
+      "idempotency_key",
+    ],
+  },
+  {
+    name: "notification_preferences",
+    columns: ["workspace_id", "user_id", "report_email_enabled", "unsubscribed_at"],
   },
 ];
 

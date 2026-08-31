@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "programId": "adops-advisor-open-issues-2026-07-21",
+  "repository": "FieldX-inc/AdsOps_CoPilot",
+  "issueNumbers": [1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+  "states": [
+    "blocked",
+    "specified",
+    "ready",
+    "implemented",
+    "local_verified",
+    "browser_verified",
+    "staging_verified",
+    "release_ready",
+    "done"
+  ],
+  "riskLevels": ["low", "medium", "high", "critical"],
+  "gateStatuses": ["pending", "satisfied", "waived", "not_applicable"],
+  "gateTypes": [
+    "product_decision",
+    "security_review",
+    "human_approval",
+    "external_prerequisite",
+    "staging_evidence",
+    "release_approval"
+  ],
+  "sourceDocuments": [
+    "AGENTS.md",
+    "REQUIREMENTS.md",
+    "DESIGN.md",
+    "docs/architecture.md",
+    "docs/database.md",
+    "docs/adk-design.md"
+  ],
+  "executionPolicy": {
+    "orchestrator": "implementation-orchestrator",
+    "subagents": [
+      "contract-guard",
+      "product-ui-agent",
+      "api-db-provider-agent",
+      "runtime-agent-engineer",
+      "qa-release-agent"
+    ],
+    "maxConcurrentImplementationLanes": 3,
+    "requireSeparateWorktrees": true,
+    "requireIndependentQa": true,
+    "requireGreenBaselineBeforeDispatch": true,
+    "requireDependencyDoneBeforeDispatch": true,
+    "providerMutationsRequireHumanApproval": true,
+    "agentToolsMayMutateAdPlatforms": false,
+    "hotspotSingleOwner": true,
+    "hotspots": [
+      "apps/web/src/main.tsx",
+      "apps/api/src/index.ts",
+      "supabase/migrations/**"
+    ]
+  },
+  "waves": [
+    {
+      "id": "wave-1-decisions",
+      "name": "Resolve missing product inputs",
+      "issues": [5],
+      "exitCriteria": ["Issue #5 has an explicit purpose and acceptance criteria, or is closed as obsolete"]
+    },
+    {
+      "id": "wave-2-filters",
+      "name": "Shared account and date filters",
+      "issues": [12, 13, 14],
+      "exitCriteria": ["Dashboard, Agent context, and reports use one validated filter contract"]
+    },
+    {
+      "id": "wave-3-information-architecture",
+      "name": "Navigation, Help, and retired surfaces",
+      "issues": [17, 16, 19],
+      "exitCriteria": ["Help replaces Ad column and BI navigation is removed without dead links"]
+    },
+    {
+      "id": "wave-4-product-surface",
+      "name": "Dashboard, chat, character, and visual acceptance",
+      "issues": [15, 20, 4, 9],
+      "exitCriteria": ["Desktop, mobile, keyboard, and visual browser evidence is accepted"]
+    },
+    {
+      "id": "wave-5-onboarding-billing",
+      "name": "Plans, payment-first entry, and setup questionnaire",
+      "issues": [3, 11, 10],
+      "exitCriteria": ["Plan selection to authenticated Checkout and post-payment setup is covered end to end"]
+    },
+    {
+      "id": "wave-6-agent-and-write",
+      "name": "Conversation-aware recommendations and approved Google Ads write",
+      "issues": [6, 1],
+      "exitCriteria": ["Write candidates are scoped, previewed, confirmed, audited, conflict-safe, and restorable"]
+    },
+    {
+      "id": "wave-7-reports-demo-release",
+      "name": "Scheduled reporting, demo fixtures, and release rehearsal",
+      "issues": [18, 2],
+      "exitCriteria": ["Staging provider evidence and a deterministic demo reset are complete"]
+    }
+  ]
+}

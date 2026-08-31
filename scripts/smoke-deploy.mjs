@@ -11,6 +11,9 @@ const apiOrigin = cleanOrigin(process.env.API_ORIGIN || process.env.VITE_API_BAS
 const agentServiceUrl = cleanOrigin(process.env.AGENT_SERVICE_URL || "");
 const webOrigin = cleanOrigin(process.env.WEB_ORIGIN || process.env.VITE_WEB_ORIGIN || "");
 const expectProductionReady = process.env.EXPECT_PRODUCTION_READY === "true";
+const expectGoogleAdsWriteActivation = process.env.EXPECT_GOOGLE_ADS_WRITE_ACTIVATION === "true";
+const productionGate = expectGoogleAdsWriteActivation ? "google-ads-write-activation" : expectProductionReady ? "initial-production-go" : "none";
+const requireProductionGate = productionGate !== "none";
 const issues = [];
 
 if (!apiOrigin) {
@@ -19,9 +22,12 @@ if (!apiOrigin) {
 if (!agentServiceUrl) {
   issues.push("Set AGENT_SERVICE_URL to the deployed OpenAI Agent Service origin.");
 }
-if (expectProductionReady) {
+if (expectProductionReady && expectGoogleAdsWriteActivation) {
+  issues.push("Choose exactly one production gate: EXPECT_PRODUCTION_READY=true for initial Go or EXPECT_GOOGLE_ADS_WRITE_ACTIVATION=true for later write activation.");
+}
+if (requireProductionGate) {
   if (!webOrigin) {
-    issues.push("Set WEB_ORIGIN to the deployed Cloudflare Pages web origin for the final production gate.");
+    issues.push("Set WEB_ORIGIN to the deployed Cloudflare Pages web origin for the production gate.");
   }
   validateModernAgentServiceEnv();
 }
@@ -36,14 +42,14 @@ const [apiHealth, readiness, agentHealth, webHtml] = await Promise.all([
   getJson(`${agentServiceUrl}/health`, "Agent health"),
   webOrigin ? getText(webOrigin, "Web app") : Promise.resolve(null),
 ]);
-const webAssetSummary = webOrigin && expectProductionReady && webHtml ? await validateWebAssets(webHtml, webOrigin) : null;
+const webAssetSummary = webOrigin && requireProductionGate && webHtml ? await validateWebAssets(webHtml, webOrigin) : null;
 
 validateHealth(apiHealth, "API health", "adops-api");
 validateHealth(agentHealth, "Agent health", "openai-agent");
-validateApiHealth(apiHealth, expectProductionReady);
-validateAgentHealth(agentHealth, expectProductionReady);
-validateReadiness(readiness, expectProductionReady);
-validateWebApp(webHtml, expectProductionReady);
+validateApiHealth(apiHealth, productionGate);
+validateAgentHealth(agentHealth, requireProductionGate);
+validateReadiness(readiness, requireProductionGate);
+validateWebApp(webHtml, requireProductionGate);
 
 printSummary({
   apiOrigin,
@@ -55,6 +61,8 @@ printSummary({
   webHtml,
   webAssetSummary,
   expectProductionReady,
+  expectGoogleAdsWriteActivation,
+  productionGate,
 });
 
 if (issues.length) {
@@ -139,13 +147,16 @@ function validateAgentHealth(payload, requireProductionReady) {
   }
 }
 
-function validateApiHealth(payload, requireProductionReady) {
-  if (!payload || !requireProductionReady) return;
+function validateApiHealth(payload, gate) {
+  if (!payload || gate === "none") return;
   if (payload.mode !== "agent-proxy") {
     issues.push(`API health: expected mode=agent-proxy for production gate, got ${payload.mode ?? "unknown"}`);
   }
-  if (payload.mediaWriteEnabled !== true) {
-    issues.push("API health: expected mediaWriteEnabled=true for production gate");
+  const expectedMediaWriteEnabled = gate === "google-ads-write-activation";
+  if (payload.mediaWriteEnabled !== expectedMediaWriteEnabled) {
+    issues.push(
+      `API health: expected mediaWriteEnabled=${String(expectedMediaWriteEnabled)} for ${gate === "initial-production-go" ? "initial production Go" : "Google Ads write activation"} gate`,
+    );
   }
   if (payload.billingConfigured !== true) {
     issues.push("API health: expected billingConfigured=true for production gate");
@@ -315,7 +326,9 @@ function printSummary(summary) {
       console.log(`- Web assets: checked=${summary.webAssetSummary.checked}`);
     }
   }
-  console.log(`- Require production Go: ${String(summary.expectProductionReady)}`);
+  console.log(`- Production gate: ${summary.productionGate}`);
+  console.log(`- Require initial production Go: ${String(summary.expectProductionReady)}`);
+  console.log(`- Require Google Ads write activation: ${String(summary.expectGoogleAdsWriteActivation)}`);
 }
 
 function runtimeDiagnosticSummary(runtimeDiagnostics) {
@@ -355,23 +368,26 @@ function printHelp() {
   API_ORIGIN=https://api.example.com AGENT_SERVICE_URL=https://agent.example.com WEB_ORIGIN=https://app.example.com npm run smoke:deploy
 
 Optional:
-  EXPECT_PRODUCTION_READY=true  Require /readiness production decision to be Go and all production checks to pass.
+  EXPECT_PRODUCTION_READY=true               Initial production Go gate. Requires mediaWriteEnabled=false.
+  EXPECT_GOOGLE_ADS_WRITE_ACTIVATION=true    Separate post-Go write activation gate. Requires mediaWriteEnabled=true.
 
 Inputs:
   API_ORIGIN                  Deployed API origin. Falls back to VITE_API_BASE_URL.
   AGENT_SERVICE_URL           Deployed OpenAI Agent Service origin. Required; legacy ADK_AGENT_URL is not accepted.
-  WEB_ORIGIN                  Deployed Cloudflare Pages web origin. Required when EXPECT_PRODUCTION_READY=true.
-  EXPECT_PRODUCTION_READY     Set to true for the final production gate.
+  WEB_ORIGIN                              Deployed Cloudflare Pages web origin. Required for either production gate.
+  EXPECT_PRODUCTION_READY                 Set only for the initial production Go gate.
+  EXPECT_GOOGLE_ADS_WRITE_ACTIVATION      Set only after separate approval for the post-Go write activation gate.
 
 The script calls:
   <API_ORIGIN>/health
   <API_ORIGIN>/readiness
   <AGENT_SERVICE_URL>/health
-  <WEB_ORIGIN> and its referenced JS/CSS assets when EXPECT_PRODUCTION_READY=true
+  <WEB_ORIGIN> and its referenced JS/CSS assets for either production gate
 
-For the production gate it requires API readiness Go, the staging-e2e-evidence-window readiness check,
-API health production capability flags,
-and Agent health mode=openai/openai_agents, selectedRuntime=openai/openai_agents, runtimeConfigured=true, and dataSafetyConfigured=true.
+For both gates it requires API readiness Go, the staging-e2e-evidence-window readiness check,
+and API health production capability flags. Initial production Go requires mediaWriteEnabled=false;
+the later Google Ads write activation gate requires mediaWriteEnabled=true.
+Both gates also require Agent health mode=openai/openai_agents, selectedRuntime=openai/openai_agents, runtimeConfigured=true, and dataSafetyConfigured=true.
 It also requires the deployed web origin to return app HTML with the root element and reachable JS/CSS asset references.
 It prints only non-secret health/readiness summaries.`);
 }

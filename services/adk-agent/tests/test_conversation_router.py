@@ -10,7 +10,7 @@ def test_route_plan_maps_greeting_to_light_orchestrator_without_metrics() -> Non
     assert route.advisor_mode == "beginner"
     assert route.entry_agent == "setup_advisor_beginner"
     assert route.requires_metrics_context is False
-    assert route.target_agents == ("router_agent",)
+    assert route.target_agents == ("root_agent",)
     assert route.runtime_agents == ()
     assert route.response_contract == "light_assistant_response"
     assert "初心者向け" in route.mode_contract
@@ -22,7 +22,7 @@ def test_route_plan_maps_diagnosis_to_context_analysis_action_and_qa() -> None:
     assert route.route == "diagnosis"
     assert route.requires_metrics_context is True
     assert route.target_agents == (
-        "context_agent",
+        "root_agent",
         "performance_analyst_agent",
         "action_plan_agent",
         "qa_agent",
@@ -37,16 +37,16 @@ def test_route_plan_keeps_media_spec_out_of_metrics_prefetch() -> None:
 
     assert route.route == "media_spec"
     assert route.requires_metrics_context is False
-    assert route.target_agents == ("media_spec_agent", "qa_agent")
+    assert route.target_agents == ("root_agent", "setup_advisor_agent", "qa_agent")
     assert route.runtime_agents == ("setup_advisor_agent", "qa_agent")
 
 
-def test_route_plan_keeps_logical_and_runtime_agent_names_separate() -> None:
+def test_route_plan_uses_only_the_initial_five_agent_names() -> None:
     route = build_route_plan("予算が使いきれない理由と学習状態への影響を見て")
 
     assert route.target_agents == (
-        "context_agent",
-        "budget_learning_agent",
+        "root_agent",
+        "performance_analyst_agent",
         "action_plan_agent",
         "qa_agent",
     )
@@ -56,6 +56,13 @@ def test_route_plan_keeps_logical_and_runtime_agent_names_separate() -> None:
         "action_plan_agent",
         "qa_agent",
     ]
+    assert set(route.target_agents) <= {
+        "root_agent",
+        "setup_advisor_agent",
+        "performance_analyst_agent",
+        "action_plan_agent",
+        "qa_agent",
+    }
 
 
 def test_route_plan_supports_experienced_mode_contract_and_entry_agent() -> None:

@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "partial-error",
+  "synthetic": true,
+  "workspaceId": "demo-workspace-0002",
+  "state": {
+    "dataStatus": "partial",
+    "lastCompleteDate": "2026-07-12",
+    "availableSections": ["summary", "campaigns"],
+    "unavailableSections": ["search_terms", "comparison"],
+    "notice": {
+      "code": "DEMO_PARTIAL_METRICS",
+      "severity": "warning",
+      "message": "架空の連携遅延により、一部データは前日までです。",
+      "retryable": true
+    },
+    "fallback": "show_last_complete_snapshot"
+  },
+  "assertions": [
+    "partial data is not presented as complete",
+    "the unavailable sections are explicit",
+    "the last complete synthetic snapshot remains usable"
+  ]
+}

@@ -1,16 +1,11 @@
-import { StrictMode, useEffect, useMemo, useRef, useState } from "react";
+import { StrictMode, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createRoot } from "react-dom/client";
 import { createClient, type Session } from "@supabase/supabase-js";
 import {
-  Bar,
-  BarChart,
   CartesianGrid,
-  Cell,
   Legend,
   Line,
   LineChart,
-  Pie,
-  PieChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -18,9 +13,10 @@ import {
 } from "recharts";
 import "./styles.css";
 
-type View = "dashboard" | "setup" | "bi" | "columns" | "connections" | "settings";
+type View = "dashboard" | "setup" | "help" | "connections" | "settings";
 type IconName = "dashboard" | "setup" | "chart" | "book" | "plug" | "ai" | "lock" | "check" | "arrow" | "settings" | "bell";
 type PlatformFilter = "all" | "google" | "meta" | "yahoo";
+type DashboardDateRange = { from: string; to: string };
 type Confidence = "high" | "medium" | "low";
 type AdvisorMode = "beginner" | "experienced";
 type AdvisorEntry = "setup_advisor_beginner" | "performance_analyst_experienced";
@@ -49,7 +45,20 @@ type ChatResponse = {
     priority: "high" | "medium" | "low";
     status: "suggested";
   };
+  structuredOutput?: {
+    write_candidate?: {
+      operation: "campaign_status" | "campaign_budget";
+      customer_id: string;
+      campaign_id: string;
+      expected_current_value: string | number;
+      proposed_value: string | number;
+      approval_reason: string;
+      rollback_condition: string;
+    } | null;
+  };
 };
+
+type WriteCandidate = NonNullable<NonNullable<ChatResponse["structuredOutput"]>["write_candidate"]>;
 
 type ChatThreadSummary = {
   id: string;
@@ -165,7 +174,7 @@ type SetupIntakeResponse = {
     title: string;
     status: "in_progress" | "ready" | "archived";
     score: number;
-    dimensionScores: Record<"goal" | "product" | "audience" | "budget" | "platforms" | "measurement", number>;
+    dimensionScores: Record<SetupQuestionField, number>;
     facts: Record<string, unknown>;
     missingFields: string[];
     readyForSetupSteps: boolean;
@@ -193,6 +202,9 @@ type MetricTotals = {
 type Campaign = MetricTotals & {
   campaignId: string;
   campaign: string;
+  adAccountId?: string;
+  customerId?: string;
+  status?: string | null;
   platform: Exclude<PlatformFilter, "all">;
   priority: "High" | "Medium" | "Low";
 };
@@ -200,6 +212,7 @@ type Campaign = MetricTotals & {
 type DashboardResponse = {
   workspaceId: string;
   range: number;
+  dateRange?: DashboardDateRange | null;
   platform: PlatformFilter;
   summary: MetricTotals;
   comparison: MetricTotals;
@@ -218,11 +231,21 @@ type DashboardResponse = {
   relatedTags: string[];
   adAccounts: Array<{
     id: string;
+    externalAccountId?: string;
     platform: Exclude<PlatformFilter, "all">;
     name: string;
+    currency?: string | null;
+    timezone?: string | null;
     status: "connected" | "pending";
     lastFetchedAt: string;
   }>;
+};
+
+type DashboardFilterOptions = {
+  accounts: Array<{ id: string; name: string; platform: Exclude<PlatformFilter, "all"> }>;
+  campaigns: Array<{ id: string; name: string; adAccountId: string; platform: Exclude<PlatformFilter, "all">; status?: string | null }>;
+  adGroups: Array<{ id: string; name: string; adAccountId: string; campaignId: string; platform: Exclude<PlatformFilter, "all">; status?: string | null }>;
+  ads: Array<{ id: string; name: string; adAccountId: string; campaignId: string; adGroupId: string; platform: Exclude<PlatformFilter, "all">; status?: string | null }>;
 };
 
 type ConnectionStatusResponse = {
@@ -252,9 +275,12 @@ type ConnectionStatusResponse = {
 type HelpArticle = {
   id: string;
   title: string;
+  summary?: string;
+  category?: string;
   difficulty: string;
   body: string;
   tags: string[];
+  sortOrder?: number;
 };
 
 type ColumnDetail = {
@@ -262,16 +288,10 @@ type ColumnDetail = {
   related: HelpArticle[];
 };
 
-type GoogleWriteAuditLog = {
-  id?: string;
-  event_type?: string;
-  created_at?: string;
-  payload?: Record<string, unknown>;
-};
-
 const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8787";
 const appEnv = String(import.meta.env.VITE_APP_ENV ?? import.meta.env.MODE ?? "local").toLowerCase();
 const allowBillingDemoBypass = appEnv !== "production";
+const allowMockDashboard = appEnv !== "production";
 const apiBaseUrl =
   /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?/.test(configuredApiBaseUrl) &&
   !["localhost", "127.0.0.1"].includes(window.location.hostname)
@@ -302,6 +322,75 @@ const demoPayload = {
   userId: "demo-user",
   threadId: "demo-thread",
 };
+const localSetupPreview = allowBillingDemoBypass && new URLSearchParams(window.location.search).get("preview") === "setup";
+const localAuthPreview = allowBillingDemoBypass && new URLSearchParams(window.location.search).get("preview") === "auth";
+
+const setupPreviewData: SetupIntakeResponse = {
+  intake: {
+    id: "setup-preview-intake",
+    title: "新規獲得キャンペーン準備",
+    status: "in_progress",
+    score: 8,
+    dimensionScores: {
+      basicInfo: 10,
+      product: 10,
+      goal: 10,
+      area: 10,
+      audience: 0,
+      strengths: 10,
+      keyMessage: 10,
+      budget: 10,
+      destination: 5,
+      assets: 5,
+      acquisitionMethods: 5,
+      adExperience: 0,
+    },
+    facts: {
+      basicInfo: "会社名: サンプル工務店\nホームページURL: https://example.com\n施工エリア: 東京都・神奈川県",
+      product: "注文住宅",
+      goal: "お問い合わせ獲得",
+      area: "都道府県: 東京都\n市区町村: 世田谷区\n半径: 20km",
+      strengths: "高気密・高断熱 / 自由設計 / 地域密着",
+      keyMessage: "家族にちょうどいい、高性能な自由設計住宅",
+      budget: "10〜30万円",
+      destination: "LP",
+      assets: "写真: 十分ある\n動画: ある\nロゴ: ある\nLP: イベントページ",
+      acquisitionMethods: "Instagram運用 / 紹介",
+    },
+    missingFields: ["audience", "adExperience"],
+    readyForSetupSteps: false,
+    setupSteps: [
+      {
+        id: "preview-step-1",
+        title: "キャンペーン目的を確認",
+        steps: ["獲得したい問い合わせの定義を確認する", "初月予算と上限CPAを決める"],
+      },
+    ],
+    archivedAt: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+  messages: [
+    {
+      id: "preview-assistant-1",
+      role: "assistant",
+      content: "広告準備を始めます。まず、今回の広告で増やしたい成果と、商材・予算・想定ターゲットを教えてください。",
+      createdAt: new Date().toISOString(),
+    },
+    {
+      id: "preview-user-1",
+      role: "user",
+      content: "月10件くらい問い合わせを増やしたいです。商材は広告運用支援で、予算は初月10万円くらいです。",
+      createdAt: new Date().toISOString(),
+    },
+    {
+      id: "preview-assistant-2",
+      role: "assistant",
+      content: "ありがとうございます。目的・商材・予算は見えてきました。次に、誰に届けたい広告かと、問い合わせをどう計測するかを確認したいです。",
+      createdAt: new Date().toISOString(),
+    },
+  ],
+};
 
 function createThreadId() {
   return crypto.randomUUID();
@@ -328,17 +417,106 @@ type BillingStatus = {
     id: string;
     stripeSubscriptionId?: string | null;
     status: string;
+    planId?: "minimum" | "standard" | "premium" | null;
+    interval?: "month" | "year" | null;
     currentPeriodEnd?: string | null;
     cancelAtPeriodEnd: boolean;
   } | null;
+  plan: {
+    id: "minimum" | "standard" | "premium";
+    label: string;
+    interval: "month" | "year" | null;
+    estimatedConsultations: number | null;
+    entitlements: PlanEntitlements;
+  } | null;
+  usage: UsageSummary | null;
+  premiumOnboardingBookingUrl?: string | null;
+};
+
+type PlanEntitlements = {
+  maxUsers: number;
+  maxAdAccounts: number;
+  aiSetup: boolean;
+  reportIntervalDays: number;
+  aiChat: boolean;
+  chatCreditLimit: number;
+  googleAdsWrite: boolean;
+  humanOnboarding: boolean;
+};
+
+type UsageSummary = {
+  usageRate: number;
+  usagePercent: number;
+  remainingConsultationsEstimate: number | null;
+  resetAt: string;
+  chatAvailable: boolean;
+};
+
+type BillingPlanCatalog = {
+  id: "minimum" | "standard" | "premium";
+  label: string;
+  recommended: boolean;
+  estimatedConsultations: number | null;
+  prices: { month: { amount: number; currency: string; configured: boolean } };
+  setupFee: { amount: number; currency: string; configured: boolean };
+  entitlements: PlanEntitlements;
+};
+
+type BillingInterval = "month";
+
+const billingPreferenceStorageKey = "adops-billing-preference-v1";
+
+function readBillingPreference(): { planId: BillingPlanCatalog["id"]; interval: BillingInterval } {
+  if (typeof window === "undefined") return { planId: "standard", interval: "month" };
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(billingPreferenceStorageKey) ?? "{}") as {
+      planId?: string;
+      interval?: string;
+    };
+    return {
+      planId: parsed.planId === "minimum" || parsed.planId === "premium" ? parsed.planId : "standard",
+      interval: "month",
+    };
+  } catch {
+    return { planId: "standard", interval: "month" };
+  }
+}
+
+type CustomerReport = {
+  id: string;
+  periodStart: string;
+  periodEnd: string;
+  status: string;
+  content: Record<string, unknown>;
+  emailStatus: string;
+  createdAt: string;
 };
 
 const welcomeMessage: ChatMessage = {
   id: "local-welcome",
   role: "assistant",
-  content:
-    "こんにちは。最新広告データ、保存済みナレッジ、必要に応じた外部検索を分けて扱いながら、原因分析と人間向け作業手順まで整理します。",
+  content: "気になる数字や変化を教えてください。原因と、次に確認する順番を整理します。",
 };
+
+const aiSidebarWidthStorageKey = "adops-ai-sidebar-width-v1";
+const aiSidebarDefaultWidth = 480;
+const aiSidebarMinWidth = 400;
+const aiSidebarMaxWidth = 760;
+
+function availableAiSidebarMaxWidth() {
+  if (typeof window === "undefined") return aiSidebarMaxWidth;
+  return Math.max(aiSidebarMinWidth, Math.min(aiSidebarMaxWidth, window.innerWidth - 24));
+}
+
+function clampAiSidebarWidth(width: number) {
+  return Math.min(availableAiSidebarMaxWidth(), Math.max(aiSidebarMinWidth, Math.round(width)));
+}
+
+function readAiSidebarWidth() {
+  if (typeof window === "undefined") return aiSidebarDefaultWidth;
+  const storedWidth = Number(window.localStorage.getItem(aiSidebarWidthStorageKey));
+  return clampAiSidebarWidth(Number.isFinite(storedWidth) && storedWidth > 0 ? storedWidth : aiSidebarDefaultWidth);
+}
 
 const brandChartColors = {
   green: "#2d6a4f",
@@ -351,7 +529,7 @@ const brandChartColors = {
 const navItems: Array<{ key: View; label: string; icon: IconName }> = [
   { key: "dashboard", label: "ダッシュボード", icon: "dashboard" },
   { key: "setup", label: "広告準備", icon: "setup" },
-  { key: "columns", label: "Adコラム", icon: "book" },
+  { key: "help", label: "ヘルプ", icon: "book" },
   { key: "connections", label: "データ連携", icon: "plug" },
 ];
 
@@ -405,7 +583,7 @@ const metricCatalog: Record<MetricKey, {
   },
   cvr: {
     label: "CVR",
-    subLabel: "成約率",
+    subLabel: "コンバージョン率",
     help: "クリック後に成果につながった割合です。LPやフォーム、流入の質を見ます。",
     tone: "secondary",
     value: (summary) => formatPercent(summary.cvr, 2),
@@ -444,8 +622,12 @@ const metricCatalog: Record<MetricKey, {
   },
 };
 
+const dashboardMetricKeys = (Object.keys(metricCatalog) as MetricKey[]).filter((metric) => metric !== "roas");
+const primaryDashboardMetrics: MetricKey[] = ["cost", "conversions", "cpa", "ctr"];
+const secondaryDashboardMetrics: MetricKey[] = ["impressions", "clicks", "cpc", "cvr", "revenue"];
+
 const trendMetricCatalog: Record<TrendMetricKey, { label: string; color: string; format: (value: number) => string }> = {
-  cost: { label: "費用", color: "#6750a4", format: formatMoney },
+  cost: { label: "費用", color: "#008c7a", format: formatMoney },
   revenue: { label: "売上", color: "#0b8043", format: formatMoney },
   conversions: { label: "CV", color: "#b3261e", format: (value) => Math.round(value).toLocaleString("ja-JP") },
   cpa: { label: "CPA", color: "#b06000", format: formatMoney },
@@ -567,7 +749,7 @@ const demoDashboardData: DashboardResponse = {
     },
     {
       campaignId: "y-retarget",
-      campaign: "Yahoo_リターゲティング",
+      campaign: "LINEヤフー広告_リターゲティング",
       platform: "yahoo",
       priority: "Medium",
       impressions: 64100,
@@ -620,8 +802,8 @@ const demoDashboardData: DashboardResponse = {
       type: "CTR低下",
       platform: "yahoo",
       severity: "Medium",
-      detail: "YahooリターゲティングのCTRが3日連続で低下しています。",
-      tags: ["CTR", "Yahoo"],
+      detail: "LINEヤフー広告のリターゲティングCTRが3日連続で低下しています。",
+      tags: ["CTR", "LINEヤフー広告"],
     },
   ],
   severityCounts: { High: 2, Medium: 1, Low: 0 },
@@ -629,7 +811,7 @@ const demoDashboardData: DashboardResponse = {
   adAccounts: [
     { id: "act-google-1", platform: "google", name: "Google Ads / 自社EC", status: "connected", lastFetchedAt: "2026-04-26T08:30:00+09:00" },
     { id: "act-meta-1", platform: "meta", name: "Meta Ads / 新規獲得", status: "connected", lastFetchedAt: "2026-04-26T08:20:00+09:00" },
-    { id: "act-yahoo-1", platform: "yahoo", name: "Yahoo Ads / 検索広告", status: "pending", lastFetchedAt: "2026-04-25T18:10:00+09:00" },
+    { id: "act-yahoo-1", platform: "yahoo", name: "LINEヤフー広告 / 検索広告", status: "pending", lastFetchedAt: "2026-04-25T18:10:00+09:00" },
   ],
 };
 
@@ -668,11 +850,11 @@ const demoArticles: HelpArticle[] = [
   },
   {
     id: "yahoo-search-query-review",
-    title: "Yahoo検索広告の検索語句を見る観点",
+    title: "LINEヤフー広告の検索語句を見る観点",
     difficulty: "初級",
     tags: ["yahoo", "keyword", "search-query", "cpa"],
     body:
-      "Yahoo検索広告でも、まず検索語句を意図別に分けます。購入意欲が高い語句、比較検討の語句、情報収集の語句、明らかに対象外の語句に分類し、費用とCVの偏りを見ます。Googleと同じ除外をそのまま移すのではなく、Yahoo側の実績を確認してから人間が反映します。",
+      "LINEヤフー広告でも、まず検索語句を意図別に分けます。購入意欲が高い語句、比較検討の語句、情報収集の語句、明らかに対象外の語句に分類し、費用とCVの偏りを見ます。Googleと同じ除外をそのまま移すのではなく、LINEヤフー広告側の実績を確認してから人間が反映します。",
   },
   {
     id: "keyword-match-type",
@@ -732,11 +914,11 @@ const demoArticles: HelpArticle[] = [
   },
   {
     id: "yahoo-retargeting-frequency",
-    title: "Yahooリターゲティングは頻度と鮮度を見る",
+    title: "LINEヤフー広告のリターゲティングは頻度と鮮度を見る",
     difficulty: "初級",
     tags: ["yahoo", "retargeting", "frequency", "creative"],
     body:
-      "YahooのリターゲティングでCTRが落ちる場合、接触頻度の上昇やバナーの見慣れが原因かもしれません。期間別、リスト別、広告別にCTR、CVR、CPAを確認します。成果が悪い広告をすぐ止める前に、リストの期間や訴求の鮮度も合わせて見ます。",
+      "LINEヤフー広告のリターゲティングでCTRが落ちる場合、接触頻度の上昇やバナーの見慣れが原因かもしれません。期間別、リスト別、広告別にCTR、CVR、CPAを確認します。成果が悪い広告をすぐ止める前に、リストの期間や訴求の鮮度も合わせて見ます。",
   },
   {
     id: "lp-message-match",
@@ -776,7 +958,7 @@ const demoArticles: HelpArticle[] = [
     difficulty: "中級",
     tags: ["measurement", "attribution", "google", "meta", "yahoo"],
     body:
-      "Google、Meta、Yahooでは成果の計上タイミングやアトリビューションの考え方が異なります。同じCVでも媒体管理画面とGA4、CRMで日付や件数がずれることがあります。日次判断では速報値の揺れを前提にし、重要な判断は数日分の確定傾向を見ます。",
+      "Google、Meta、LINEヤフー広告では成果の計上タイミングやアトリビューションの考え方が異なります。同じCVでも媒体管理画面とGA4、CRMで日付や件数がずれることがあります。日次判断では速報値の揺れを前提にし、重要な判断は数日分の確定傾向を見ます。",
   },
   {
     id: "data-delay",
@@ -836,11 +1018,11 @@ const demoArticles: HelpArticle[] = [
   },
   {
     id: "cross-platform-role",
-    title: "Google、Meta、Yahooの役割を分けて考える",
+    title: "Google、Meta、LINEヤフー広告の役割を分けて考える",
     difficulty: "初級",
     tags: ["google", "meta", "yahoo", "budget"],
     body:
-      "媒体を横並びのCPAだけで比較すると、役割の違いを見落とします。Google検索は顕在層、Metaは潜在層への接触、Yahooは検索とリターゲティングの補完など、目的を分けて評価します。予算配分はCPAだけでなく、CV数、売上、見込み顧客の質、再現性も合わせて判断します。",
+      "媒体を横並びのCPAだけで比較すると、役割の違いを見落とします。Google検索は顕在層、Metaは潜在層への接触、LINEヤフー広告は検索とリターゲティングの補完など、目的を分けて評価します。予算配分はCPAだけでなく、CV数、売上、見込み顧客の質、再現性も合わせて判断します。",
   },
   {
     id: "query-intent-classification",
@@ -893,9 +1075,17 @@ const demoArticles: HelpArticle[] = [
 ];
 
 function App() {
-  const [view, setView] = useState<View>("dashboard");
+  const [view, setView] = useState<View>(localSetupPreview ? "setup" : "dashboard");
   const [range, setRange] = useState(7);
+  const [dateRange, setDateRange] = useState<DashboardDateRange>({ from: "", to: "" });
   const [platform, setPlatform] = useState<PlatformFilter>("all");
+  const [selectedAdAccountId, setSelectedAdAccountId] = useState("");
+  const [selectedCampaignId, setSelectedCampaignId] = useState("");
+  const [selectedAdGroupId, setSelectedAdGroupId] = useState("");
+  const [selectedAdId, setSelectedAdId] = useState("");
+  const [dashboardFilterOptions, setDashboardFilterOptions] = useState<DashboardFilterOptions>({
+    accounts: [], campaigns: [], adGroups: [], ads: [],
+  });
   const [columnTags, setColumnTags] = useState<string[]>([]);
   const [selectedArticleId, setSelectedArticleId] = useState<string | null>(null);
   const [bookmarkedArticleIds, setBookmarkedArticleIds] = useState<string[]>(() => readColumnBookmarks());
@@ -903,6 +1093,7 @@ function App() {
   const [dashboardLoading, setDashboardLoading] = useState(true);
   const [dashboardError, setDashboardError] = useState("");
   const [usingDemoData, setUsingDemoData] = useState(false);
+  const [mockDashboardOpen, setMockDashboardOpen] = useState(false);
   const [readiness, setReadiness] = useState<ReadinessResponse | null>(null);
   const [aiOpen, setAiOpen] = useState(false);
   const [advisorMode, setAdvisorMode] = useState<AdvisorMode>("beginner");
@@ -913,6 +1104,7 @@ function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([welcomeMessage]);
   const [threadTodos, setThreadTodos] = useState<Record<string, TodoItem[]>>({});
   const [latestRecommendation, setLatestRecommendation] = useState<ChatResponse["recommendation"] | null>(null);
+  const [latestWriteCandidate, setLatestWriteCandidate] = useState<WriteCandidate | null>(null);
   const [storedRecommendations, setStoredRecommendations] = useState<StoredRecommendation[]>([]);
   const [storedTasks, setStoredTasks] = useState<StoredTask[]>([]);
   const [loading, setLoading] = useState(false);
@@ -922,23 +1114,75 @@ function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [workspaceSession, setWorkspaceSession] = useState<WorkspaceSession | null>(null);
   const [billingStatus, setBillingStatus] = useState<BillingStatus | null>(null);
+  const [billingPlans, setBillingPlans] = useState<BillingPlanCatalog[]>([]);
+  const initialBillingPreference = useMemo(() => readBillingPreference(), []);
+  const [preferredPlanId, setPreferredPlanId] = useState<BillingPlanCatalog["id"]>(initialBillingPreference.planId);
+  const preferredInterval: BillingInterval = "month";
   const [billingLoading, setBillingLoading] = useState(true);
   const [billingActionLoading, setBillingActionLoading] = useState<"checkout" | "portal" | "">("");
   const [billingError, setBillingError] = useState("");
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState("");
 
+  const previewWorkspaceSession: WorkspaceSession = {
+    ...demoPayload,
+    workspaceName: "ちょこっとインハウス",
+    userEmail: "preview@fieldx.site",
+  };
+  const connectionSession = session ?? (localSetupPreview ? { access_token: "setup-preview" } : null);
+  const displayWorkspaceSession = workspaceSession ?? previewWorkspaceSession;
   const activePayload = workspaceSession ?? demoPayload;
-  const billingActive = Boolean(workspaceSession && billingStatus?.access === "active");
+  const billingActive = localSetupPreview || Boolean(workspaceSession && billingStatus?.access === "active");
+  const aiChatAvailable = localSetupPreview || billingStatus?.plan?.entitlements.aiChat === true;
+  const googleWriteAvailable = localSetupPreview || billingStatus?.plan?.entitlements.googleAdsWrite === true;
+  const displayedDashboardData = allowMockDashboard && mockDashboardOpen ? filterDemoDashboardData(range, platform) : dashboardData;
+  const displayedDashboardLoading = allowMockDashboard && mockDashboardOpen ? false : dashboardLoading;
+  const displayedDashboardError = allowMockDashboard && mockDashboardOpen ? "" : dashboardError;
+  const displayedUsingDemoData = (allowMockDashboard && mockDashboardOpen) || usingDemoData;
 
   function authHeaders(extra?: HeadersInit): HeadersInit {
     return {
       ...(extra ?? {}),
       ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+      ...(localSetupPreview ? { "x-demo-user-id": demoPayload.userId } : {}),
     };
   }
 
   useEffect(() => {
+    const controller = new AbortController();
+    fetch(`${apiBaseUrl}/billing/plans`, { signal: controller.signal })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data?.error ?? "料金プランを取得できませんでした。");
+        setBillingPlans((data.plans as BillingPlanCatalog[]) ?? []);
+      })
+      .catch((caught) => {
+        if (caught instanceof DOMException && caught.name === "AbortError") return;
+        setBillingError(caught instanceof Error ? caught.message : "料金プランを取得できませんでした。");
+      });
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      billingPreferenceStorageKey,
+      JSON.stringify({ planId: preferredPlanId, interval: preferredInterval }),
+    );
+  }, [preferredPlanId]);
+
+  useEffect(() => {
+    if (!aiOpen || !aiChatAvailable) return;
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById("ai-chat-input")?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [aiChatAvailable, aiOpen]);
+
+  useEffect(() => {
+    if (localAuthPreview) {
+      setAuthLoading(false);
+      return;
+    }
     if (!supabase) {
       setAuthLoading(false);
       setAuthError("VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY が未設定です。");
@@ -1021,37 +1265,95 @@ function App() {
   }, [session]);
 
   useEffect(() => {
+    if (!session || !workspaceSession) return;
+    const invitationToken = new URLSearchParams(window.location.search).get("invite");
+    if (!invitationToken) return;
+    fetch(`${apiBaseUrl}/workspace/invitations/accept`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ token: invitationToken }),
+    })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data?.error ?? "招待を受けられませんでした。");
+        setWorkspaceSession((current) => current ? {
+          ...current,
+          workspaceId: data.workspace.id,
+          workspaceName: data.workspace.name,
+          threadId: data.workspace.id,
+        } : current);
+        window.history.replaceState({}, document.title, window.location.pathname);
+      })
+      .catch((caught) => setAuthError(caught instanceof Error ? caught.message : "招待を受けられませんでした。"));
+  }, [session?.access_token, workspaceSession?.workspaceId]);
+
+  useEffect(() => {
     writeColumnBookmarks(bookmarkedArticleIds);
   }, [bookmarkedArticleIds]);
 
   useEffect(() => {
     if (!workspaceSession) return;
     const controller = new AbortController();
+    let retryTimer: number | undefined;
+    const billingReturn = new URLSearchParams(window.location.search).get("billing");
+    const maxAttempts = billingReturn === "success" ? 20 : 1;
     setBillingLoading(true);
     setBillingError("");
-    fetch(`${apiBaseUrl}/billing/status`, { headers: authHeaders(), signal: controller.signal })
-      .then(async (res) => {
-        const data = await res.json();
-        if (!res.ok) throw new Error(data?.error ?? "課金状態の取得に失敗しました。");
-        setBillingStatus(data as BillingStatus);
-      })
-      .catch((caught) => {
+
+    const loadBillingState = async (attempt: number) => {
+      try {
+        const [statusResponse, plansResponse] = await Promise.all([
+          fetch(`${apiBaseUrl}/billing/status`, { headers: authHeaders(), signal: controller.signal }),
+          attempt === 0 ? fetch(`${apiBaseUrl}/billing/plans`, { signal: controller.signal }) : Promise.resolve(null),
+        ]);
+        const statusData = await statusResponse.json();
+        const plansData = plansResponse ? await plansResponse.json() : null;
+        if (!statusResponse.ok) throw new Error(statusData?.error ?? "課金状態の取得に失敗しました。");
+        if (plansResponse && !plansResponse.ok) throw new Error(plansData?.error ?? "料金プランの取得に失敗しました。");
+
+        const nextStatus = statusData as BillingStatus;
+        setBillingStatus(nextStatus);
+        if (plansData) setBillingPlans((plansData.plans as BillingPlanCatalog[]) ?? []);
+
+        if (nextStatus.access === "active") {
+          if (billingReturn) clearBillingReturnFromUrl();
+          setBillingLoading(false);
+          return;
+        }
+        if (billingReturn === "success" && attempt + 1 < maxAttempts) {
+          retryTimer = window.setTimeout(() => void loadBillingState(attempt + 1), 750);
+          return;
+        }
+        if (billingReturn === "success") {
+          setBillingError("決済は完了していますが、契約情報をまだ反映できていません。しばらく待ってから再読み込みしてください。");
+        }
+        setBillingLoading(false);
+      } catch (caught) {
         if (caught instanceof DOMException && caught.name === "AbortError") return;
         setBillingStatus(null);
         setBillingError(caught instanceof Error ? caught.message : "課金状態の取得に失敗しました。");
-      })
-      .finally(() => setBillingLoading(false));
-    return () => controller.abort();
+        setBillingLoading(false);
+      }
+    };
+
+    void loadBillingState(0);
+    return () => {
+      controller.abort();
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+    };
   }, [workspaceSession?.workspaceId, session?.access_token]);
 
-  async function openBillingSession(kind: "checkout" | "portal") {
+  async function openBillingSession(
+    kind: "checkout" | "portal",
+    selection?: { planId: BillingPlanCatalog["id"]; interval: "month" },
+  ) {
     setBillingError("");
     setBillingActionLoading(kind);
     const path = kind === "checkout" ? "/billing/checkout-session" : "/billing/portal-session";
     const res = await fetch(`${apiBaseUrl}${path}`, {
       method: "POST",
       headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ workspaceId: workspaceSession?.workspaceId }),
+      body: JSON.stringify(selection ?? {}),
     });
     const data = await res.json();
     setBillingActionLoading("");
@@ -1065,11 +1367,45 @@ function App() {
   useEffect(() => {
     if (!billingActive) return;
     const controller = new AbortController();
+    const query = new URLSearchParams({ platform });
+    if (selectedAdAccountId) query.set("adAccountId", selectedAdAccountId);
+    fetch(`${apiBaseUrl}/dashboard/filter-options?${query.toString()}`, {
+      headers: authHeaders(),
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data?.error ?? "絞り込み候補を取得できませんでした。");
+        setDashboardFilterOptions(data as DashboardFilterOptions);
+      })
+      .catch((caught) => {
+        if (caught instanceof DOMException && caught.name === "AbortError") return;
+        setDashboardFilterOptions({ accounts: [], campaigns: [], adGroups: [], ads: [] });
+      });
+    return () => controller.abort();
+  }, [billingActive, platform, selectedAdAccountId, workspaceSession?.workspaceId, session?.access_token]);
+
+  useEffect(() => {
+    if (!billingActive) return;
+    const controller = new AbortController();
     setDashboardLoading(true);
     setDashboardError("");
     setDashboardData(null);
+    const query = new URLSearchParams({
+      workspaceId: activePayload.workspaceId,
+      range: String(range),
+      platform,
+    });
+    if (selectedAdAccountId) query.set("adAccountId", selectedAdAccountId);
+    if (selectedCampaignId) query.set("campaignId", selectedCampaignId);
+    if (selectedAdGroupId) query.set("adGroupId", selectedAdGroupId);
+    if (selectedAdId) query.set("adId", selectedAdId);
+    if (dateRange.from && dateRange.to) {
+      query.set("from", dateRange.from);
+      query.set("to", dateRange.to);
+    }
     fetch(
-      `${apiBaseUrl}/dashboard?workspaceId=${activePayload.workspaceId}&range=${range}&platform=${platform}`,
+      `${apiBaseUrl}/dashboard?${query.toString()}`,
       { headers: authHeaders(), signal: controller.signal },
     )
       .then(async (res) => {
@@ -1091,7 +1427,35 @@ function App() {
       })
       .finally(() => setDashboardLoading(false));
     return () => controller.abort();
-  }, [range, platform, billingActive, workspaceSession?.workspaceId, session?.access_token]);
+  }, [range, dateRange.from, dateRange.to, platform, selectedAdAccountId, selectedCampaignId, selectedAdGroupId, selectedAdId, billingActive, workspaceSession?.workspaceId, session?.access_token]);
+
+  useEffect(() => {
+    if (!selectedAdAccountId) return;
+    if (dashboardFilterOptions.accounts.length === 0) return;
+    const account = dashboardFilterOptions.accounts.find((item) => item.id === selectedAdAccountId);
+    if (!account || (platform !== "all" && account.platform !== platform)) setSelectedAdAccountId("");
+  }, [dashboardFilterOptions.accounts, platform, selectedAdAccountId]);
+
+  useEffect(() => {
+    if (selectedCampaignId && !dashboardFilterOptions.campaigns.some((item) => item.id === selectedCampaignId)) {
+      setSelectedCampaignId("");
+      setSelectedAdGroupId("");
+      setSelectedAdId("");
+    }
+  }, [dashboardFilterOptions.campaigns, selectedCampaignId]);
+
+  useEffect(() => {
+    if (selectedAdGroupId && !dashboardFilterOptions.adGroups.some((item) => item.id === selectedAdGroupId && (!selectedCampaignId || item.campaignId === selectedCampaignId))) {
+      setSelectedAdGroupId("");
+      setSelectedAdId("");
+    }
+  }, [dashboardFilterOptions.adGroups, selectedCampaignId, selectedAdGroupId]);
+
+  useEffect(() => {
+    if (selectedAdId && !dashboardFilterOptions.ads.some((item) => item.id === selectedAdId && (!selectedAdGroupId || item.adGroupId === selectedAdGroupId))) {
+      setSelectedAdId("");
+    }
+  }, [dashboardFilterOptions.ads, selectedAdGroupId, selectedAdId]);
 
   useEffect(() => {
     if (!billingActive) return;
@@ -1140,7 +1504,8 @@ function App() {
       .then(async (res) => {
         const data = await res.json();
         if (!res.ok) throw new Error(data?.error ?? "チャット履歴の取得に失敗しました。");
-        setMessages((data as ChatThreadResponse).messages);
+        const nextMessages = (data as ChatThreadResponse).messages;
+        setMessages(nextMessages.length > 0 ? nextMessages : [welcomeMessage]);
       })
       .catch(() => {
         if (threadId === demoPayload.threadId) setMessages((prev) => (prev.length ? prev : [welcomeMessage]));
@@ -1179,6 +1544,9 @@ function App() {
     const nextThreadId = createThreadId();
     setThreadId(nextThreadId);
     setMessages([welcomeMessage]);
+    setInput("");
+    setError("");
+    setThinkingStatus("");
     setThreads((prev) => [
       {
         id: nextThreadId,
@@ -1219,11 +1587,22 @@ function App() {
     );
   }
 
+  function openAi(prefill?: string) {
+    if (prefill?.trim()) setInput(prefill.trim());
+    setAiOpen(true);
+  }
+
+  function openNewAiConsultation(prefill?: string) {
+    startNewThread();
+    if (prefill?.trim()) setInput(prefill.trim());
+    setAiOpen(true);
+  }
+
   async function sendMessage() {
     const text = input.trim();
     if (!text || loading) return;
-    if (!billingActive) {
-      setError("課金状態がactiveになるまでAI相談は利用できません。");
+    if (!billingActive || !aiChatAvailable) {
+      setError("通常AIチャットはスタンダードまたはプレミアムで利用できます。");
       return;
     }
 
@@ -1251,18 +1630,27 @@ function App() {
     );
 
     try {
+      const requestId = crypto.randomUUID();
       const res = await fetch(`${apiBaseUrl}/agent/chat/stream`, {
         method: "POST",
-        headers: authHeaders({ "Content-Type": "application/json" }),
+        headers: authHeaders({ "Content-Type": "application/json", "Idempotency-Key": requestId }),
         body: JSON.stringify({
           ...activePayload,
+          requestId,
           threadId: activeThreadId,
           message: text,
+          adAccountId: selectedAdAccountId || undefined,
           context: {
             range,
             platform,
-            dateRange: `last_${range}_days`,
-            comparisonRange: `previous_${range}_days`,
+            dateRange: dateRange.from && dateRange.to ? `${dateRange.from}/${dateRange.to}` : `last_${range}_days`,
+            comparisonRange: dateRange.from && dateRange.to ? "same_length_previous_period" : `previous_${range}_days`,
+            from: dateRange.from || undefined,
+            to: dateRange.to || undefined,
+            adAccountId: selectedAdAccountId || undefined,
+            campaignId: selectedCampaignId || undefined,
+            adGroupId: selectedAdGroupId || undefined,
+            adId: selectedAdId || undefined,
             advisorMode,
             agentEntry: advisorEntryByMode[advisorMode],
           },
@@ -1274,6 +1662,7 @@ function App() {
       if (!chat) throw new Error("AI応答を取得できませんでした。");
       setMessages(chat.thread?.messages ?? ((prev) => [...prev, chat.message]));
       setLatestRecommendation(chat.recommendation);
+      setLatestWriteCandidate(chat.structuredOutput?.write_candidate ?? null);
       refreshThreads();
       refreshWorkItems();
     } catch (caught) {
@@ -1283,95 +1672,138 @@ function App() {
     }
   }
 
-  if (authLoading) {
-    return <AuthShell title="認証を確認しています" message="Supabase sessionを復元しています。" />;
+  async function handleMagicLink(email: string) {
+    if (!supabase) {
+      setAuthError("Supabase Auth clientが未設定です。");
+      return;
+    }
+    setAuthError("");
+    const { error: signInError } = await supabase.auth.signInWithOtp({
+      email,
+      options: { emailRedirectTo: authRedirectUrl },
+    });
+    if (signInError) setAuthError(signInError.message);
+    else setAuthError("確認メールを送信しました。メール内リンクからログインしてください。");
   }
 
-  if (!session || !workspaceSession) {
+  async function handleGoogleLogin() {
+    if (!supabase) {
+      setAuthError("Supabase Auth clientが未設定です。");
+      return;
+    }
+    setAuthError("");
+    const { error: signInError } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: {
+        redirectTo: authRedirectUrl,
+        queryParams: { prompt: "select_account" },
+      },
+    });
+    if (signInError) setAuthError(signInError.message);
+  }
+
+  async function handlePasswordLogin(email: string, password: string) {
+    if (!supabase) {
+      setAuthError("Supabase Auth clientが未設定です。");
+      return;
+    }
+    setAuthError("");
+    const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
+    if (signInError) setAuthError(signInError.message);
+  }
+
+  async function handlePasswordSignup(email: string, password: string) {
+    if (!supabase) {
+      setAuthError("Supabase Auth clientが未設定です。");
+      return;
+    }
+    setAuthError("");
+    const { error: signUpError } = await supabase.auth.signUp({
+      email,
+      password,
+      options: { emailRedirectTo: authRedirectUrl },
+    });
+    if (signUpError) setAuthError(signUpError.message);
+    else setAuthError("ユーザーを作成しました。確認メールが必要な設定の場合はメール内リンクを開いてください。");
+  }
+
+  async function handleLogout() {
+    await supabase?.auth.signOut();
+  }
+
+  if (localAuthPreview) {
     return (
       <AuthPage
         error={authError}
-        session={session}
-        onMagicLink={async (email) => {
-          if (!supabase) {
-            setAuthError("Supabase Auth clientが未設定です。");
-            return;
-          }
-          setAuthError("");
-          const { error: signInError } = await supabase.auth.signInWithOtp({
-            email,
-            options: { emailRedirectTo: authRedirectUrl },
-          });
-          if (signInError) setAuthError(signInError.message);
-          else setAuthError("確認メールを送信しました。メール内リンクからログインしてください。");
-        }}
-        onGoogleLogin={async () => {
-          if (!supabase) {
-            setAuthError("Supabase Auth clientが未設定です。");
-            return;
-          }
-          setAuthError("");
-          const { error: signInError } = await supabase.auth.signInWithOAuth({
-            provider: "google",
-            options: {
-              redirectTo: authRedirectUrl,
-              queryParams: { prompt: "select_account" },
-            },
-          });
-          if (signInError) setAuthError(signInError.message);
-        }}
-        onPasswordLogin={async (email, password) => {
-          if (!supabase) {
-            setAuthError("Supabase Auth clientが未設定です。");
-            return;
-          }
-          setAuthError("");
-          const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
-          if (signInError) setAuthError(signInError.message);
-        }}
-        onPasswordSignup={async (email, password) => {
-          if (!supabase) {
-            setAuthError("Supabase Auth clientが未設定です。");
-            return;
-          }
-          setAuthError("");
-          const { error: signUpError } = await supabase.auth.signUp({
-            email,
-            password,
-            options: { emailRedirectTo: authRedirectUrl },
-          });
-          if (signUpError) setAuthError(signUpError.message);
-          else setAuthError("ユーザーを作成しました。確認メールが必要な設定の場合はメール内リンクを開いてください。");
-        }}
-        onLogout={async () => {
-          await supabase?.auth.signOut();
-        }}
+        session={null}
+        plans={billingPlans}
+        preferredPlanId={preferredPlanId}
+        preferredInterval={preferredInterval}
+        onPlanChange={setPreferredPlanId}
+        onGoogleLogin={handleGoogleLogin}
+        onMagicLink={handleMagicLink}
+        onPasswordLogin={handlePasswordLogin}
+        onPasswordSignup={handlePasswordSignup}
+        onLogout={handleLogout}
       />
     );
   }
 
-  if (billingLoading) {
+  if (!localSetupPreview && authLoading) {
+    return <AuthShell title="認証を確認しています" message="Supabase sessionを復元しています。" />;
+  }
+
+  if (!localSetupPreview && (!session || !workspaceSession)) {
+    return (
+      <AuthPage
+        error={authError}
+        session={session}
+        plans={billingPlans}
+        preferredPlanId={preferredPlanId}
+        preferredInterval={preferredInterval}
+        onPlanChange={setPreferredPlanId}
+        onMagicLink={handleMagicLink}
+        onGoogleLogin={handleGoogleLogin}
+        onPasswordLogin={handlePasswordLogin}
+        onPasswordSignup={handlePasswordSignup}
+        onLogout={handleLogout}
+      />
+    );
+  }
+
+  if (!localSetupPreview && billingLoading) {
     return <LoadingScreen message="課金状態を確認しています。" />;
   }
 
-  if (!billingStatus || billingStatus.access !== "active") {
+  if (!localSetupPreview && (!billingStatus || billingStatus.access !== "active")) {
     return (
       <BillingGate
-        workspace={workspaceSession}
+        workspace={displayWorkspaceSession}
         status={billingStatus}
+        plans={billingPlans}
         error={billingError}
         loading={billingActionLoading}
-        onCheckout={() => void openBillingSession("checkout")}
+        preferredPlanId={preferredPlanId}
+        preferredInterval={preferredInterval}
+        onCheckout={(planId, interval) => void openBillingSession("checkout", { planId, interval })}
         onPortal={() => void openBillingSession("portal")}
         onContinueDemo={
           allowBillingDemoBypass && (billingStatus?.configured === false || !billingStatus)
             ? () =>
                 setBillingStatus({
-                  workspaceId: workspaceSession.workspaceId,
+                  workspaceId: displayWorkspaceSession.workspaceId,
                   configured: false,
                   access: "active",
                   customer: null,
                   subscription: null,
+                  plan: {
+                    id: "standard",
+                    label: "スタンダード",
+                    interval: "month",
+                    estimatedConsultations: 30,
+                    entitlements: { maxUsers: 2, maxAdAccounts: 3, aiSetup: true, reportIntervalDays: 3, aiChat: true, chatCreditLimit: 100, googleAdsWrite: true, humanOnboarding: false },
+                  },
+                  usage: { usageRate: 0, usagePercent: 0, remainingConsultationsEstimate: 30, resetAt: new Date().toISOString(), chatAvailable: true },
                 })
             : undefined
         }
@@ -1382,49 +1814,74 @@ function App() {
 
   return (
     <div className="app-shell">
-      <Sidebar active={view} workspace={workspaceSession} onNavigate={setView} onLogout={() => supabase?.auth.signOut()} />
+      <Sidebar active={view} workspace={displayWorkspaceSession} onNavigate={setView} onLogout={() => supabase?.auth.signOut()} />
       <main id="main-content" className="main-content">
         {view === "dashboard" && (
           <DashboardPage
-            data={dashboardData}
-            loading={dashboardLoading}
-            error={dashboardError}
+            data={displayedDashboardData}
+            loading={displayedDashboardLoading}
+            error={displayedDashboardError}
             range={range}
+            dateRange={dateRange}
             platform={platform}
+            selectedAdAccountId={selectedAdAccountId}
+            selectedCampaignId={selectedCampaignId}
+            selectedAdGroupId={selectedAdGroupId}
+            selectedAdId={selectedAdId}
+            filterOptions={dashboardFilterOptions}
             latestRecommendation={latestRecommendation}
-            usingDemoData={isMockDataExperience(usingDemoData, readiness)}
-            onRangeChange={setRange}
-            onPlatformChange={setPlatform}
-            onOpenAi={() => setAiOpen(true)}
-            onOpenColumns={(tags) => {
-              setColumnTags(tags);
-              setSelectedArticleId(null);
-              setView("columns");
+            latestWriteCandidate={latestWriteCandidate}
+            usingDemoData={displayedUsingDemoData}
+            mockDashboardOpen={mockDashboardOpen}
+            allowMockDashboard={allowMockDashboard}
+            googleWriteAvailable={googleWriteAvailable}
+            authHeaders={authHeaders}
+            onRangeChange={(nextRange) => {
+              setRange(nextRange);
+              setDateRange({ from: "", to: "" });
             }}
+            onDateRangeChange={setDateRange}
+            onPlatformChange={(nextPlatform) => {
+              setPlatform(nextPlatform);
+              setSelectedAdAccountId("");
+              setSelectedCampaignId("");
+              setSelectedAdGroupId("");
+              setSelectedAdId("");
+            }}
+            onAdAccountChange={(nextAccountId) => {
+              setSelectedAdAccountId(nextAccountId);
+              setSelectedCampaignId("");
+              setSelectedAdGroupId("");
+              setSelectedAdId("");
+            }}
+            onCampaignChange={(nextCampaignId) => {
+              setSelectedCampaignId(nextCampaignId);
+              setSelectedAdGroupId("");
+              setSelectedAdId("");
+            }}
+            onAdGroupChange={(nextAdGroupId) => {
+              setSelectedAdGroupId(nextAdGroupId);
+              setSelectedAdId("");
+            }}
+            onAdChange={setSelectedAdId}
+            onOpenMockDashboard={() => setMockDashboardOpen(true)}
+            onCloseMockDashboard={() => setMockDashboardOpen(false)}
+            onOpenAi={openAi}
+            onStartNewAi={openNewAiConsultation}
             onOpenSetup={() => setView("setup")}
             onOpenConnections={() => setView("connections")}
+            onOpenPlans={() => setView("settings")}
           />
         )}
         {view === "setup" && (
           <SetupWizardPage
             onOpenConnections={() => setView("connections")}
             authHeaders={authHeaders}
+            previewData={localSetupPreview ? setupPreviewData : undefined}
           />
         )}
-        {view === "bi" && (
-          <BiPage
-            data={dashboardData}
-            loading={dashboardLoading}
-            error={dashboardError}
-            range={range}
-            platform={platform}
-            usingDemoData={isMockDataExperience(usingDemoData, readiness)}
-            onRangeChange={setRange}
-            onPlatformChange={setPlatform}
-          />
-        )}
-        {view === "columns" && (
-          <AdColumnPage
+        {view === "help" && (
+          <HelpPage
             tags={columnTags}
             selectedArticleId={selectedArticleId}
             bookmarkedArticleIds={bookmarkedArticleIds}
@@ -1432,40 +1889,52 @@ function App() {
             onSelectArticle={setSelectedArticleId}
           />
         )}
-        {view === "connections" && (
+        {view === "connections" && connectionSession && (
           <ConnectionsPage
-            session={session}
-            workspace={workspaceSession}
-            usingDemoData={isMockDataExperience(usingDemoData, readiness)}
-            onOpenAi={() => setAiOpen(true)}
+            session={connectionSession}
+            workspace={displayWorkspaceSession}
+            usingDemoData={usingDemoData}
           />
         )}
         {view === "settings" && (
-          <SettingsPage workspace={workspaceSession} onOpenConnections={() => setView("connections")} />
+          <SettingsPage
+            workspace={displayWorkspaceSession}
+            billingStatus={billingStatus}
+            plans={billingPlans}
+            authHeaders={authHeaders}
+            onPortal={() => void openBillingSession("portal")}
+            onOpenConnections={() => setView("connections")}
+          />
         )}
       </main>
 
-      <button
-        type="button"
-        className={`ai-launcher${aiOpen ? " is-open" : ""}${loading ? " is-thinking" : ""}`}
-        onClick={() => setAiOpen(true)}
-        aria-controls="ai-sidebar"
-        aria-expanded={aiOpen}
-        aria-label={aiOpen ? "AIチャットパネルを表示中" : "AIチャットパネルを開く"}
-      >
-        <span className="ai-launcher-mascot" aria-hidden="true">
-          <picture>
-            <source srcSet={mascotStaticSrc} media="(prefers-reduced-motion: reduce)" />
-            <img src={loading ? mascotReviewSrc : mascotWaitingSrc} alt="" width={72} height={78} />
-          </picture>
-        </span>
-        <span className="ai-launcher-copy">
-          <span>{loading ? "考え中" : "AI相談"}</span>
-          <strong>{aiOpen ? "開いています" : "相談する"}</strong>
-        </span>
-      </button>
+      {view !== "setup" && (
+        <button
+          type="button"
+          className={`ai-launcher${aiOpen ? " is-open" : ""}${loading ? " is-thinking" : ""}${aiChatAvailable ? "" : " is-locked"}`}
+          onClick={() => setAiOpen(true)}
+          aria-controls="ai-sidebar"
+          aria-expanded={aiOpen}
+          aria-label={aiOpen ? "AIチャットパネルを表示中" : "AIチャットパネルを開く"}
+        >
+          <span className="ai-launcher-mascot" aria-hidden="true">
+            <picture>
+              <source srcSet={mascotStaticSrc} media="(prefers-reduced-motion: reduce)" />
+              <img src={loading ? mascotReviewSrc : mascotWaitingSrc} alt="" width={72} height={78} />
+            </picture>
+          </span>
+          <span className="ai-launcher-copy">
+            <span>{loading ? "考え中" : "AI相談"}</span>
+            <strong>{aiChatAvailable ? (aiOpen ? "開いています" : "相談する") : "ロック中"}</strong>
+          </span>
+        </button>
+      )}
 
-      {aiOpen && (
+      {view !== "setup" && aiOpen && !aiChatAvailable && (
+        <AiLockedPanel planLabel={billingStatus?.plan?.label ?? "ミニマム"} onClose={() => setAiOpen(false)} onUpgrade={() => setView("settings")} />
+      )}
+
+      {view !== "setup" && aiOpen && aiChatAvailable && (
         <AiSidebar
           input={input}
           setInput={setInput}
@@ -1482,6 +1951,7 @@ function App() {
             thinkingStatus={thinkingStatus}
             loading={loading}
           error={error}
+          usage={billingStatus?.usage ?? null}
           onThreadChange={setThreadId}
           onNewThread={startNewThread}
           onCreateTodos={(message) => {
@@ -1527,22 +1997,14 @@ function Sidebar({
     <aside className="sidebar">
       <div className="brand-card">
         <img
-          src="/brand/chokotto-symbol.png"
-          alt=""
-          width={32}
-          height={32}
-          aria-hidden="true"
+          src="/brand/chokotto-inhouse-logo.png"
+          alt="ちょこっとインハウス"
+          width={589}
+          height={234}
           onError={(event) => {
             event.currentTarget.style.display = "none";
           }}
         />
-        <p>{workspace.workspaceName}</p>
-        <strong>ちょこっとインハウス</strong>
-        <span>{workspace.userEmail}</span>
-        <button type="button" className="brand-settings-button" onClick={() => onNavigate("settings")} aria-label="アカウント設定を開く">
-          <InlineIcon name="settings" />
-          設定
-        </button>
       </div>
       <nav aria-label="メインナビゲーション" className="nav">
         {navItems.map((item) => (
@@ -1556,9 +2018,17 @@ function Sidebar({
           </button>
         ))}
       </nav>
-      <form className="logout-box">
+      <div className="sidebar-footer">
+        <div className="sidebar-account">
+          <strong>{workspace.workspaceName}</strong>
+          <span>{workspace.userEmail}</span>
+        </div>
+        <button type="button" className={active === "settings" ? "active" : ""} onClick={() => onNavigate("settings")}>
+          <InlineIcon name="settings" />
+          設定
+        </button>
         <button type="button" onClick={onLogout}>ログアウト</button>
-      </form>
+      </div>
     </aside>
   );
 }
@@ -1726,8 +2196,11 @@ function LoadingScreen({ message }: { message: string }) {
 function BillingGate({
   workspace,
   status,
+  plans,
   error,
   loading,
+  preferredPlanId,
+  preferredInterval,
   onCheckout,
   onPortal,
   onContinueDemo,
@@ -1735,52 +2208,142 @@ function BillingGate({
 }: {
   workspace: WorkspaceSession;
   status: BillingStatus | null;
+  plans: BillingPlanCatalog[];
   error: string;
   loading: "checkout" | "portal" | "";
-  onCheckout: () => void;
+  preferredPlanId: BillingPlanCatalog["id"];
+  preferredInterval: BillingInterval;
+  onCheckout: (planId: BillingPlanCatalog["id"], interval: BillingInterval) => void;
   onPortal: () => void;
   onContinueDemo?: () => void;
   onLogout: () => void;
 }) {
-  const subscriptionStatus = status?.subscription?.status ?? "未開始";
+  const interval: BillingInterval = preferredInterval;
+  const subscriptionStatus = billingStatusLabel(status);
   return (
-    <div className="auth-shell">
+    <div className="auth-shell billing-shell">
       <section className="auth-panel billing-gate">
-        <p className="eyebrow">Stripe billing</p>
-        <h1>利用開始には課金設定が必要です</h1>
-        <p>
-          {workspace.workspaceName} の課金状態を確認しました。ログイン後にStripe Checkoutでsubscriptionを開始すると、
-          ダッシュボード、AI Advisor、Google Ads連携を利用できます。
-        </p>
-        <dl className="billing-status-list">
-          <div>
-            <dt>workspace</dt>
-            <dd>{workspace.workspaceName}</dd>
+        <header className="billing-gate-header">
+          <div className="billing-gate-heading">
+            <div className="billing-brand-row">
+              <img src="/brand/chokotto-inhouse-logo.png" alt="ちょこっとインハウス" />
+              <span>料金プラン</span>
+            </div>
+            <p className="eyebrow">ご利用プラン</p>
+            <h1>運用に合うプランを選択</h1>
+            <p>
+              利用する人数とGoogle Adsアカウント数に合わせてプランを選択してください。
+              決済完了後、すぐにダッシュボードを利用できます。
+            </p>
           </div>
+          <dl className="billing-status-list">
+            <div>
+              <dt>ワークスペース</dt>
+              <dd>{workspace.workspaceName}</dd>
+            </div>
+            <div>
+              <dt>ご契約状況</dt>
+              <dd><span className="billing-status-chip">{subscriptionStatus}</span></dd>
+            </div>
+          </dl>
+        </header>
+
+        <div className="billing-plans-toolbar">
           <div>
-            <dt>subscription</dt>
-            <dd>{subscriptionStatus}</dd>
+            <h2>プランを選択</h2>
+            <p>初期費用は初回のみ、以降は月額料金でご利用いただけます。</p>
           </div>
-        </dl>
-        {error && <p className="form-message">{error}</p>}
-        <div className="auth-actions">
-          <button type="button" disabled={loading !== ""} onClick={onCheckout}>
-            {loading === "checkout" ? "作成中" : "Stripe Checkoutへ進む"}
-          </button>
-          {status?.customer && (
-            <button type="button" className="secondary-button" disabled={loading !== ""} onClick={onPortal}>
-              {loading === "portal" ? "作成中" : "Billing Portalを開く"}
-            </button>
-          )}
-          {onContinueDemo && (
-            <button type="button" className="text-button" onClick={onContinueDemo}>
-              Stripe未設定のためデモで続ける
-            </button>
-          )}
-          <button type="button" className="text-button" onClick={onLogout}>
-            ログアウト
-          </button>
         </div>
+
+        <div className="pricing-grid">
+          {plans.map((plan) => {
+            const price = plan.prices[interval];
+            const features = [
+              { label: `${plan.entitlements.maxUsers}名まで利用可能`, available: true },
+              { label: `Google Ads ${plan.entitlements.maxAdAccounts}件まで`, available: true },
+              { label: "3日ごとのAI改善レポート", available: true },
+              {
+                label: plan.entitlements.aiChat
+                  ? `AI相談 月${plan.estimatedConsultations ?? "-"}回程度`
+                  : "通常AIチャットは利用不可",
+                available: plan.entitlements.aiChat,
+              },
+              {
+                label: plan.entitlements.googleAdsWrite
+                  ? "承認付きGoogle Ads変更"
+                  : "Google Ads変更は利用不可",
+                available: plan.entitlements.googleAdsWrite,
+              },
+              {
+                label: plan.entitlements.humanOnboarding
+                  ? "初期有人支援（予約制）"
+                  : "初期有人支援は含まれません",
+                available: plan.entitlements.humanOnboarding,
+              },
+            ];
+            return (
+              <article key={plan.id} className={`pricing-card${plan.recommended ? " recommended" : ""}${plan.id === preferredPlanId ? " preferred" : ""}`}>
+                <div className="pricing-card-heading">
+                  <div>
+                    <span className="pricing-plan-kicker">{plan.id === "minimum" ? "まずは小さく" : plan.id === "standard" ? "運用を育てる" : "チームで活用"}</span>
+                    <h3>{plan.label}</h3>
+                  </div>
+                  <div className="pricing-card-badges">
+                    {plan.recommended && <span className="badge">おすすめ</span>}
+                    {plan.id === preferredPlanId && <span className="badge secondary">選択済み</span>}
+                  </div>
+                </div>
+                <div className="pricing-price">
+                  <strong>{formatPlanAmount(price.amount, price.currency)}</strong>
+                  <span>/ 月</span>
+                </div>
+                <p className="pricing-setup-fee">
+                  初期費用 <strong>{formatPlanAmount(plan.setupFee.amount, plan.setupFee.currency)}</strong>
+                  <span>（初回のみ）</span>
+                </p>
+                <ul className="pricing-features">
+                  {features.map((feature) => (
+                    <li key={feature.label} className={feature.available ? "" : "is-unavailable"}>
+                      <span className="pricing-feature-icon" aria-hidden="true">{feature.available ? "✓" : "—"}</span>
+                      <span>{feature.label}</span>
+                    </li>
+                  ))}
+                </ul>
+                <button
+                  type="button"
+                  className="pricing-cta"
+                  disabled={loading !== "" || !price.configured || !plan.setupFee.configured}
+                  onClick={() => onCheckout(plan.id, interval)}
+                >
+                  {loading === "checkout"
+                    ? "Checkoutを準備中…"
+                    : price.configured && plan.setupFee.configured
+                      ? "このプランで始める"
+                      : "販売準備中"}
+                </button>
+              </article>
+            );
+          })}
+        </div>
+        {error && <p className="form-message" role="alert">{error}</p>}
+        <footer className="billing-gate-footer">
+          <p>決済はStripeの安全な画面で行います。無料トライアルはありません。</p>
+          <div className="auth-actions">
+            {status?.customer && (
+              <button type="button" className="secondary-button billing-portal-button" disabled={loading !== ""} onClick={onPortal}>
+                {loading === "portal" ? "Portalを準備中…" : "契約・支払い方法を管理"}
+              </button>
+            )}
+            {onContinueDemo && (
+              <button type="button" className="text-button" onClick={onContinueDemo}>
+                Stripe未設定のためデモで続ける
+              </button>
+            )}
+            <button type="button" className="text-button" onClick={onLogout}>
+              別のアカウントでログイン
+            </button>
+          </div>
+        </footer>
       </section>
     </div>
   );
@@ -1789,6 +2352,10 @@ function BillingGate({
 function AuthPage({
   error,
   session,
+  plans,
+  preferredPlanId,
+  preferredInterval,
+  onPlanChange,
   onGoogleLogin,
   onMagicLink,
   onPasswordLogin,
@@ -1797,6 +2364,10 @@ function AuthPage({
 }: {
   error: string;
   session: Session | null;
+  plans: BillingPlanCatalog[];
+  preferredPlanId: BillingPlanCatalog["id"];
+  preferredInterval: BillingInterval;
+  onPlanChange: (planId: BillingPlanCatalog["id"]) => void;
   onGoogleLogin: () => Promise<void>;
   onMagicLink: (email: string) => Promise<void>;
   onPasswordLogin: (email: string, password: string) => Promise<void>;
@@ -1809,17 +2380,60 @@ function AuthPage({
 
   return (
     <div className="auth-shell">
-      <section className="auth-panel">
-        <p className="eyebrow">ちょこっとインハウス</p>
-        <h1>ログイン</h1>
-        <p>社内テスト用のGoogleログインで入れます。Supabase AuthのGoogle providerを有効にしてください。</p>
+      <section className="auth-panel auth-plan-panel">
+        <header className="auth-brand-header">
+          <img src="/brand/chokotto-inhouse-logo.png" alt="ちょこっとインハウス" />
+        </header>
+        <div className="auth-plan-intro">
+          <h1>プランを選択</h1>
+          <p>月額料金 ＋ 初期費用</p>
+        </div>
         {!session ? (
-          <div>
-            <button type="button" className="google-login-button" onClick={() => void onGoogleLogin()}>
-              Googleでログイン
-            </button>
+          <div className="auth-plan-flow">
+            <div className="auth-plan-options" role="radiogroup" aria-label="プラン">
+              {plans.length > 0 ? plans.map((plan) => {
+                const price = plan.prices[preferredInterval];
+                const selected = preferredPlanId === plan.id;
+                return (
+                  <button
+                    key={plan.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    className={`${selected ? "selected" : ""}${plan.recommended ? " recommended" : ""}`}
+                    onClick={() => onPlanChange(plan.id)}
+                  >
+                    <span className="auth-plan-choice-top">
+                      <span className="auth-plan-name">{plan.label}</span>
+                      {plan.recommended && <span className="auth-plan-recommended">おすすめ</span>}
+                    </span>
+                    <strong className="auth-plan-price">{formatPlanAmount(price.amount, price.currency)} <small>/ 月</small></strong>
+                    <span className="auth-plan-setup">
+                      初期費用 <strong>{formatPlanAmount(plan.setupFee.amount, plan.setupFee.currency)}</strong>
+                    </span>
+                    <span className="auth-plan-facts">
+                      <span>利用者 {plan.entitlements.maxUsers}名まで</span>
+                      <span>広告アカウント {plan.entitlements.maxAdAccounts}件まで</span>
+                      <span>{plan.entitlements.aiChat ? "AI相談あり" : "AI改善レポート"}</span>
+                    </span>
+                    <span className="auth-plan-select-state" aria-hidden="true">
+                      <span>{selected ? "✓" : ""}</span>
+                      {selected ? "選択中" : "選択する"}
+                    </span>
+                  </button>
+                );
+              }) : (
+                <p className="auth-plan-loading">プラン情報を読み込んでいます。</p>
+              )}
+            </div>
+            <section className="auth-login-section">
+              <h2 className="auth-login-heading">ログイン</h2>
+              <button type="button" className="google-login-button" onClick={() => void onGoogleLogin()}>
+                Googleで続ける
+              </button>
+            </section>
             <button type="button" className="text-button auth-help" onClick={() => setShowMagicLink((current) => !current)}>
-              メール/パスワードの開発用ログインを表示
+              メールアドレスで続ける
             </button>
             {showMagicLink && (
               <>
@@ -1844,11 +2458,10 @@ function AuthPage({
                       アカウント作成
                     </button>
                   </div>
-                </form>
+              </form>
               <div className="magic-link-box">
-                <p>メール送信制限に当たる場合があります。通常は上のパスワードログインを使ってください。</p>
                 <button type="button" className="secondary-button" onClick={() => void onMagicLink(normalizeLoginId(email))}>
-                  Magic Linkを送る
+                  ログインリンクを送る
                 </button>
               </div>
               </>
@@ -1879,20 +2492,306 @@ const setupWizardSteps = [
 const setupPlatformOptions: Array<{ value: Exclude<PlatformFilter, "all">; label: string; role: string }> = [
   { value: "google", label: "Google", role: "検索意図が強い顕在層を取りに行く" },
   { value: "meta", label: "Meta", role: "認知と比較検討の母数を作る" },
-  { value: "yahoo", label: "Yahoo", role: "検索とリターゲティングを補完する" },
+  { value: "yahoo", label: "LINEヤフー広告", role: "検索とリターゲティングを補完する" },
 ];
 
-const setupScoreDimensions: Array<{ key: keyof SetupIntakeResponse["intake"]["dimensionScores"]; label: string; max: number }> = [
-  { key: "goal", label: "目的", max: 15 },
-  { key: "product", label: "商材", max: 20 },
-  { key: "audience", label: "ターゲット", max: 20 },
-  { key: "budget", label: "予算", max: 15 },
-  { key: "platforms", label: "媒体", max: 10 },
-  { key: "measurement", label: "計測", max: 20 },
+type SetupQuestionField =
+  | "basicInfo"
+  | "product"
+  | "goal"
+  | "area"
+  | "audience"
+  | "strengths"
+  | "keyMessage"
+  | "budget"
+  | "destination"
+  | "assets"
+  | "acquisitionMethods"
+  | "adExperience";
+
+type SetupQuestionDefinition = {
+  key: SetupQuestionField;
+  label: string;
+  question: string;
+  max: number;
+  kind: "single" | "multi" | "text" | "composite" | "grouped";
+  options?: string[];
+  fields?: Array<{ key: string; label: string; placeholder: string; required?: boolean }>;
+  groups?: Array<{ label: string; options: string[]; multiple?: boolean; inputLabel?: string }>;
+};
+
+const setupQuestions: SetupQuestionDefinition[] = [
+  {
+    key: "basicInfo",
+    label: "基本情報",
+    question: "会社の基本情報を教えてください。",
+    max: 10,
+    kind: "composite",
+    fields: [
+      { key: "会社名", label: "会社名", placeholder: "例：〇〇工務店", required: true },
+      { key: "ホームページURL", label: "ホームページURL", placeholder: "https://example.com", required: true },
+      { key: "InstagramアカウントURL", label: "InstagramアカウントURL（任意）", placeholder: "https://www.instagram.com/..." },
+      { key: "施工エリア", label: "施工エリア（都道府県・市区町村）", placeholder: "例：東京都世田谷区、神奈川県川崎市", required: true },
+    ],
+  },
+  {
+    key: "product",
+    label: "商品・サービス",
+    question: "今回、広告で集客したい商品・サービスを教えてください。",
+    max: 10,
+    kind: "single",
+    options: ["注文住宅", "規格住宅", "建売住宅", "リフォーム", "その他"],
+  },
+  {
+    key: "goal",
+    label: "広告の目的",
+    question: "今回の広告の目的を教えてください。",
+    max: 10,
+    kind: "single",
+    options: ["お問い合わせ獲得", "資料請求", "モデルハウス来場予約", "完成見学会予約", "無料相談予約", "LINE登録", "認知拡大", "その他"],
+  },
+  {
+    key: "area",
+    label: "集客エリア",
+    question: "集客したいエリアを教えてください。",
+    max: 10,
+    kind: "composite",
+    fields: [
+      { key: "都道府県", label: "都道府県", placeholder: "例：東京都", required: true },
+      { key: "市区町村", label: "市区町村", placeholder: "例：世田谷区", required: true },
+      { key: "半径", label: "半径○km（任意）", placeholder: "例：20km" },
+    ],
+  },
+  {
+    key: "audience",
+    label: "ターゲット",
+    question: "集客したいターゲットを教えてください。（複数選択可）",
+    max: 10,
+    kind: "grouped",
+    groups: [
+      { label: "年齢", options: ["20代", "30代", "40代", "50代以上"], multiple: true },
+      { label: "家族構成", options: ["独身", "夫婦", "夫婦＋子ども", "二世帯"], multiple: true },
+      { label: "住宅検討状況", options: ["情報収集", "土地探し", "工務店比較中", "具体的に検討中"], multiple: true },
+    ],
+  },
+  {
+    key: "strengths",
+    label: "強み・特徴",
+    question: "あなたの会社の強みを教えてください。（複数選択可）",
+    max: 10,
+    kind: "multi",
+    options: ["デザイン", "高気密・高断熱", "自然素材", "平屋", "子育て住宅", "価格", "地域密着", "土地探し", "自由設計", "保証・アフターサービス", "その他"],
+  },
+  {
+    key: "keyMessage",
+    label: "一番伝えたいこと",
+    question: "広告で一番伝えたいことを教えてください。",
+    max: 10,
+    kind: "text",
+  },
+  {
+    key: "budget",
+    label: "広告予算",
+    question: "広告予算を教えてください。",
+    max: 10,
+    kind: "single",
+    options: ["～10万円", "10〜30万円", "30〜50万円", "50万円以上"],
+  },
+  {
+    key: "destination",
+    label: "広告遷移先",
+    question: "広告の遷移先を教えてください。",
+    max: 5,
+    kind: "single",
+    options: ["ホームページ", "LP"],
+  },
+  {
+    key: "assets",
+    label: "広告素材",
+    question: "現在用意できる広告素材を教えてください。",
+    max: 5,
+    kind: "grouped",
+    groups: [
+      { label: "写真", options: ["十分ある", "少しある", "ほとんどない"] },
+      { label: "動画", options: ["ある", "ない"] },
+      { label: "ロゴ", options: ["ある", "ない"] },
+      { label: "LP", options: ["イベントページ", "LINE", "その他"], inputLabel: "URL入力" },
+    ],
+  },
+  {
+    key: "acquisitionMethods",
+    label: "現在の集客方法",
+    question: "現在の集客方法を教えてください。（複数選択可）",
+    max: 5,
+    kind: "multi",
+    options: ["Google広告", "Meta広告", "Instagram運用", "チラシ", "ポスティング", "SUUMO", "HOME'S", "紹介", "その他"],
+  },
+  {
+    key: "adExperience",
+    label: "広告運用経験",
+    question: "過去の広告運用経験を教えてください。",
+    max: 5,
+    kind: "single",
+    options: ["初めて", "Google広告", "Meta広告", "両方運用している"],
+  },
 ];
 
-function setupDimensionLabel(field: string) {
-  return setupScoreDimensions.find((dimension) => dimension.key === field)?.label ?? field;
+const setupScoreDimensions = setupQuestions.map(({ key, label, max }) => ({ key, label, max }));
+const setupQuestionByField = Object.fromEntries(setupQuestions.map((question) => [question.key, question])) as Record<SetupQuestionField, SetupQuestionDefinition>;
+
+function parseSetupAnswerLines(value: string) {
+  return Object.fromEntries(value.split("\n").map((line) => {
+    const separator = line.indexOf(":");
+    return separator >= 0 ? [line.slice(0, separator).trim(), line.slice(separator + 1).trim()] : ["", ""];
+  }).filter(([key]) => key)) as Record<string, string>;
+}
+
+function writeSetupAnswerLine(value: string, key: string, nextValue: string) {
+  const lines = parseSetupAnswerLines(value);
+  if (nextValue.trim()) lines[key] = nextValue;
+  else delete lines[key];
+  return Object.entries(lines).map(([label, answer]) => `${label}: ${answer}`).join("\n");
+}
+
+function toggleSetupAnswer(value: string, option: string) {
+  const selected = new Set(value.split(" / ").map((item) => item.trim()).filter(Boolean));
+  if (selected.has(option)) selected.delete(option);
+  else selected.add(option);
+  return [...selected].join(" / ");
+}
+
+function setupAnswerIsComplete(question: SetupQuestionDefinition, value: string) {
+  if (!value.trim()) return false;
+  if (question.kind === "composite") {
+    const answers = parseSetupAnswerLines(value);
+    return (question.fields ?? []).filter((field) => field.required).every((field) => Boolean(answers[field.key]?.trim()));
+  }
+  if (question.kind === "grouped") {
+    const answers = parseSetupAnswerLines(value);
+    return (question.groups ?? []).every((group) => Boolean(answers[group.label]?.trim()));
+  }
+  return true;
+}
+
+function SetupQuestionInput({
+  question,
+  value,
+  onChange,
+  disabled,
+}: {
+  question: SetupQuestionDefinition;
+  value: string;
+  onChange: (value: string) => void;
+  disabled: boolean;
+}) {
+  if (question.kind === "text") {
+    return (
+      <label className="setup-question-text">
+        <span>回答</span>
+        <textarea
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder="広告で最も伝えたい価値やメッセージを入力してください"
+          rows={5}
+          disabled={disabled}
+        />
+      </label>
+    );
+  }
+
+  if (question.kind === "composite") {
+    const answers = parseSetupAnswerLines(value);
+    return (
+      <div className="setup-question-fields">
+        {(question.fields ?? []).map((field) => (
+          <label key={field.key}>
+            <span>{field.label}{field.required ? " *" : ""}</span>
+            <input
+              type={field.key.includes("URL") ? "url" : "text"}
+              value={answers[field.key] ?? ""}
+              onChange={(event) => onChange(writeSetupAnswerLine(value, field.key, event.target.value))}
+              placeholder={field.placeholder}
+              required={field.required}
+              disabled={disabled}
+            />
+          </label>
+        ))}
+      </div>
+    );
+  }
+
+  if (question.kind === "grouped") {
+    const answers = parseSetupAnswerLines(value);
+    return (
+      <div className="setup-question-groups">
+        {(question.groups ?? []).map((group) => {
+          const groupValue = answers[group.label] ?? "";
+          const selections = new Set(groupValue.split(" / ").map((item) => item.trim()).filter(Boolean));
+          return (
+            <fieldset key={group.label} aria-label={group.label}>
+              <legend>{group.label}</legend>
+              <div>
+                {group.options.map((option) => {
+                  const selected = group.multiple ? selections.has(option) : groupValue === option;
+                  return (
+                    <label key={option} className={selected ? "selected" : ""}>
+                      <input
+                        type={group.multiple ? "checkbox" : "radio"}
+                        name={`setup-${question.key}-${group.label}`}
+                        checked={selected}
+                        onChange={() => onChange(writeSetupAnswerLine(
+                          value,
+                          group.label,
+                          group.multiple ? toggleSetupAnswer(groupValue, option) : option,
+                        ))}
+                        disabled={disabled}
+                      />
+                      <span>{option}</span>
+                    </label>
+                  );
+                })}
+              </div>
+              {group.inputLabel && (
+                <label className="setup-question-group-input">
+                  <span>{group.inputLabel}</span>
+                  <input
+                    type="url"
+                    value={answers[`${group.label} URL`] ?? ""}
+                    onChange={(event) => onChange(writeSetupAnswerLine(value, `${group.label} URL`, event.target.value))}
+                    placeholder="https://example.com/..."
+                    disabled={disabled}
+                  />
+                </label>
+              )}
+            </fieldset>
+          );
+        })}
+      </div>
+    );
+  }
+
+  const selected = new Set(value.split(" / ").map((item) => item.trim()).filter(Boolean));
+  return (
+    <fieldset className="setup-question-options" aria-labelledby={`setup-question-${question.key}`}>
+      <legend className="sr-only">選択してください</legend>
+      {(question.options ?? []).map((option) => {
+        const isSelected = question.kind === "multi" ? selected.has(option) : value === option;
+        return (
+          <label key={option} className={isSelected ? "selected" : ""}>
+            <input
+              type={question.kind === "multi" ? "checkbox" : "radio"}
+              name={`setup-${question.key}`}
+              value={option}
+              checked={isSelected}
+              onChange={() => onChange(question.kind === "multi" ? toggleSetupAnswer(value, option) : option)}
+              disabled={disabled}
+            />
+            <span>{option}</span>
+          </label>
+        );
+      })}
+    </fieldset>
+  );
 }
 
 function formatSetupFact(facts: Record<string, unknown>, key: keyof SetupIntakeResponse["intake"]["dimensionScores"]) {
@@ -1902,39 +2801,34 @@ function formatSetupFact(facts: Record<string, unknown>, key: keyof SetupIntakeR
   return text ? (text.length > 64 ? `${text.slice(0, 64)}...` : text) : "未入力";
 }
 
-function setupPlatformSummary(facts: Record<string, unknown>) {
-  const value = facts.platforms;
-  const platforms = Array.isArray(value) && value.length ? value.map(String) : ["google"];
-  return platforms
-    .map((platform) => setupPlatformOptions.find((option) => option.value === platform)?.label ?? platform)
-    .join(" / ");
-}
-
-function setupTodoKey(stepId: string, index: number) {
-  return `${stepId}:${index}`;
-}
-
 function SetupWizardPage({
   onOpenConnections,
   authHeaders,
+  previewData,
 }: {
   onOpenConnections: () => void;
   authHeaders: (extra?: HeadersInit) => HeadersInit;
+  previewData?: SetupIntakeResponse;
 }) {
-  const [data, setData] = useState<SetupIntakeResponse | null>(null);
-  const [message, setMessage] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [data, setData] = useState<SetupIntakeResponse | null>(previewData ?? null);
+  const [questionAnswers, setQuestionAnswers] = useState<Partial<Record<SetupQuestionField, string>>>({});
+  const [questionNotes, setQuestionNotes] = useState<Partial<Record<SetupQuestionField, string>>>({});
+  const [activeQuestionIndex, setActiveQuestionIndex] = useState(0);
+  const [reviewingAnswers, setReviewingAnswers] = useState(false);
+  const [loading, setLoading] = useState(!previewData);
   const [sending, setSending] = useState(false);
   const [sessionBusy, setSessionBusy] = useState(false);
   const [error, setError] = useState("");
-  const [showSteps, setShowSteps] = useState(false);
-  const [editableSteps, setEditableSteps] = useState<SetupStep[]>([]);
-  const [activeSetupStep, setActiveSetupStep] = useState(0);
-  const [completedSetupTodos, setCompletedSetupTodos] = useState<Record<string, boolean>>({});
-  const [setupSessions, setSetupSessions] = useState<SetupIntakeSummary[]>([]);
-  const messagesRef = useRef<HTMLDivElement | null>(null);
+  const [showSetupResult, setShowSetupResult] = useState(false);
+  const [setupSessions, setSetupSessions] = useState<SetupIntakeSummary[]>(() => previewData ? [previewData.intake] : []);
 
   useEffect(() => {
+    if (previewData) {
+      applySetupData(previewData);
+      setSetupSessions([previewData.intake]);
+      setLoading(false);
+      return;
+    }
     let mounted = true;
     setLoading(true);
     fetch(`${apiBaseUrl}/setup/intake`, { headers: authHeaders() })
@@ -1958,8 +2852,27 @@ function SetupWizardPage({
 
   function applySetupData(nextData: SetupIntakeResponse) {
     setData(nextData);
-    setEditableSteps(nextData.intake.setupSteps);
-    setShowSteps(nextData.intake.readyForSetupSteps);
+    setShowSetupResult(false);
+    const firstMissingIndex = setupScoreDimensions.findIndex((dimension) => nextData.intake.missingFields.includes(dimension.key));
+    setActiveQuestionIndex(firstMissingIndex >= 0 ? firstMissingIndex : setupScoreDimensions.length - 1);
+    setReviewingAnswers(nextData.intake.readyForSetupSteps);
+    const questionnaire = nextData.intake.facts._questionnaire && typeof nextData.intake.facts._questionnaire === "object"
+      ? nextData.intake.facts._questionnaire as Record<string, unknown>
+      : {};
+    const storedAnswers = questionnaire.answers && typeof questionnaire.answers === "object"
+      ? questionnaire.answers as Record<string, unknown>
+      : {};
+    const answers: Partial<Record<SetupQuestionField, string>> = {};
+    const notes: Partial<Record<SetupQuestionField, string>> = {};
+    setupScoreDimensions.forEach(({ key }) => {
+      const stored = storedAnswers[key];
+      if (!stored || typeof stored !== "object") return;
+      const answer = stored as Record<string, unknown>;
+      if (typeof answer.value === "string") answers[key] = answer.value;
+      if (typeof answer.note === "string") notes[key] = answer.note;
+    });
+    setQuestionAnswers(answers);
+    setQuestionNotes(notes);
   }
 
   async function refreshSetupSessions() {
@@ -1997,7 +2910,6 @@ function SetupWizardPage({
       const nextData = await res.json();
       if (!res.ok) throw new Error(nextData?.error ?? "新しい広告準備を作成できませんでした。");
       applySetupData(nextData);
-      setMessage("");
       await refreshSetupSessions();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "新しい広告準備を作成できませんでした。");
@@ -2050,76 +2962,82 @@ function SetupWizardPage({
     }
   }
 
-  useEffect(() => {
-    const messagesElement = messagesRef.current;
-    if (!messagesElement) return;
-    window.requestAnimationFrame(() => {
-      messagesElement.scrollTo({
-        top: messagesElement.scrollHeight,
-        behavior: "smooth",
-      });
-    });
-  }, [data?.messages.length, sending]);
-
-  async function sendSetupMessage() {
-    const text = message.trim();
-    if (!text || sending || !data) return;
-    setMessage("");
+  async function saveQuestionAnswer() {
+    if (!data) return;
+    const field = setupScoreDimensions[activeQuestionIndex]?.key;
+    const question = field ? setupQuestionByField[field] : null;
+    const value = field ? String(questionAnswers[field] ?? "").trim() : "";
+    const note = field ? String(questionNotes[field] ?? "").trim() : "";
+    if (!field || !question || !setupAnswerIsComplete(question, value) || sending) return;
     setSending(true);
     setError("");
+    if (previewData) {
+      const nextMissingFields = data.intake.missingFields.filter((missingField) => missingField !== field);
+      const answeredCount = setupScoreDimensions.length - nextMissingFields.length;
+      const nextScore = Math.round((answeredCount / setupScoreDimensions.length) * 10);
+      const now = new Date().toISOString();
+      applySetupData({
+        intake: {
+          ...data.intake,
+          status: nextMissingFields.length === 0 ? "ready" : "in_progress",
+          score: nextScore,
+          facts: {
+            ...data.intake.facts,
+            [field]: note ? `${value}。補足: ${note}` : value,
+            _questionnaire: {
+              completedFields: setupScoreDimensions
+                .filter((dimension) => !nextMissingFields.includes(dimension.key))
+                .map((dimension) => dimension.key),
+              answers: {
+                ...((data.intake.facts._questionnaire as { answers?: Record<string, unknown> } | undefined)?.answers ?? {}),
+                [field]: { value, ...(note ? { note } : {}) },
+              },
+            },
+          },
+          dimensionScores: {
+            ...data.intake.dimensionScores,
+            [field]: setupScoreDimensions[activeQuestionIndex].max,
+          },
+          missingFields: nextMissingFields,
+          readyForSetupSteps: nextMissingFields.length === 0,
+          updatedAt: now,
+        },
+        messages: data.messages,
+      });
+      setSending(false);
+      return;
+    }
     try {
-      const res = await fetch(`${apiBaseUrl}/setup/intake/message`, {
+      const res = await fetch(`${apiBaseUrl}/setup/intake/answer`, {
         method: "POST",
         headers: authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ intakeId: data?.intake.id, message: text }),
+        body: JSON.stringify({ intakeId: data.intake.id, field, value, note }),
       });
       const nextData = await res.json();
-      if (!res.ok) throw new Error(nextData?.error ?? "広告準備ヒアリングに失敗しました。");
+      if (!res.ok) throw new Error(nextData?.error ?? "回答を保存できませんでした。");
       applySetupData(nextData);
       void refreshSetupSessions();
-      if (nextData.intake.readyForSetupSteps) setShowSteps(true);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "広告準備ヒアリングに失敗しました。");
+      setError(caught instanceof Error ? caught.message : "回答を保存できませんでした。");
     } finally {
       setSending(false);
     }
   }
 
-  async function saveSetupSteps() {
-    if (!data) return;
-    const res = await fetch(`${apiBaseUrl}/setup/intake/steps`, {
-      method: "PATCH",
-      headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ intakeId: data.intake.id, setupSteps: editableSteps }),
-    });
-    const nextData = await res.json();
-    if (res.ok) {
-      setData(nextData);
-      setEditableSteps(nextData.intake.setupSteps);
-    } else {
-      setError(nextData?.error ?? "出稿ステップの保存に失敗しました。");
-    }
-  }
-
   const intake = data?.intake;
   const facts = intake?.facts ?? {};
-  const activeStep = editableSteps[Math.min(activeSetupStep, Math.max(editableSteps.length - 1, 0))];
-  const activeStepIndex = editableSteps.findIndex((step) => step.id === activeStep?.id);
-  const activeTodosDone = activeStep ? activeStep.steps.every((_, index) => completedSetupTodos[setupTodoKey(activeStep.id, index)]) : false;
-  const completedStepCount = editableSteps.filter((step) => step.steps.length > 0 && step.steps.every((_, index) => completedSetupTodos[setupTodoKey(step.id, index)])).length;
-
-  function toggleSetupTodo(stepId: string, index: number) {
-    const key = setupTodoKey(stepId, index);
-    setCompletedSetupTodos((current) => ({ ...current, [key]: !current[key] }));
-  }
-
-  function goNextSetupStep() {
-    setActiveSetupStep((current) => Math.min(current + 1, editableSteps.length - 1));
-  }
+  const activeQuestionDimension = setupScoreDimensions[activeQuestionIndex] ?? setupScoreDimensions[0];
+  const activeQuestionField = activeQuestionDimension.key;
+  const activeQuestion = setupQuestionByField[activeQuestionField];
+  const selectedAnswer = questionAnswers[activeQuestionField] ?? "";
+  const activeAnswerComplete = setupAnswerIsComplete(activeQuestion, selectedAnswer);
+  const answeredQuestionCount = intake
+    ? setupScoreDimensions.filter((dimension) => !intake.missingFields.includes(dimension.key)).length
+    : 0;
 
   return (
     <div className="setup-page md3-expressive-page md3-setup-page">
-      <PageHeader title="広告準備" description="専用エージェントが深掘りし、準備スコアが80点を超えたら出稿ステップを確認できます。">
+      <PageHeader title="広告準備" description="質問に答えると、AIが出稿前の確認項目を整理します。">
         <div className="setup-header-actions md3-expressive-actions">
           <button type="button" className="secondary-button md3-tonal-button" onClick={onOpenConnections}>
             データ連携を見る
@@ -2128,216 +3046,259 @@ function SetupWizardPage({
       </PageHeader>
 
       {error && <p className="error">{error}</p>}
-      <section className="setup-next-actions" aria-label="次にやること">
-        <article className={`setup-next-card ${intake?.readyForSetupSteps ? "ready" : ""}`}>
-          <span aria-hidden="true">{intake?.readyForSetupSteps ? "✓" : "1"}</span>
-          <div>
-            <strong>{intake?.readyForSetupSteps ? "出稿手順を確認できます" : "足りない項目だけ回答"}</strong>
-            <p>{intake?.readyForSetupSteps ? "AIが整理した操作手順を、人間が確認して進めます。" : "右の不足タグを見て、目的・商材・ターゲット・予算・媒体・計測を補います。"}</p>
-          </div>
-          {intake?.readyForSetupSteps && (
-            <button type="button" className="md3-filled-button" onClick={() => setShowSteps(true)}>
-              手順を見る
-            </button>
-          )}
-        </article>
-        <article className="setup-next-card">
-          <span aria-hidden="true">2</span>
-          <div>
-            <strong>ペルソナは保存内容を使う</strong>
-            <p>一度答えた内容は右側のカードに残し、不足している部分だけ追加で聞きます。</p>
-          </div>
-        </article>
-      </section>
-      <section className="setup-intake-layout">
-        <article className="card setup-intake-chat">
-          <div className="section-header setup-chat-header">
-            <div className="setup-chat-heading">
-              <p className="eyebrow">Setup intake agent</p>
-              <h2>デプスヒアリング</h2>
-            </div>
-            <div className="setup-session-controls">
-              <label className="setup-session-select">
-                <span>{intake?.title ?? "準備セッション"} / {intake?.score ?? 0}/100</span>
-                <select
-                  aria-label="準備セッション"
-                  value={intake?.id ?? ""}
-                  onChange={(event) => void loadSetupSession(event.target.value)}
-                  disabled={loading || sessionBusy || sending}
-                >
-                  {setupSessions.map((session) => (
-                    <option key={session.id} value={session.id}>
-                      {session.title} / {session.score}/100
-                    </option>
-                  ))}
-                  {!setupSessions.length && intake && (
-                    <option value={intake.id}>{intake.title} / {intake.score}/100</option>
-                  )}
-                </select>
-              </label>
-              <div className="setup-session-buttons">
-                <button type="button" className="setup-session-icon" onClick={() => void createSetupSession()} disabled={sessionBusy} aria-label="新しい準備">
-                  +
+      <section className="setup-questionnaire" aria-label="広告準備の質問票">
+        <div className="setup-questionnaire-toolbar">
+          <div className="setup-session-controls">
+            <select
+              aria-label="準備セッション"
+              value={intake?.id ?? ""}
+              onChange={(event) => void loadSetupSession(event.target.value)}
+              disabled={loading || sessionBusy || sending}
+            >
+              {setupSessions.map((session) => (
+                <option key={session.id} value={session.id}>
+                  {session.title}
+                </option>
+              ))}
+              {!setupSessions.length && intake && <option value={intake.id}>{intake.title}</option>}
+            </select>
+            <details className="setup-session-menu">
+              <summary aria-label="準備セッションの操作">…</summary>
+              <div>
+                <button type="button" onClick={() => void createSetupSession()} disabled={sessionBusy}>
+                  新しい準備
                 </button>
-                <button type="button" className="setup-session-text-action" onClick={() => {
+                <button type="button" onClick={() => {
                   const title = window.prompt("準備セッション名", intake?.title ?? "");
                   if (title !== null) void renameSetupSession(title);
                 }} disabled={!data || sessionBusy}>
                   名前変更
                 </button>
-                <button type="button" className="setup-session-text-action" onClick={() => void resetSetupSession()} disabled={!data || sessionBusy}>
+                <button type="button" onClick={() => void resetSetupSession()} disabled={!data || sessionBusy}>
                   リセット
                 </button>
               </div>
-            </div>
+            </details>
           </div>
-          <div className="setup-intake-messages" ref={messagesRef} aria-live="polite">
-            {loading && <ThinkingMessage text="広告準備ヒアリングを読み込んでいます。" />}
-            {data?.messages.map((item) => (
-              <article key={item.id} className={`message ${item.role === "user" ? "user" : "assistant"}`}>
-                <MarkdownContent content={item.content} />
-              </article>
-            ))}
-            {sending && <ThinkingMessage text="setup_intake_agent が準備度を採点しています。" />}
-            {intake?.readyForSetupSteps && (
-              <article className="setup-chat-steps-card" aria-label="出稿手順の確認">
-                <div>
-                  <p className="eyebrow">Setup steps ready</p>
-                  <strong>出稿前の操作手順を確認できます</strong>
-                  <span>{setupPlatformSummary(facts)} の広告マネージャーで人間が確認・手動実行するための手順です。</span>
-                </div>
-                <button type="button" className="md3-filled-button" onClick={() => setShowSteps(true)}>
-                  出稿手順を確認する
-                </button>
-              </article>
-            )}
-          </div>
-          <div className="composer md3-chat-field setup-intake-composer">
-            <label className="composer-label" htmlFor="setup-intake-input">広告準備について回答</label>
-            <textarea
-              id="setup-intake-input"
-              value={message}
-              onChange={(event) => setMessage(event.target.value)}
-              placeholder="例: 月10件の問い合わせを増やしたい。商材は月額の広告運用支援で、予算は初月10万円くらいです。"
-              rows={3}
-            />
-            <div className="composer-supporting-row">
-              <span className="composer-supporting-text">目的・商材・ターゲット・予算・媒体・計測を深掘りします</span>
-              <div className="composer-actions">
-                <button type="button" onClick={() => void sendSetupMessage()} disabled={sending || !data || !message.trim()} aria-label="送信">
-                  {sending ? "…" : "↑"}
-                </button>
-              </div>
-            </div>
-          </div>
-        </article>
+          <button type="button" className="setup-review-toggle" onClick={() => {
+            if (showSetupResult) {
+              setShowSetupResult(false);
+              setReviewingAnswers(true);
+              return;
+            }
+            setReviewingAnswers((current) => !current);
+          }}>
+            {showSetupResult
+              ? `回答一覧 ${answeredQuestionCount}/${setupScoreDimensions.length}`
+              : reviewingAnswers
+                ? "質問に戻る"
+                : `回答一覧 ${answeredQuestionCount}/${setupScoreDimensions.length}`}
+          </button>
+        </div>
 
-        <aside className="card setup-readiness-panel">
-          <p className="eyebrow">Readiness score</p>
-          <div className="setup-score">
-            <strong>{intake?.score ?? 0}</strong>
-            <span>/100</span>
-          </div>
-          <div className="setup-score-bars">
-            {setupScoreDimensions.map((dimension) => (
-              <div key={dimension.key} className="setup-score-row">
-                <span>{dimension.label}</span>
-                <progress value={intake?.dimensionScores[dimension.key] ?? 0} max={dimension.max} />
-                <strong>{intake?.dimensionScores[dimension.key] ?? 0}/{dimension.max}</strong>
+        <nav className="setup-question-progress" aria-label="質問の進捗">
+          {setupScoreDimensions.map((dimension, index) => {
+            const complete = Boolean(intake && !intake.missingFields.includes(dimension.key));
+            return (
+              <button
+                key={dimension.key}
+                type="button"
+                className={`${index === activeQuestionIndex && !reviewingAnswers ? "current" : ""}${complete ? " complete" : ""}`}
+                onClick={() => {
+                  setActiveQuestionIndex(index);
+                  setShowSetupResult(false);
+                  setReviewingAnswers(false);
+                }}
+                disabled={loading || sending}
+                aria-current={index === activeQuestionIndex && !reviewingAnswers ? "step" : undefined}
+              >
+                <span>{complete ? "✓" : index + 1}</span>
+                {dimension.label}
+              </button>
+            );
+          })}
+        </nav>
+
+        {loading ? (
+          <p className="setup-questionnaire-loading" role="status">質問票を読み込んでいます。</p>
+        ) : showSetupResult && intake?.readyForSetupSteps ? (
+          <SetupCampaignDraft
+            facts={facts}
+            setupSteps={intake.setupSteps}
+            onBack={() => {
+              setShowSetupResult(false);
+              setReviewingAnswers(true);
+            }}
+            onOpenConnections={onOpenConnections}
+          />
+        ) : reviewingAnswers ? (
+          <section className="setup-answer-review" aria-labelledby="setup-answer-review-title">
+            <div className="setup-answer-review-heading">
+              <div>
+                <p className="eyebrow">{intake?.readyForSetupSteps ? "回答完了" : "途中保存済み"}</p>
+                <h2 id="setup-answer-review-title">回答を確認</h2>
+                <p>{intake?.readyForSetupSteps ? "12項目の回答がそろいました。内容を確認して、出稿案と手順へ進んでください。" : "回答済みの内容を確認できます。未回答の項目は質問に戻って入力してください。"}</p>
               </div>
-            ))}
-          </div>
-          <div className="setup-facts-panel">
-            <h3>保存済みfacts</h3>
-            {setupScoreDimensions.map((dimension) => (
-              <p key={dimension.key}>
-                <span>{dimension.label}</span>
-                <strong>{formatSetupFact(facts, dimension.key)}</strong>
-              </p>
-            ))}
-          </div>
-          {intake?.missingFields.length ? (
-            <div className="setup-missing-panel">
-              <h3>足りない深掘り</h3>
-              <div className="tag-list">
-                {intake.missingFields.map((field) => <span key={field} className="tag">{setupDimensionLabel(field)}</span>)}
-              </div>
+              <strong>{answeredQuestionCount}/{setupScoreDimensions.length}</strong>
             </div>
-          ) : null}
-        </aside>
+            <dl className="setup-answer-list">
+              {setupScoreDimensions.map((dimension) => (
+                <div key={dimension.key}>
+                  <dt>{dimension.label}</dt>
+                  <dd>{formatSetupFact(facts, dimension.key)}</dd>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveQuestionIndex(setupScoreDimensions.findIndex((item) => item.key === dimension.key));
+                      setReviewingAnswers(false);
+                    }}
+                  >
+                    編集
+                  </button>
+                </div>
+              ))}
+            </dl>
+            <div className="setup-question-actions">
+              {!intake?.readyForSetupSteps ? (
+                <button
+                  type="button"
+                  className="md3-filled-button"
+                  onClick={() => {
+                    const nextIndex = setupScoreDimensions.findIndex((dimension) => intake?.missingFields.includes(dimension.key));
+                    setActiveQuestionIndex(Math.max(0, nextIndex));
+                    setReviewingAnswers(false);
+                  }}
+                >
+                  未回答の質問へ
+                </button>
+              ) : (
+                <button type="button" className="md3-filled-button" onClick={() => setShowSetupResult(true)}>
+                  出稿案と手順を確認
+                </button>
+              )}
+            </div>
+          </section>
+        ) : (
+          <form className="setup-question-stage" onSubmit={(event) => {
+            event.preventDefault();
+            void saveQuestionAnswer();
+          }}>
+            <div className="setup-question-heading">
+              <p>質問 {activeQuestionIndex + 1} / {setupScoreDimensions.length} ・ {activeQuestionDimension.label}</p>
+              <h2 id={`setup-question-${activeQuestionField}`}>{activeQuestion.question}</h2>
+              <span>必須</span>
+            </div>
+            <SetupQuestionInput
+              question={activeQuestion}
+              value={selectedAnswer}
+              onChange={(value) => setQuestionAnswers((current) => ({
+                ...current,
+                [activeQuestionField]: value,
+              }))}
+              disabled={sending}
+            />
+            <details className="setup-question-note">
+              <summary>選択肢にない補足を追加</summary>
+              <label htmlFor={`setup-note-${activeQuestionField}`}>補足（任意）</label>
+              <textarea
+                id={`setup-note-${activeQuestionField}`}
+                value={questionNotes[activeQuestionField] ?? ""}
+                onChange={(event) => setQuestionNotes((current) => ({
+                  ...current,
+                  [activeQuestionField]: event.target.value,
+                }))}
+                placeholder="地域、条件、例外などがあれば入力してください"
+                rows={3}
+              />
+            </details>
+            <div className="setup-question-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setActiveQuestionIndex((current) => Math.max(0, current - 1))}
+                disabled={activeQuestionIndex === 0 || sending}
+              >
+                戻る
+              </button>
+              <span>回答は保存され、あとから再開できます</span>
+              <button type="submit" className="md3-filled-button" disabled={!activeAnswerComplete || sending}>
+                {sending ? "保存中…" : intake?.missingFields.length === 1 && intake.missingFields[0] === activeQuestionField ? "保存して回答を確認" : "保存して次へ"}
+              </button>
+            </div>
+          </form>
+        )}
       </section>
 
-      {showSteps && intake?.readyForSetupSteps && (
-        <div className="setup-steps-modal-backdrop" role="presentation" onMouseDown={() => setShowSteps(false)}>
-          <section className="setup-steps-modal" role="dialog" aria-modal="true" aria-labelledby="setup-steps-title" onMouseDown={(event) => event.stopPropagation()}>
-          <div className="section-header setup-steps-modal-header">
-            <div>
-              <p className="eyebrow">Ad manager checklist</p>
-              <h2 id="setup-steps-title">広告マネージャー操作手順</h2>
-            </div>
-            <button type="button" className="setup-modal-close" onClick={() => setShowSteps(false)} aria-label="閉じる">×</button>
-          </div>
-          <div className="setup-steps-modal-body">
-            <nav className="setup-step-rail" aria-label="出稿手順ステップ">
-              {editableSteps.map((step, index) => {
-                const done = step.steps.length > 0 && step.steps.every((_, itemIndex) => completedSetupTodos[setupTodoKey(step.id, itemIndex)]);
-                return (
-                  <button
-                    key={step.id}
-                    type="button"
-                    className={index === activeStepIndex ? "active" : done ? "done" : ""}
-                    onClick={() => setActiveSetupStep(index)}
-                  >
-                    <span>{done ? "✓" : index + 1}</span>
-                    {step.title}
-                  </button>
-                );
-              })}
-            </nav>
-            {activeStep && (
-              <article className="setup-step-workspace">
-                <div className="setup-step-progress">
-                  <span>{completedStepCount}/{editableSteps.length} steps</span>
-                  <progress value={completedStepCount} max={Math.max(editableSteps.length, 1)} />
-                </div>
-                <input
-                  aria-label={`${activeStep.title} の見出し`}
-                  value={activeStep.title}
-                  onChange={(event) => setEditableSteps((current) => current.map((item, index) => index === activeStepIndex ? { ...item, title: event.target.value } : item))}
-                />
-                <div className="setup-manager-todos">
-                  {activeStep.steps.map((stepText, itemIndex) => (
-                    <label key={`${activeStep.id}-${itemIndex}`} className="setup-manager-todo">
-                      <input
-                        type="checkbox"
-                        checked={Boolean(completedSetupTodos[setupTodoKey(activeStep.id, itemIndex)])}
-                        onChange={() => toggleSetupTodo(activeStep.id, itemIndex)}
-                      />
-                      <textarea
-                        aria-label={`${activeStep.title} Todo ${itemIndex + 1}`}
-                        value={stepText}
-                        onChange={(event) => setEditableSteps((current) => current.map((item, index) => index === activeStepIndex ? { ...item, steps: item.steps.map((text, textIndex) => textIndex === itemIndex ? event.target.value : text) } : item))}
-                        rows={2}
-                      />
-                    </label>
-                  ))}
-                </div>
-              </article>
-            )}
-          </div>
-          <div className="setup-steps-modal-actions">
-            <button type="button" className="secondary-button" onClick={() => setShowSteps(false)}>閉じる</button>
-            <button type="button" className="secondary-button" onClick={goNextSetupStep} disabled={!activeTodosDone || activeStepIndex >= editableSteps.length - 1}>
-              Next
-            </button>
-            <button type="button" className="md3-filled-button" onClick={() => void saveSetupSteps()}>
-              編集内容を保存
-            </button>
-          </div>
-          </section>
-        </div>
-      )}
     </div>
+  );
+}
+
+function SetupCampaignDraft({
+  facts,
+  setupSteps,
+  onBack,
+  onOpenConnections,
+}: {
+  facts: Record<string, unknown>;
+  setupSteps: SetupStep[];
+  onBack: () => void;
+  onOpenConnections: () => void;
+}) {
+  return (
+    <section className="setup-campaign-draft" aria-labelledby="setup-campaign-draft-title">
+      <div className="setup-campaign-draft-header">
+        <div>
+          <p className="eyebrow">回答完了</p>
+          <h2 id="setup-campaign-draft-title">キャンペーン作成案</h2>
+          <p>12項目の回答から、媒体管理画面で確認する前提と手順をまとめました。</p>
+        </div>
+        <strong>提案のみ・未実行</strong>
+      </div>
+
+      <dl className="setup-campaign-draft-summary">
+        {setupScoreDimensions.map((dimension) => (
+          <div key={dimension.key}>
+            <dt>{dimension.label}</dt>
+            <dd>{formatSetupFact(facts, dimension.key)}</dd>
+          </div>
+        ))}
+      </dl>
+
+      <section className="setup-human-procedure" aria-labelledby="setup-human-procedure-title">
+        <div>
+          <p className="eyebrow">Human review</p>
+          <h3 id="setup-human-procedure-title">媒体管理画面で人が確認する手順</h3>
+          <p>対象と設定値を確認し、担当者がGoogle Ads上で作成してください。</p>
+        </div>
+        {setupSteps.length ? (
+          <ol className="setup-human-procedure-list">
+            {setupSteps.map((step, index) => (
+              <li key={step.id}>
+                <span aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>
+                <div>
+                  <h4>{step.title}</h4>
+                  <ol>
+                    {step.steps.map((item) => <li key={item}>{item}</li>)}
+                  </ol>
+                </div>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p className="setup-human-procedure-empty">手順を生成できませんでした。回答内容を確認して、もう一度保存してください。</p>
+        )}
+      </section>
+
+      <aside className="setup-draft-guardrail">
+        <strong>この画面からキャンペーンは作成されません</strong>
+        <p>AIは作成案と確認手順だけを提示します。媒体への作成・公開は、担当者が内容を確認してから手動で行います。</p>
+      </aside>
+
+      <div className="setup-campaign-draft-actions">
+        <button type="button" className="md3-outlined-button" onClick={onBack}>回答一覧へ戻る</button>
+        <button type="button" className="md3-tonal-button" onClick={onOpenConnections}>データ連携を確認</button>
+      </div>
+    </section>
   );
 }
 
@@ -2477,9 +3438,9 @@ function setupPlatformInstructionSteps(platform: Exclude<PlatformFilter, "all">)
   }
   if (platform === "yahoo") {
     return [
-      "Yahoo: Google検索で使う構成を参考に、指名/一般/リターゲティングを分けて検討する。",
-      "Yahoo: 検索広告とディスプレイで目的を混ぜず、初期予算を分けて管理する。",
-      "Yahoo: CVタグと管理画面の成果計測を開始前に確認する。",
+      "LINEヤフー広告: Google検索で使う構成を参考に、指名/一般/リターゲティングを分けて検討する。",
+      "LINEヤフー広告: 検索広告とディスプレイで目的を混ぜず、初期予算を分けて管理する。",
+      "LINEヤフー広告: CVタグと管理画面の成果計測を開始前に確認する。",
     ];
   }
   return [
@@ -2494,35 +3455,113 @@ function DashboardPage({
   loading,
   error,
   range,
+  dateRange,
   platform,
+  selectedAdAccountId,
+  selectedCampaignId,
+  selectedAdGroupId,
+  selectedAdId,
+  filterOptions,
   latestRecommendation,
+  latestWriteCandidate,
   usingDemoData,
+  mockDashboardOpen,
+  allowMockDashboard,
+  googleWriteAvailable,
+  authHeaders,
   onRangeChange,
+  onDateRangeChange,
   onPlatformChange,
+  onAdAccountChange,
+  onCampaignChange,
+  onAdGroupChange,
+  onAdChange,
+  onOpenMockDashboard,
+  onCloseMockDashboard,
   onOpenAi,
-  onOpenColumns,
+  onStartNewAi,
   onOpenSetup,
   onOpenConnections,
+  onOpenPlans,
 }: {
   data: DashboardResponse | null;
   loading: boolean;
   error: string;
   range: number;
+  dateRange: DashboardDateRange;
   platform: PlatformFilter;
+  selectedAdAccountId: string;
+  selectedCampaignId: string;
+  selectedAdGroupId: string;
+  selectedAdId: string;
+  filterOptions: DashboardFilterOptions;
   latestRecommendation: ChatResponse["recommendation"] | null;
+  latestWriteCandidate: WriteCandidate | null;
   usingDemoData: boolean;
+  mockDashboardOpen: boolean;
+  allowMockDashboard: boolean;
+  googleWriteAvailable: boolean;
+  authHeaders: (extra?: HeadersInit) => HeadersInit;
   onRangeChange: (range: number) => void;
+  onDateRangeChange: (dateRange: DashboardDateRange) => void;
   onPlatformChange: (platform: PlatformFilter) => void;
-  onOpenAi: () => void;
-  onOpenColumns: (tags: string[]) => void;
+  onAdAccountChange: (adAccountId: string) => void;
+  onCampaignChange: (campaignId: string) => void;
+  onAdGroupChange: (adGroupId: string) => void;
+  onAdChange: (adId: string) => void;
+  onOpenMockDashboard: () => void;
+  onCloseMockDashboard: () => void;
+  onOpenAi: (prefill?: string) => void;
+  onStartNewAi: (prefill?: string) => void;
   onOpenSetup: () => void;
   onOpenConnections: () => void;
+  onOpenPlans: () => void;
 }) {
   const needsAdDataSetup = !loading && !data && !error;
   const [visibleMetrics, setVisibleMetrics] = useState<MetricKey[]>(defaultDashboardMetrics);
   const [visibleTrendMetrics, setVisibleTrendMetrics] = useState<TrendMetricKey[]>(["cost", "conversions", "cpa"]);
   const dashboardComment = data ? createDashboardComment(data) : "";
+  const recommendedActions = data ? buildRecommendedActionCards(data) : [];
   const anomalousMetrics = data ? findAnomalousMetrics(data) : new Set<MetricKey>();
+  const accountTimezone = data?.adAccounts.find((account) => account.id === selectedAdAccountId)?.timezone
+    ?? data?.adAccounts[0]?.timezone
+    ?? "Asia/Tokyo";
+  const [writeSelection, setWriteSelection] = useState<{ campaign: Campaign; candidate?: WriteCandidate } | null>(null);
+  const candidateCampaign = latestWriteCandidate
+    ? data?.campaigns.find((campaign) => (
+      String(campaign.customerId ?? "").replace(/\D/g, "") === latestWriteCandidate.customer_id.replace(/\D/g, "")
+      && String(campaign.campaignId).replace(/\D/g, "") === latestWriteCandidate.campaign_id.replace(/\D/g, "")
+    )) ?? null
+    : null;
+  const selectedScopeLabels = {
+    adAccount: selectedAdAccountId
+      ? filterOptions.accounts.find((item) => item.id === selectedAdAccountId)?.name ?? "選択中の広告アカウント"
+      : "",
+    campaign: selectedCampaignId
+      ? filterOptions.campaigns.find((item) => item.id === selectedCampaignId)?.name ?? "選択中のキャンペーン"
+      : "",
+    adGroup: selectedAdGroupId
+      ? filterOptions.adGroups.find((item) => item.id === selectedAdGroupId)?.name ?? "選択中の広告グループ"
+      : "",
+    ad: selectedAdId
+      ? filterOptions.ads.find((item) => item.id === selectedAdId)?.name ?? "選択中の広告"
+      : "",
+  };
+  const selectedScopeSummary = selectedScopeLabels.ad
+    || selectedScopeLabels.adGroup
+    || selectedScopeLabels.campaign
+    || selectedScopeLabels.adAccount
+    || "すべての広告アカウント";
+  const selectedPeriodSummary = dateRange.from && dateRange.to
+    ? `${dateRange.from}〜${dateRange.to}`
+    : `直近${range}日`;
+  const selectedPlatformSummary = platform === "all"
+    ? "全媒体"
+    : platform === "google"
+      ? "Google"
+      : platform === "meta"
+        ? "Meta"
+        : "LINEヤフー広告";
 
   function toggleMetric(metric: MetricKey) {
     setVisibleMetrics((current) =>
@@ -2542,123 +3581,228 @@ function DashboardPage({
 
   return (
     <div>
-      <PageHeader title="ダッシュボード" description="いま見るべき変化だけを先に出します。">
-        <FilterControls range={range} platform={platform} onRangeChange={onRangeChange} onPlatformChange={onPlatformChange} />
+      <PageHeader title="ダッシュボード" description="いま見るべき変化だけを先に出します。" className="dashboard-page-header">
+        <div className="dashboard-header-actions">
+          <span className="dashboard-filter-summary">
+            {selectedPeriodSummary}・{selectedPlatformSummary}・{selectedScopeSummary}
+          </span>
+          <nav className="header-support-links" aria-label="サポート">
+            <a href="/lp.html#faq">よくある質問</a>
+            <a href="/lp.html#contact">お問い合わせ</a>
+          </nav>
+          {allowMockDashboard && <button
+            type="button"
+            className={mockDashboardOpen ? "md3-outlined-button" : "md3-tonal-button"}
+            aria-label={mockDashboardOpen ? "実データ表示に戻る" : "モックダッシュボードを見る"}
+            onClick={mockDashboardOpen ? onCloseMockDashboard : onOpenMockDashboard}
+          >
+            <InlineIcon name={mockDashboardOpen ? "arrow" : "dashboard"} />
+            {mockDashboardOpen ? "実データ表示に戻る" : "モックを見る"}
+          </button>}
+        </div>
       </PageHeader>
       <StatusLine loading={loading} error={error} />
+      {usingDemoData && <MockDataBanner location="ダッシュボード" />}
       {needsAdDataSetup ? (
-        <DashboardDataGate onOpenSetup={onOpenSetup} onOpenConnections={onOpenConnections} />
-      ) : data && !usingDemoData ? (
+        <DashboardDataGate onOpenSetup={onOpenSetup} onOpenConnections={onOpenConnections} onOpenMockDashboard={onOpenMockDashboard} />
+      ) : data ? (
         <>
-          <section className="dashboard-briefing">
-            <article className="situation-card md3-expressive-card">
-              <span className="situation-mark" aria-hidden="true">!</span>
+          <section className="dashboard-advisor-hero" aria-labelledby="dashboard-advisor-title">
+            <picture className="dashboard-advisor-mascot" aria-hidden="true">
+              <source srcSet={mascotStaticSrc} media="(prefers-reduced-motion: reduce)" />
+              <img src={mascotWaitingSrc} alt="" width={96} height={104} />
+            </picture>
+            <div className="dashboard-advisor-bubble">
               <div>
-                <p className="eyebrow">一言コメント</p>
-                <h2>{dashboardComment}</h2>
+                <p className="eyebrow">ちょこっとくんの今日の見立て</p>
+                <h2 id="dashboard-advisor-title">{dashboardComment}</h2>
               </div>
-              <button type="button" className="md3-filled-button" onClick={onOpenAi}>
+              <button
+                type="button"
+                className="md3-filled-button"
+                onClick={() => onStartNewAi(buildDashboardConsultationPrompt(
+                  dashboardComment,
+                  range,
+                  dateRange,
+                  platform,
+                  selectedScopeLabels,
+                ))}
+              >
                 <InlineIcon name="ai" />
-                AIに確認
+                AIに相談する
               </button>
-            </article>
-            <MetricPicker selected={visibleMetrics} onToggle={toggleMetric} />
+            </div>
           </section>
 
+          <section className="recommended-actions-section" aria-labelledby="recommended-actions-title">
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">next best actions</p>
+                <h2 id="recommended-actions-title">ちょこっとくん推奨アクション</h2>
+              </div>
+              <div className="recommended-actions-meta">
+                <span className="priority-legend" aria-label="推奨アクションの優先度">
+                  <span className="priority-legend-label">確認する順番</span>
+                  <strong>高</strong>
+                  <span aria-hidden="true">→</span>
+                  <span>01</span>
+                  <span aria-hidden="true">→</span>
+                  <span>04</span>
+                  <span aria-hidden="true">→</span>
+                  <strong>低</strong>
+                </span>
+                <span className="human-approval-note">確認してから実施</span>
+              </div>
+            </div>
+            <div className="recommended-action-grid">
+              {recommendedActions.map((action, index) => (
+                <article key={action.title} className={`recommended-action-card action-tone-${action.tone}`}>
+                  <span className="recommended-action-number" aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>
+                  <div>
+                    <h3>{action.title}</h3>
+                    <p>{action.description}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onOpenAi([
+                      action.prompt,
+                      buildDashboardConsultationPrompt(
+                        dashboardComment,
+                        range,
+                        dateRange,
+                        platform,
+                        selectedScopeLabels,
+                      ),
+                    ].join("\n\n"))}
+                  >
+                    <InlineIcon name="ai" />
+                    AIに聞く
+                  </button>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          <section className="dashboard-alert-overview" aria-label="注意アラート">
+            <AnomalyTable
+              anomalies={data.anomalies}
+              onAsk={(anomaly) => onOpenAi(buildAnomalyConsultationPrompt(
+                anomaly,
+                range,
+                dateRange,
+                platform,
+                selectedScopeLabels,
+              ))}
+            />
+          </section>
+
+          <article className="card chart-card trend-card dashboard-trend-card">
+            <div className="dashboard-trend-filters">
+              <div className="dashboard-trend-filters-heading">
+                <div>
+                  <p className="eyebrow">グラフの条件</p>
+                  <strong>{selectedPeriodSummary}・{selectedPlatformSummary}</strong>
+                </div>
+                <span className="muted">期間と対象をここで変更できます</span>
+              </div>
+              <div className="dashboard-trend-filter-row">
+                <FilterControls
+                  range={range}
+                  dateRange={dateRange}
+                  platform={platform}
+                  timezone={accountTimezone}
+                  onRangeChange={onRangeChange}
+                  onDateRangeChange={onDateRangeChange}
+                  onPlatformChange={onPlatformChange}
+                />
+                <HierarchySelector
+                  options={filterOptions}
+                  selectedAdAccountId={selectedAdAccountId}
+                  selectedCampaignId={selectedCampaignId}
+                  selectedAdGroupId={selectedAdGroupId}
+                  selectedAdId={selectedAdId}
+                  onAdAccountChange={onAdAccountChange}
+                  onCampaignChange={onCampaignChange}
+                  onAdGroupChange={onAdGroupChange}
+                  onAdChange={onAdChange}
+                />
+              </div>
+            </div>
+            <div className="section-header chart-section-header">
+              <div>
+                <h2>トレンド</h2>
+                <p className="muted">押した指標だけを表示</p>
+              </div>
+              <TrendMetricPicker selected={visibleTrendMetrics} onToggle={toggleTrendMetric} />
+            </div>
+            <ResponsiveContainer width="100%" height={288}>
+              <LineChart data={trendSeriesData(data)} margin={{ top: 12, right: 16, left: 0, bottom: 4 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke={brandChartColors.grid} />
+                <XAxis dataKey="date" tickLine={false} axisLine={false} />
+                <YAxis tickLine={false} axisLine={false} width={72} tickFormatter={(value) => compactTrendTick(Number(value))} />
+                <Tooltip formatter={(value, name) => {
+                  const key = String(name) as TrendMetricKey;
+                  return [trendMetricCatalog[key]?.format(numericValue(value)) ?? numericValue(value), trendMetricCatalog[key]?.label ?? name];
+                }} />
+                <Legend />
+                {visibleTrendMetrics.map((metric) => (
+                  <Line
+                    key={metric}
+                    type="monotone"
+                    dataKey={metric}
+                    stroke={trendMetricCatalog[metric].color}
+                    strokeWidth={3}
+                    name={metric}
+                    dot={false}
+                  />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+          </article>
+
+          <MetricPicker selected={visibleMetrics} onToggle={toggleMetric} />
           <KpiCards summary={data.summary} changes={data.changes} visibleMetrics={visibleMetrics} anomalousMetrics={anomalousMetrics} />
 
-          <section className="dashboard-grid">
-            <article className="card chart-card trend-card">
-              <div className="section-header chart-section-header">
-                <div>
-                  <h2>トレンド</h2>
-                  <p className="muted">見たい線だけ表示</p>
-                </div>
-                <TrendMetricPicker selected={visibleTrendMetrics} onToggle={toggleTrendMetric} />
-              </div>
-              <ResponsiveContainer width="100%" height={288}>
-                <LineChart data={trendSeriesData(data)} margin={{ top: 12, right: 16, left: 0, bottom: 4 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke={brandChartColors.grid} />
-                  <XAxis dataKey="date" tickLine={false} axisLine={false} />
-                  <YAxis tickLine={false} axisLine={false} width={72} tickFormatter={(value) => compactTrendTick(Number(value))} />
-                  <Tooltip formatter={(value, name) => {
-                    const key = String(name) as TrendMetricKey;
-                    return [trendMetricCatalog[key]?.format(numericValue(value)) ?? numericValue(value), trendMetricCatalog[key]?.label ?? name];
-                  }} />
-                  <Legend />
-                  {visibleTrendMetrics.map((metric) => (
-                    <Line
-                      key={metric}
-                      type="monotone"
-                      dataKey={metric}
-                      stroke={trendMetricCatalog[metric].color}
-                      strokeWidth={3}
-                      name={metric}
-                      dot={false}
-                    />
-                  ))}
-                </LineChart>
-              </ResponsiveContainer>
-            </article>
-
-            <article className="card chart-card severity-card expressive-alert-card">
-              <div className="section-header">
-                <div>
-                  <h2>今見るべき変化</h2>
-                  <p className="muted">重要 / 注意 / 様子見</p>
-                </div>
-              </div>
-              <div className="severity-stack">
-                {severityChartData(data).map((entry) => (
-                  <div key={entry.severity} className={`severity-pill severity-${entry.severity.toLowerCase()}`}>
-                    <span>{severityLabel(entry.severity)}</span>
-                    <strong>{entry.count}</strong>
-                  </div>
-                ))}
-              </div>
-              <div className="threshold-card">
-                <div>
-                  <strong>しきい値</strong>
-                  <span>CPA +20% / CTR -5% / CVR -8%</span>
-                </div>
-                <button type="button" className="md3-tonal-button">調整</button>
-              </div>
-            </article>
-          </section>
-
-          <section className="lower-grid">
+          <section className={`lower-grid${latestRecommendation ? "" : " campaign-only"}`}>
             <article className="card campaign-card">
               <h2>費用が大きいキャンペーン</h2>
-              <CampaignTable rows={data.campaigns} compact={false} />
+              <CampaignTable
+                rows={data.campaigns}
+                compact={false}
+                writeEnabled={googleWriteAvailable}
+                onWrite={(campaign) => setWriteSelection({ campaign })}
+                onLocked={onOpenPlans}
+              />
             </article>
-            <article className="card help-card">
-              <h2>{latestRecommendation ? "最近のAI提案" : "AI推奨アクション"}</h2>
-              {latestRecommendation ? (
-                <>
-                  <p>{latestRecommendation.title}</p>
-                  <p className={`confidence-chip confidence-${latestRecommendation.confidence}`}>
-                    自信度: {confidenceLabels[latestRecommendation.confidence]}
-                  </p>
-                </>
-              ) : (
-                <div className="recommended-action-list">
-                  {buildRecommendedActions(data).map((action) => (
-                    <p key={action}>{action}</p>
-                  ))}
-                </div>
-              )}
-              <div className="help-actions">
-                <button type="button" onClick={onOpenAi}>
-                  <InlineIcon name="ai" />
-                  この状況をAIに相談
+            {latestRecommendation && (
+              <article className="card help-card">
+                <h2>最近のAI提案</h2>
+                <p>{latestRecommendation.title}</p>
+                <p className={`confidence-chip confidence-${latestRecommendation.confidence}`}>
+                  自信度: {confidenceLabels[latestRecommendation.confidence]}
+                </p>
+                {latestWriteCandidate && candidateCampaign && (
+                <button
+                  type="button"
+                  className={googleWriteAvailable ? "md3-tonal-button" : "secondary-button"}
+                  onClick={() => googleWriteAvailable
+                    ? setWriteSelection({ campaign: candidateCampaign, candidate: latestWriteCandidate })
+                    : onOpenPlans()}
+                >
+                  {googleWriteAvailable ? "AI提案の変更を確認" : "writeはスタンダード以上"}
                 </button>
-                <button type="button" className="secondary-button" onClick={() => onOpenColumns(data.relatedTags)}>
-                  関連コラムを見る
-                </button>
-              </div>
-            </article>
+                )}
+              </article>
+            )}
           </section>
-          <AnomalyTable anomalies={data.anomalies} />
+          {writeSelection && (
+            <GoogleWriteModal
+              campaign={writeSelection.campaign}
+              candidate={writeSelection.candidate}
+              authHeaders={authHeaders}
+              onClose={() => setWriteSelection(null)}
+            />
+          )}
         </>
       ) : (
         !loading && <EmptyState message="表示できる広告データがありません。" />
@@ -2670,9 +3814,11 @@ function DashboardPage({
 function DashboardDataGate({
   onOpenSetup,
   onOpenConnections,
+  onOpenMockDashboard,
 }: {
   onOpenSetup: () => void;
   onOpenConnections: () => void;
+  onOpenMockDashboard: () => void;
 }) {
   return (
     <div className="dashboard-data-gate-backdrop" role="presentation">
@@ -2686,125 +3832,20 @@ function DashboardDataGate({
           Google Adsアカウントを接続して同期すると、KPI、キャンペーン、異常検知、AI相談の文脈が実データに切り替わります。
         </p>
         <div className="dashboard-data-gate-actions">
-          <button type="button" onClick={onOpenConnections}>
+          <button type="button" className="md3-filled-button" onClick={onOpenConnections}>
             <InlineIcon name="plug" />
             データ連携へ
           </button>
-          <button type="button" className="secondary-button" onClick={onOpenSetup}>
+          <button type="button" className="md3-outlined-button" onClick={onOpenSetup}>
             <InlineIcon name="setup" />
             広告準備へ
           </button>
+          {allowMockDashboard && <button type="button" className="md3-tonal-button" onClick={onOpenMockDashboard}>
+            <InlineIcon name="dashboard" />
+            モックダッシュボードを見る
+          </button>}
         </div>
       </section>
-    </div>
-  );
-}
-
-function BiPage({
-  data,
-  loading,
-  error,
-  range,
-  platform,
-  usingDemoData,
-  onRangeChange,
-  onPlatformChange,
-}: {
-  data: DashboardResponse | null;
-  loading: boolean;
-  error: string;
-  range: number;
-  platform: PlatformFilter;
-  usingDemoData: boolean;
-  onRangeChange: (range: number) => void;
-  onPlatformChange: (platform: PlatformFilter) => void;
-}) {
-  const [rankingMetric, setRankingMetric] = useState<"revenue" | "cost" | "roas">("revenue");
-  const ranking = useMemo(
-    () => [...(data?.campaigns ?? [])].sort((a, b) => numericValue(b[rankingMetric]) - numericValue(a[rankingMetric])),
-    [data, rankingMetric],
-  );
-  const compositionData = useMemo(
-    () =>
-      (data?.campaigns ?? []).map((item) => ({
-        platform: `${item.platform} / ${item.campaign}`,
-        cost: item.cost,
-        fill: platformColor(item.platform),
-      })),
-    [data],
-  );
-
-  return (
-    <div>
-      <PageHeader title="BI分析" description="時系列、構成比、キャンペーン比較をAPIデータから分析します。">
-        <FilterControls range={range} platform={platform} onRangeChange={onRangeChange} onPlatformChange={onPlatformChange} />
-      </PageHeader>
-      {usingDemoData && <MockDataBanner location="BI分析" />}
-      <StatusLine loading={loading} error={error} />
-      {data ? (
-        <>
-          <section className="bi-summary">
-            <SimpleMetric label="費用" value={formatMoney(data.summary.cost)} />
-            <SimpleMetric label="売上" value={formatMoney(data.summary.revenue)} />
-            <SimpleMetric label="ROAS" value={formatPercent(data.summary.roas)} />
-            <SimpleMetric label="CPA" value={formatMoney(data.summary.cpa)} />
-          </section>
-          <section className="bi-grid">
-            <article className="card chart-card">
-              <h2>時系列（費用 / 売上 / CV）</h2>
-              <ResponsiveContainer width="100%" height={288}>
-                <LineChart data={data.series} margin={{ top: 12, right: 16, left: 0, bottom: 4 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke={brandChartColors.grid} />
-                  <XAxis dataKey="date" tickLine={false} axisLine={false} />
-                  <YAxis yAxisId="money" tickLine={false} axisLine={false} width={72} tickFormatter={(value) => `¥${Math.round(Number(value) / 1000)}k`} />
-                  <YAxis yAxisId="cv" orientation="right" allowDecimals={false} tickLine={false} axisLine={false} width={32} />
-                  <Tooltip />
-                  <Legend />
-                  <Line yAxisId="money" type="monotone" dataKey="cost" stroke={brandChartColors.yellowDeep} strokeWidth={2} name="費用" dot={false} />
-                  <Line yAxisId="money" type="monotone" dataKey="revenue" stroke={brandChartColors.green} strokeWidth={2} name="売上" dot={false} />
-                  <Line yAxisId="cv" type="monotone" dataKey="conversions" stroke={brandChartColors.greenSoft} strokeWidth={2} name="CV" />
-                </LineChart>
-              </ResponsiveContainer>
-            </article>
-            <article className="card chart-card">
-              <h2>構成比（キャンペーン別費用）</h2>
-              <ResponsiveContainer width="100%" height={288}>
-                <PieChart>
-                  <Pie data={compositionData} dataKey="cost" nameKey="platform" outerRadius={92}>
-                    {compositionData.map((entry) => (
-                      <Cell key={entry.platform} fill={entry.fill} />
-                    ))}
-                  </Pie>
-                  <Tooltip formatter={(value) => formatMoney(numericValue(value))} />
-                  <Legend />
-                </PieChart>
-              </ResponsiveContainer>
-            </article>
-          </section>
-          <section className="card ranking-card">
-            <div className="section-header">
-              <h2>キャンペーンランキング</h2>
-              <select value={rankingMetric} onChange={(event) => setRankingMetric(event.target.value as typeof rankingMetric)}>
-                <option value="revenue">売上</option>
-                <option value="cost">費用</option>
-                <option value="roas">ROAS</option>
-              </select>
-            </div>
-            <ResponsiveContainer width="100%" height={260}>
-              <BarChart data={ranking} layout="vertical" margin={{ top: 8, right: 16, left: 24, bottom: 4 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke={brandChartColors.grid} />
-                <XAxis type="number" tickLine={false} axisLine={false} />
-                <YAxis type="category" dataKey="campaign" tickLine={false} axisLine={false} width={132} />
-                <Tooltip formatter={(value) => (rankingMetric === "roas" ? formatPercent(numericValue(value)) : formatMoney(numericValue(value)))} />
-                <Bar dataKey={rankingMetric} fill={brandChartColors.green} radius={[0, 8, 8, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-            <CampaignTable rows={ranking} compact />
-          </section>
-        </>
-      ) : (
-        !loading && <EmptyState message="表示できるBIデータがありません。" />
-      )}
     </div>
   );
 }
@@ -2917,7 +3958,7 @@ function WorkItemsPanel({
   );
 }
 
-function AdColumnPage({
+function HelpPage({
   tags,
   selectedArticleId,
   bookmarkedArticleIds,
@@ -2934,6 +3975,9 @@ function AdColumnPage({
   const [detail, setDetail] = useState<ColumnDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [contentSource, setContentSource] = useState<"microcms" | "fallback" | null>(null);
+  const [providerConfigured, setProviderConfigured] = useState(false);
+  const [reloadToken, setReloadToken] = useState(0);
 
   function isBookmarked(articleId: string) {
     return bookmarkedArticleIds.includes(articleId);
@@ -2949,20 +3993,24 @@ function AdColumnPage({
     setLoading(true);
     setError("");
     const query = tags.length ? `?tags=${encodeURIComponent(tags.join(","))}` : "";
-    fetch(`${apiBaseUrl}/columns${query}`, { signal: controller.signal })
+    fetch(`${apiBaseUrl}/help/articles${query}`, { signal: controller.signal })
       .then(async (res) => {
         const data = await res.json();
-        if (!res.ok) throw new Error(data?.error ?? "Adコラムの取得に失敗しました。");
+        if (!res.ok) throw new Error(data?.error ?? "ヘルプ記事の取得に失敗しました。");
         setArticles(data.articles as HelpArticle[]);
+        setContentSource(data.source === "microcms" ? "microcms" : "fallback");
+        setProviderConfigured(Boolean(data.providerConfigured));
       })
       .catch((caught) => {
         if (caught instanceof DOMException && caught.name === "AbortError") return;
         setArticles(filterDemoArticles(tags));
+        setContentSource("fallback");
+        setProviderConfigured(false);
         setError(caught instanceof Error ? `デモ記事を表示中: ${caught.message}` : "デモ記事を表示中です。");
       })
       .finally(() => setLoading(false));
     return () => controller.abort();
-  }, [tags, selectedArticleId]);
+  }, [reloadToken, tags, selectedArticleId]);
 
   useEffect(() => {
     if (!selectedArticleId) {
@@ -2972,11 +4020,13 @@ function AdColumnPage({
     const controller = new AbortController();
     setLoading(true);
     setError("");
-    fetch(`${apiBaseUrl}/columns/${selectedArticleId}`, { signal: controller.signal })
+    fetch(`${apiBaseUrl}/help/articles/${selectedArticleId}`, { signal: controller.signal })
       .then(async (res) => {
         const data = await res.json();
         if (!res.ok) throw new Error(data?.error ?? "記事の取得に失敗しました。");
         setDetail(data as ColumnDetail);
+        setContentSource(data.source === "microcms" ? "microcms" : "fallback");
+        setProviderConfigured(Boolean(data.providerConfigured));
       })
       .catch((caught) => {
         if (caught instanceof DOMException && caught.name === "AbortError") return;
@@ -2987,19 +4037,27 @@ function AdColumnPage({
             related: demoArticles.filter((item) => item.id !== selectedArticleId).slice(0, 2),
           });
         }
+        setContentSource("fallback");
+        setProviderConfigured(false);
         setError(caught instanceof Error ? `デモ記事を表示中: ${caught.message}` : "デモ記事を表示中です。");
       })
       .finally(() => setLoading(false));
     return () => controller.abort();
-  }, [selectedArticleId]);
+  }, [reloadToken, selectedArticleId]);
 
   if (selectedArticleId) {
     return (
       <div>
         <button type="button" className="back-button" onClick={() => onSelectArticle(null)}>
-          Adコラム一覧へ戻る
+          ヘルプ一覧へ戻る
         </button>
         <StatusLine loading={loading} error={error} />
+        <HelpSourceNotice
+          source={contentSource}
+          providerConfigured={providerConfigured}
+          onRetry={() => setReloadToken((value) => value + 1)}
+        />
+        {error && <button type="button" className="secondary-button help-retry-button" onClick={() => setReloadToken((value) => value + 1)}>公開コンテンツを再取得</button>}
         {detail && (
           <>
             <article className="card article-detail">
@@ -3011,12 +4069,12 @@ function AdColumnPage({
                 />
               </div>
               <h1>{detail.article.title}</h1>
-              <p>{detail.article.body}</p>
+              <MarkdownContent content={detail.article.body} />
               <TagList tags={detail.article.tags} />
             </article>
             {detail.related.length > 0 && (
               <section className="related-section">
-                <h2>関連記事</h2>
+                <h2>関連ヘルプ</h2>
                 <div className="related-grid">
                   {detail.related.map((article) => (
                     <article className="card related-card" key={article.id}>
@@ -3047,8 +4105,8 @@ function AdColumnPage({
   return (
     <div>
       <PageHeader
-        title="Adコラム"
-        description="異常タイプ別にすぐ読める運用ナレッジ記事です。AI提案からもここに遷移します。"
+        title="ヘルプ"
+        description="設定や広告運用で迷ったときに、必要な手順と判断基準を確認できます。"
       >
         <div className="bookmark-summary">
           <span>{bookmarkedArticleIds.length}</span>
@@ -3057,15 +4115,21 @@ function AdColumnPage({
       </PageHeader>
       {tags.length > 0 && <p className="muted column-filter">絞り込みタグ: {tags.join(", ")}</p>}
       <StatusLine loading={loading} error={error} />
+      <HelpSourceNotice
+        source={contentSource}
+        providerConfigured={providerConfigured}
+        onRetry={() => setReloadToken((value) => value + 1)}
+      />
+      {error && <button type="button" className="secondary-button help-retry-button" onClick={() => setReloadToken((value) => value + 1)}>公開コンテンツを再取得</button>}
       {articles.length > 0 ? (
         <section className="column-grid">
           {articles.map((article) => (
             <article key={article.id} className="card article-card">
               <div className="article-card-header">
-                <p className="muted">{article.difficulty}</p>
+                <p className="muted">{[article.category, article.difficulty].filter(Boolean).join(" ・ ")}</p>
               </div>
               <h2>{article.title}</h2>
-              <p>{article.body}</p>
+              <p>{article.summary || article.body}</p>
               <TagList tags={article.tags} />
               <div className="article-actions">
                 <button type="button" onClick={() => onSelectArticle(article.id)}>
@@ -3080,8 +4144,29 @@ function AdColumnPage({
           ))}
         </section>
       ) : (
-        !loading && <EmptyState message="該当するAdコラムがありません。" />
+        !loading && <EmptyState message="該当するヘルプ記事がありません。" />
       )}
+    </div>
+  );
+}
+
+function HelpSourceNotice({
+  source,
+  providerConfigured,
+  onRetry,
+}: {
+  source: "microcms" | "fallback" | null;
+  providerConfigured: boolean;
+  onRetry: () => void;
+}) {
+  if (source !== "fallback") return null;
+  return (
+    <div className="help-source-notice" role="status">
+      <div>
+        <strong>基本ヘルプを表示中</strong>
+        <span>{providerConfigured ? "microCMSから取得できなかったため、内蔵コンテンツへ切り替えました。" : "microCMS接続前のため、内蔵コンテンツを表示しています。"}</span>
+      </div>
+      {providerConfigured && <button type="button" onClick={onRetry}>再取得</button>}
     </div>
   );
 }
@@ -3114,12 +4199,10 @@ function ConnectionsPage({
   session,
   workspace,
   usingDemoData,
-  onOpenAi,
 }: {
-  session: Session;
+  session: Pick<Session, "access_token">;
   workspace: WorkspaceSession;
   usingDemoData: boolean;
-  onOpenAi: () => void;
 }) {
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatusResponse | null>(null);
   const [connectionLoading, setConnectionLoading] = useState(true);
@@ -3136,14 +4219,13 @@ function ConnectionsPage({
   const plannedConnections: Array<{
     platform: Exclude<PlatformFilter, "all">;
     label: string;
-    accountHint: string;
   }> = [
-    { platform: "google", label: "Google Ads", accountHint: "Google Ads API OAuth + 承認付きwrite" },
-    { platform: "meta", label: "Meta Ads", accountHint: "Meta Marketing API read OAuth" },
-    { platform: "yahoo", label: "Yahoo Ads", accountHint: "Yahoo広告 API read OAuth" },
+    { platform: "google", label: "Google Ads" },
+    { platform: "meta", label: "Meta Ads" },
+    { platform: "yahoo", label: "LINEヤフー広告" },
   ];
   const policyNote =
-    connectionStatus?.policy.note ??
+    connectionStatus?.policy?.note ??
     "Google Ads writeは、対象と理由を確認したうえで承認付きAPIだけが実行します。AI単体では媒体変更しません。";
 
   useEffect(() => {
@@ -3215,6 +4297,10 @@ function ConnectionsPage({
 
   async function syncCustomer(customer: GoogleCustomer) {
     setConnectionNotice("");
+    if (customer.manager) {
+      setConnectionNotice("MCC（管理者アカウント）は同期できません。MCC配下のクライアント広告アカウントを選んでください。");
+      return;
+    }
     setSyncingCustomerId(customer.customerId);
     const res = await fetch(`${apiBaseUrl}/sync/google`, {
       method: "POST",
@@ -3230,7 +4316,12 @@ function ConnectionsPage({
       setConnectionNotice(data?.error ?? "Google Ads syncに失敗しました。");
       return;
     }
-    setConnectionNotice(`Google Ads ${data.customerId} から ${data.rowsSynced} 行を同期しました。Dashboard/AIに実データを反映します。`);
+    const rowsSynced = Number(data.rowsSynced ?? 0);
+    if (rowsSynced > 0) {
+      setConnectionNotice(`Google Ads ${data.customerId} から ${rowsSynced} 行を同期しました。Dashboard/AIに実データを反映します。`);
+      return;
+    }
+    setConnectionNotice(`Google Ads ${data.customerId} は接続済みですが、直近30日に同期できる指標行がありませんでした。対象期間や権限、配信実績を確認してください。`);
   }
 
   return (
@@ -3239,23 +4330,43 @@ function ConnectionsPage({
       {usingDemoData && <MockDataBanner location="データ連携" />}
       <StatusLine loading={connectionLoading} error="" />
       {connectionNotice && <p className="muted connection-fallback">{connectionNotice}</p>}
-      <section className="card connection-intro">
-        <div>
-          <p className="eyebrow">
-            <InlineIcon name="lock" />
-            OAuth + approval
-          </p>
-          <h2>ユーザーにAPIキー取得やsecret入力をお願いしません。</h2>
-          <p>
-            「連携する」を押すと各広告媒体の認可画面へ移動します。Google Adsの変更操作は、対象IDと承認を確認したAPI routeだけが実行します。
-            トークンはサーバー側で暗号化保存し、ブラウザやAIへの文脈には含めません。
-          </p>
-          <p className="connection-policy">{policyNote}</p>
-        </div>
-        <button type="button" onClick={onOpenAi}>
-          <InlineIcon name="ai" />
-          連携前にAI相談を試す
-        </button>
+      <section className="connection-list" aria-label="広告媒体の接続状態">
+        {plannedConnections.map((connection) => {
+          const isGoogle = connection.platform === "google";
+          const status = isGoogle ? googleStatus : "pending";
+          return (
+            <article className={`connection-row platform-${connection.platform}`} key={connection.platform}>
+              <div className="connection-platform-title">
+                <span className="connection-platform-icon" aria-hidden="true"><InlineIcon name="plug" /></span>
+                <h2>{connection.label}</h2>
+              </div>
+              <p className="connection-row-summary">
+                {isGoogle
+                  ? status === "connected"
+                    ? "接続済みです。広告アカウントを選び、最新データを同期できます。"
+                    : "OAuthで接続します。APIキーやsecretの入力は不要です。"
+                  : `${connection.label}のread連携を準備しています。`}
+              </p>
+              <p className={`connection-status connection-row-status status-${status}`}>
+                <span aria-hidden="true">●</span>
+                {isGoogle ? statusLabel(status) : "準備中"}
+              </p>
+              {isGoogle ? (
+                <div className="connection-actions">
+                  <button type="button" className="md3-filled-button" onClick={() => void openGoogleOAuth()}>
+                    <InlineIcon name="plug" />
+                    {status === "connected" ? "再連携" : "Google Adsと連携"}
+                  </button>
+                  <button type="button" className="md3-outlined-button" disabled={googleStatus !== "connected"} onClick={() => void loadGoogleCustomers()}>
+                    広告アカウントを選ぶ
+                  </button>
+                </div>
+              ) : (
+                <span className="connection-unavailable">対応予定</span>
+              )}
+            </article>
+          );
+        })}
       </section>
       {customers.length > 0 && (
         <section className="card account-picker">
@@ -3270,9 +4381,11 @@ function ConnectionsPage({
                   {customer.managerCustomerId ? ` / MCC ${customer.managerCustomerId} 配下` : ""}
                 </span>
                 <div className="inline-actions">
-                  <button type="button" onClick={() => void connectCustomer(customer)}>接続</button>
+                  <button type="button" disabled={Boolean(customer.manager)} onClick={() => void connectCustomer(customer)}>
+                    {customer.manager ? "接続不可" : "接続"}
+                  </button>
                   <button type="button" className="secondary-button" disabled={Boolean(customer.manager) || syncingCustomerId === customer.customerId} onClick={() => void syncCustomer(customer)}>
-                    {syncingCustomerId === customer.customerId ? "同期中" : "30日同期"}
+                    {customer.manager ? "同期不可" : syncingCustomerId === customer.customerId ? "同期中" : "30日同期"}
                   </button>
                 </div>
               </li>
@@ -3280,228 +4393,307 @@ function ConnectionsPage({
           </ul>
         </section>
       )}
-      <section className="oauth-flow">
-        {["ログイン", "OAuth許可", "分析と承認付き実行"].map((step, index) => (
-          <div className="oauth-step" key={step}>
-            <span>{index + 1}</span>
-            <strong>{step}</strong>
-          </div>
-        ))}
-      </section>
-      <GoogleWriteAuditReviewPanel session={session} workspace={workspace} />
-      <section className="connection-grid">
-        {plannedConnections.map((connection) => {
-          const connector = findPlannedConnector(connectionStatus, connection.platform);
-          return (
-            <article className={`card connection-card platform-${connection.platform}`} key={connection.platform}>
-              <div className="connection-card-header">
-                <p className="badge">APIキー不要</p>
-                <p className={`connection-status status-${connection.platform === "google" ? googleStatus : "pending"}`}>
-                  {connection.platform === "google" ? statusLabel(googleStatus) : "未接続"}
-                </p>
-              </div>
-              <h2>{connection.label}</h2>
-              <p className="muted">{connection.accountHint} を予定しています。現時点では社内テスト用のmockデータで画面とAI相談を確認します。</p>
-              <ul className="connection-notes">
-                <li><InlineIcon name="lock" />OAuth tokenは暗号化保存</li>
-                <li><InlineIcon name="check" />AI単体の自動変更なし</li>
-                <li><InlineIcon name="check" />Google Adsは承認付きwrite対応</li>
-                <li><InlineIcon name="lock" />secretやtokenはブラウザに表示しない</li>
-              </ul>
-              {connector?.oauthPath && (
-                <p className="connection-route">
-                  予定導線: <code>{connector.oauthPath}</code>
-                </p>
-              )}
-              {connection.platform === "google" ? (
-                <div className="connection-actions">
-                  <button type="button" onClick={() => void openGoogleOAuth()}>
-                    <InlineIcon name="plug" />
-                    Google Ads と連携
-                  </button>
-                  <button type="button" className="secondary-button" disabled={googleStatus !== "connected"} onClick={() => void loadGoogleCustomers()}>
-                    アカウント一覧を取得
-                  </button>
-                </div>
-              ) : (
-                <button type="button" disabled>{connection.label} OAuth準備中</button>
-              )}
-            </article>
-          );
-        })}
-      </section>
+      <details className="connection-disclosure">
+        <summary>
+          <span>安全性と承認ルール</span>
+          <small>詳しく見る</small>
+        </summary>
+        <div className="connection-disclosure-body">
+          <p>各媒体の認可画面を使うため、APIキーやsecretの入力は不要です。tokenはサーバー側で暗号化保存し、ブラウザやAIへの文脈には含めません。</p>
+          <p>{policyNote}</p>
+        </div>
+      </details>
     </div>
   );
 }
 
 function SettingsPage({
   workspace,
+  billingStatus,
+  plans,
+  authHeaders,
+  onPortal,
   onOpenConnections,
 }: {
   workspace: WorkspaceSession;
+  billingStatus: BillingStatus | null;
+  plans: BillingPlanCatalog[];
+  authHeaders: (extra?: HeadersInit) => HeadersInit;
+  onPortal: () => void;
   onOpenConnections: () => void;
 }) {
+  const [reports, setReports] = useState<CustomerReport[]>([]);
+  const [reportEmailEnabled, setReportEmailEnabled] = useState(true);
+  const [members, setMembers] = useState<Array<{ userId: string; email: string | null; role: string }>>([]);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [notice, setNotice] = useState("");
+  const [activeSection, setActiveSection] = useState<"account" | "notifications" | "billing" | "members">("account");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    Promise.all([
+      fetch(`${apiBaseUrl}/reports?limit=6`, { headers: authHeaders(), signal: controller.signal }),
+      fetch(`${apiBaseUrl}/notification-preferences`, { headers: authHeaders(), signal: controller.signal }),
+      fetch(`${apiBaseUrl}/workspace/members`, { headers: authHeaders(), signal: controller.signal }),
+    ]).then(async ([reportsResponse, preferenceResponse, membersResponse]) => {
+      if (reportsResponse.ok) setReports(((await reportsResponse.json()).reports as CustomerReport[]) ?? []);
+      if (preferenceResponse.ok) setReportEmailEnabled(Boolean((await preferenceResponse.json()).reportEmailEnabled));
+      if (membersResponse.ok) setMembers(((await membersResponse.json()).members as typeof members) ?? []);
+    }).catch(() => undefined);
+    return () => controller.abort();
+  }, [workspace.workspaceId]);
+
+  async function updateReportEmail(enabled: boolean) {
+    setReportEmailEnabled(enabled);
+    const response = await fetch(`${apiBaseUrl}/notification-preferences`, {
+      method: "PATCH",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ reportEmailEnabled: enabled }),
+    });
+    if (!response.ok) setNotice("レポートメール設定を更新できませんでした。");
+  }
+
+  async function inviteMember() {
+    const response = await fetch(`${apiBaseUrl}/workspace/invitations`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ email: inviteEmail, role: "member" }),
+    });
+    const data = await response.json();
+    setNotice(response.ok ? `${inviteEmail} へ招待を送信しました。` : data?.error ?? "招待に失敗しました。");
+    if (response.ok) setInviteEmail("");
+  }
+
+  const currentPlan = plans.find((plan) => plan.id === billingStatus?.plan?.id);
+  const currentPlanPrice = currentPlan?.prices.month;
+  const aiUsagePercent = Math.min(100, Math.max(0, billingStatus?.usage?.usagePercent ?? 0));
+  const aiChatEnabled = billingStatus?.plan?.entitlements.aiChat ?? false;
+  const visibleMembers = members.length > 0
+    ? members
+    : [{ userId: workspace.userId, email: workspace.userEmail, role: "current" }];
+  const settingsSections = [
+    { id: "account" as const, label: "アカウント" },
+    { id: "notifications" as const, label: "通知" },
+    { id: "billing" as const, label: "契約・請求" },
+    { id: "members" as const, label: "メンバー" },
+  ];
+
   return (
     <div className="settings-page">
-      <PageHeader title="アカウント設定" description="通知、基本情報、プラン導線をまとめて確認します。" />
-      <section className="settings-grid">
-        <article className="card settings-card profile-settings-card">
-          <p className="eyebrow">Workspace</p>
-          <h2>{workspace.workspaceName}</h2>
-          <dl className="settings-list">
-            <div>
-              <dt>ログイン</dt>
-              <dd>{workspace.userEmail}</dd>
-            </div>
-            <div>
-              <dt>権限</dt>
-              <dd>広告データ確認 / AI相談</dd>
-            </div>
-          </dl>
-        </article>
-        <article className="card settings-card notification-card">
-          <p className="eyebrow">
-            <InlineIcon name="bell" />
-            Notification
-          </p>
-          <h2>確認リマインド</h2>
-          <div className="notification-options">
-            {[
-              "3日経ったのでCPAを確認",
-              "7日経ったので検索語句を確認",
-              "CVが急減したら通知",
-            ].map((label, index) => (
-              <label key={label} className="notification-toggle">
-                <input type="checkbox" defaultChecked={index < 2} />
-                <span>{label}</span>
+      <PageHeader title="設定" description="" />
+      <div className="settings-layout">
+        <nav className="settings-nav" aria-label="設定メニュー">
+          {settingsSections.map((section) => (
+            <button
+              key={section.id}
+              id={`settings-tab-${section.id}`}
+              type="button"
+              role="tab"
+              aria-selected={activeSection === section.id}
+              aria-controls={`settings-panel-${section.id}`}
+              className={activeSection === section.id ? "active" : ""}
+              onClick={() => setActiveSection(section.id)}
+            >
+              {section.label}
+            </button>
+          ))}
+        </nav>
+
+        <div className="settings-content">
+          {activeSection === "account" && (
+            <section id="settings-panel-account" className="settings-panel" role="tabpanel" aria-labelledby="settings-tab-account">
+              <header className="settings-panel-header">
+                <div>
+                  <h2>アカウント</h2>
+                  <p>{workspace.workspaceName}</p>
+                </div>
+                <span className="settings-avatar" aria-hidden="true">{workspace.workspaceName.slice(0, 1).toUpperCase()}</span>
+              </header>
+              <dl className="settings-detail-list">
+                <div>
+                  <dt>ワークスペース</dt>
+                  <dd>{workspace.workspaceName}</dd>
+                </div>
+                <div>
+                  <dt>メールアドレス</dt>
+                  <dd>{workspace.userEmail}</dd>
+                </div>
+                <div>
+                  <dt>現在のプラン</dt>
+                  <dd>{billingStatus?.plan?.label ?? "確認中"} <span>{billingStatus?.plan?.interval === "year" ? "年額" : "月額"}</span></dd>
+                </div>
+              </dl>
+            </section>
+          )}
+
+          {activeSection === "notifications" && (
+            <section id="settings-panel-notifications" className="settings-panel" role="tabpanel" aria-labelledby="settings-tab-notifications">
+              <header className="settings-panel-header">
+                <div>
+                  <h2>通知</h2>
+                  <p>改善レポートの受信設定</p>
+                </div>
+              </header>
+              <label className="settings-switch-row">
+                <span>
+                  <strong>メール通知</strong>
+                  <small>3日ごとの改善レポートを受け取る</small>
+                </span>
+                <input
+                  type="checkbox"
+                  role="switch"
+                  checked={reportEmailEnabled}
+                  onChange={(event) => void updateReportEmail(event.target.checked)}
+                />
               </label>
-            ))}
-          </div>
-        </article>
-        <article className="card settings-card plan-card">
-          <p className="eyebrow">Plan / options</p>
-          <h2>オプション導線</h2>
-          <p className="muted">追加分析、通知、承認付き実行のオプション選択へ進める入口です。</p>
-          <div className="settings-actions">
-            <button type="button" className="md3-filled-button">プランを見る</button>
-            <button type="button" className="md3-tonal-button" onClick={onOpenConnections}>データ連携を確認</button>
-          </div>
-        </article>
-      </section>
+              <div className="settings-subsection-heading">
+                <h3>最近のレポート</h3>
+                <span>{reports.length}件</span>
+              </div>
+              <div className="settings-report-list">
+                {reports.length ? reports.map((report) => (
+                  <article key={report.id}>
+                    <div>
+                      <strong>{report.periodStart} 〜 {report.periodEnd}</strong>
+                      <span>{reportStatusLabel(report.status)}・メール{reportEmailStatusLabel(report.emailStatus)}</span>
+                    </div>
+                    <p>{String(report.content.conclusion ?? "詳細を管理画面で確認できます。")}</p>
+                  </article>
+                )) : <p className="settings-empty">レポートはまだありません。</p>}
+              </div>
+            </section>
+          )}
+
+          {activeSection === "billing" && (
+            <section id="settings-panel-billing" className="settings-panel" role="tabpanel" aria-labelledby="settings-tab-billing">
+              <header className="settings-panel-header">
+                <div>
+                  <h2>契約・請求</h2>
+                  <p>{billingStatus?.plan?.label ?? "プラン確認中"}</p>
+                </div>
+                <span className="settings-status-badge">{billingStatusLabel(billingStatus)}</span>
+              </header>
+              <dl className="settings-billing-summary">
+                <div>
+                  <dt>月額料金</dt>
+                  <dd>{currentPlanPrice ? formatPlanAmount(currentPlanPrice.amount, currentPlanPrice.currency) : "-"}</dd>
+                </div>
+                <div>
+                  <dt>請求周期</dt>
+                  <dd>{billingStatus?.plan?.interval === "year" ? "年額" : "月額"}</dd>
+                </div>
+                <div>
+                  <dt>利用者</dt>
+                  <dd>{visibleMembers.length} / {billingStatus?.plan?.entitlements.maxUsers ?? "-"}名</dd>
+                </div>
+                <div>
+                  <dt>広告アカウント</dt>
+                  <dd>最大 {billingStatus?.plan?.entitlements.maxAdAccounts ?? "-"}件</dd>
+                </div>
+              </dl>
+              <div className="settings-ai-usage">
+                <div className="settings-ai-usage-heading">
+                  <strong>AI相談</strong>
+                  <span>{aiChatEnabled ? `${aiUsagePercent}%利用` : "対象外"}</span>
+                </div>
+                <div
+                  className={`settings-ai-usage-bar${aiChatEnabled ? "" : " is-disabled"}`}
+                  role="progressbar"
+                  aria-label="今月のAI相談利用率"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={aiChatEnabled ? aiUsagePercent : 0}
+                >
+                  <span style={{ width: `${aiChatEnabled ? aiUsagePercent : 0}%` }} />
+                </div>
+                <div className="settings-ai-usage-meta">
+                  <span>
+                    {aiChatEnabled
+                      ? billingStatus?.usage?.remainingConsultationsEstimate != null
+                        ? `残り約${billingStatus.usage.remainingConsultationsEstimate}回`
+                        : "利用回数を集計中"
+                      : "AI改善レポートのみ"}
+                  </span>
+                  {billingStatus?.usage?.resetAt && timestampIsValid(billingStatus.usage.resetAt) && (
+                    <span>{formatDateTime(billingStatus.usage.resetAt)}にリセット</span>
+                  )}
+                </div>
+              </div>
+              <div className="settings-actions">
+                <button type="button" className="md3-filled-button" onClick={onPortal}>プラン変更・解約</button>
+                <button type="button" className="md3-outlined-button" onClick={onOpenConnections}>データ連携</button>
+                {billingStatus?.premiumOnboardingBookingUrl && (
+                  <a className="md3-tonal-button" href={billingStatus.premiumOnboardingBookingUrl} target="_blank" rel="noreferrer">
+                    初期支援を予約
+                  </a>
+                )}
+              </div>
+            </section>
+          )}
+
+          {activeSection === "members" && (
+            <section id="settings-panel-members" className="settings-panel" role="tabpanel" aria-labelledby="settings-tab-members">
+              <header className="settings-panel-header">
+                <div>
+                  <h2>メンバー</h2>
+                  <p>{visibleMembers.length} / {billingStatus?.plan?.entitlements.maxUsers ?? "-"}名</p>
+                </div>
+              </header>
+              <ul className="settings-member-list">
+                {visibleMembers.map((member) => (
+                  <li key={member.userId}>
+                    <span className="settings-member-avatar" aria-hidden="true">{(member.email ?? member.userId).slice(0, 1).toUpperCase()}</span>
+                    <span>
+                      <strong>{member.email ?? member.userId}</strong>
+                      <small>{member.role === "owner" ? "オーナー" : member.role === "current" ? "ログイン中" : "メンバー"}</small>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <form
+                className="settings-invite-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void inviteMember();
+                }}
+              >
+                <label htmlFor="settings-invite-email">メンバーを招待</label>
+                <div>
+                  <input
+                    id="settings-invite-email"
+                    type="email"
+                    value={inviteEmail}
+                    placeholder="name@example.com"
+                    onChange={(event) => setInviteEmail(event.target.value)}
+                  />
+                  <button type="submit" className="md3-filled-button" disabled={!inviteEmail.trim()}>招待を送る</button>
+                </div>
+              </form>
+            </section>
+          )}
+        </div>
+      </div>
+      {notice && <p className="form-message">{notice}</p>}
     </div>
   );
 }
 
-function GoogleWriteAuditReviewPanel({
-  session,
-  workspace,
-}: {
-  session: Session;
-  workspace: WorkspaceSession;
-}) {
-  const [approvalNote, setApprovalNote] = useState("CPA改善のため一時停止し、24時間後にCPAが改善しなければ戻す。");
-  const [auditLogs, setAuditLogs] = useState<GoogleWriteAuditLog[]>([]);
-  const [auditNotice, setAuditNotice] = useState("");
-  const approvedByUserId = workspace.userId;
-  const approvalMetadata = {
-    approvalType: "explicit_user_confirmation",
-    approvedByUserId,
-    approvedByEmail: workspace.userEmail,
-  };
-  const canSubmitApproval = approvalNote.length >= 10 && hasRollbackCondition(approvalNote);
-  const latestMatchingAudit = auditLogs.find((log) => googleWriteAuditMatches(log, approvalMetadata));
+function reportStatusLabel(status: string) {
+  if (status === "completed" || status === "ready") return "生成済み";
+  if (status === "failed") return "未生成";
+  if (status === "processing" || status === "pending") return "生成中";
+  return status;
+}
 
-  useEffect(() => {
-    const controller = new AbortController();
-    fetch(`${apiBaseUrl}/audit-logs/recent?workspaceId=${workspace.workspaceId}&eventTypePrefix=google_ads.&limit=8`, {
-      headers: { Authorization: `Bearer ${session.access_token}` },
-      signal: controller.signal,
-    })
-      .then(async (res) => {
-        const data = await res.json();
-        if (!res.ok) throw new Error(data?.error ?? "監査ログを取得できませんでした。");
-        setAuditLogs((data.logs as GoogleWriteAuditLog[]) ?? []);
-      })
-      .catch((caught) => {
-        if (caught instanceof DOMException && caught.name === "AbortError") return;
-        setAuditNotice(caught instanceof Error ? caught.message : "監査ログを取得できませんでした。");
-      });
-    return () => controller.abort();
-  }, [session.access_token, workspace.workspaceId]);
-
-  async function submitApprovalCandidate() {
-    if (approvalNote.length < 10 || !hasRollbackCondition(approvalNote)) {
-      setAuditNotice("理由と戻し条件を10文字以上で入力してください。");
-      return;
-    }
-    const payload = { confirmed: true, approvalNote };
-    setAuditNotice(`承認メモを確認しました。実行APIへ送る場合は ${JSON.stringify(payload)} を使います。`);
-  }
-
-  return (
-    <section className="card google-write-audit-card" aria-label="audit review">
-      <div className="section-header">
-        <div>
-          <p className="eyebrow">audit review</p>
-          <h2>承認付きwrite候補</h2>
-          <p className="muted">Google Adsの停止/予算変更は、理由・戻し条件・承認者・監査ログを確認してから実行します。</p>
-        </div>
-        <span className={`status-chip ${canSubmitApproval ? "status-accepted" : "status-suggested"}`}>
-          {canSubmitApproval ? "承認条件OK" : "戻し条件が必要"}
-        </span>
-      </div>
-      <div className="google-write-grid">
-        <label className="approval-note-field">
-          変更理由と戻し条件
-          <textarea value={approvalNote} onChange={(event) => setApprovalNote(event.target.value)} rows={3} />
-        </label>
-        <div className="approval-metadata">
-          <strong>承認メタデータ</strong>
-          <span>approvalType: {approvalMetadata.approvalType}</span>
-          <span>approvedByUserId: {approvedByUserId}</span>
-          <span>{workspace.userEmail}</span>
-        </div>
-      </div>
-      <div className="inline-actions">
-        <button type="button" onClick={() => void submitApprovalCandidate()} disabled={!canSubmitApproval}>
-          明示承認として確認
-        </button>
-        <button type="button" className="secondary-button" disabled>
-          API実行は対象ID選択後
-        </button>
-      </div>
-      {auditNotice && <p className="muted connection-fallback">{auditNotice}</p>}
-      <div className="audit-log-list">
-        <strong>最近のGoogle Ads監査ログ</strong>
-        {latestMatchingAudit ? (
-          <p className="audit-match">この承認者メタデータに一致する監査ログがあります。</p>
-        ) : (
-          <p className="muted">対象の実行後、ここで監査ログ一致を確認します。</p>
-        )}
-        {auditLogs.slice(0, 4).map((log) => (
-          <article key={log.id ?? `${log.event_type}-${log.created_at}`} className="audit-log-row">
-            <span>{log.event_type ?? "google_ads.audit"}</span>
-            <small>{log.created_at ? formatDateTime(log.created_at) : "日時未取得"}</small>
-          </article>
-        ))}
-      </div>
-    </section>
-  );
+function reportEmailStatusLabel(status: string) {
+  if (status === "sent") return "送信済み";
+  if (status === "failed") return "送信失敗";
+  if (status === "pending") return "未送信";
+  return status;
 }
 
 function hasRollbackCondition(approvalNote: string) {
   return /(戻|復元|restore|rollback|悪化|改善しなければ|24時間後|翌日)/i.test(approvalNote);
-}
-
-function googleWriteAuditMatches(log: GoogleWriteAuditLog, approvalMetadata: { approvalType: string; approvedByUserId: string }) {
-  return (
-    getAuditMetadata(log, "approvalType") === "explicit_user_confirmation" &&
-    getAuditMetadata(log, "approvedByUserId") === approvalMetadata.approvedByUserId
-  );
-}
-
-function getAuditMetadata(log: GoogleWriteAuditLog, key: string) {
-  return String(log.payload?.[key] ?? "");
 }
 
 function statusLabel(status: string) {
@@ -3520,17 +4712,10 @@ function timestampIsValid(value: string) {
   return Number.isFinite(Date.parse(value));
 }
 
-function findPlannedConnector(
-  status: ConnectionStatusResponse | null,
-  platform: Exclude<PlatformFilter, "all">,
-) {
-  return status?.nextConnectors.find((connector) => connector.platform === platform);
-}
-
 function MockDataBanner({ location }: { location: string }) {
   return (
     <p className="demo-banner">
-      {location} は社内ユーザーテスト用のmock広告データを表示しています。Google / Meta / Yahoo の実広告アカウントは未接続です。
+      {location} は社内ユーザーテスト用のmock広告データを表示しています。Google / Meta / LINEヤフー広告 の実広告アカウントは未接続です。
     </p>
   );
 }
@@ -3551,6 +4736,7 @@ function AiSidebar(props: {
   thinkingStatus: string;
   loading: boolean;
   error: string;
+  usage: UsageSummary | null;
   onThreadChange: (threadId: string) => void;
   onNewThread: () => void;
   onCreateTodos: (message: ChatMessage) => void;
@@ -3558,8 +4744,81 @@ function AiSidebar(props: {
   onSend: () => void;
   onClose: () => void;
 }) {
+  const usagePercent = Math.min(100, Math.max(0, props.usage?.usagePercent ?? 0));
+  const [sidebarWidth, setSidebarWidth] = useState(readAiSidebarWidth);
+  const [isResizing, setIsResizing] = useState(false);
+  const resizeStart = useRef({ pointerX: 0, width: aiSidebarDefaultWidth });
+
+  useEffect(() => {
+    window.localStorage.setItem(aiSidebarWidthStorageKey, String(sidebarWidth));
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    if (!isResizing) return;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "ew-resize";
+    document.body.style.userSelect = "none";
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const delta = resizeStart.current.pointerX - event.clientX;
+      setSidebarWidth(clampAiSidebarWidth(resizeStart.current.width + delta));
+    };
+    const handlePointerUp = () => setIsResizing(false);
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp, { once: true });
+
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+    };
+  }, [isResizing]);
+
   return (
-    <aside id="ai-sidebar" className={`ai-sidebar advisor-mode-${props.advisorMode}${props.loading ? " is-thinking" : ""}`}>
+    <aside
+      id="ai-sidebar"
+      className={`ai-sidebar advisor-mode-${props.advisorMode}${props.loading ? " is-thinking" : ""}${isResizing ? " is-resizing" : ""}`}
+      style={{ "--ai-sidebar-width": `${sidebarWidth}px` } as CSSProperties}
+    >
+      <div
+        className="ai-sidebar-resize-handle"
+        role="separator"
+        aria-label="AIチャットの幅を変更"
+        aria-orientation="vertical"
+        aria-valuemin={aiSidebarMinWidth}
+        aria-valuemax={availableAiSidebarMaxWidth()}
+        aria-valuenow={sidebarWidth}
+        aria-valuetext={`${sidebarWidth}px`}
+        tabIndex={0}
+        title="ドラッグして幅を変更。ダブルクリックで元に戻します"
+        onPointerDown={(event) => {
+          if (window.innerWidth <= 600) return;
+          event.preventDefault();
+          resizeStart.current = { pointerX: event.clientX, width: sidebarWidth };
+          setIsResizing(true);
+        }}
+        onDoubleClick={() => setSidebarWidth(clampAiSidebarWidth(aiSidebarDefaultWidth))}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowLeft") {
+            event.preventDefault();
+            setSidebarWidth((current) => clampAiSidebarWidth(current + 40));
+          }
+          if (event.key === "ArrowRight") {
+            event.preventDefault();
+            setSidebarWidth((current) => clampAiSidebarWidth(current - 40));
+          }
+          if (event.key === "Home") {
+            event.preventDefault();
+            setSidebarWidth(aiSidebarMinWidth);
+          }
+          if (event.key === "End") {
+            event.preventDefault();
+            setSidebarWidth(availableAiSidebarMaxWidth());
+          }
+        }}
+      />
       <header className="ai-sidebar-header">
         <div className="ai-header-main">
           <span className="ai-header-icon" aria-hidden="true">
@@ -3575,7 +4834,16 @@ function AiSidebar(props: {
                 {props.advisorMode === "beginner" ? "はじめて向け" : "実務者向け"}
               </span>
             </div>
-            <p>{props.advisorMode === "beginner" ? "数字の見方から順番に整理" : "仮説と判断材料を短く深掘り"}</p>
+            <p className="ai-header-subtitle">{props.advisorMode === "beginner" ? "数字の見方から順番に整理" : "仮説と判断材料を短く深掘り"}</p>
+            {props.usage && (
+              <div className="ai-header-usage">
+                <div>
+                  <span>今月 {usagePercent}%</span>
+                  <span>{props.usage.remainingConsultationsEstimate != null ? `残り約${props.usage.remainingConsultationsEstimate}回` : "集計中"}</span>
+                </div>
+                <span className="ai-header-usage-bar" aria-hidden="true"><span style={{ width: `${usagePercent}%` }} /></span>
+              </div>
+            )}
           </div>
         </div>
         <button type="button" className="ai-close-button" onClick={props.onClose} aria-label="AIチャットを閉じる">
@@ -3598,8 +4866,9 @@ function AiSidebar(props: {
             <option value={props.threadId}>新しい相談</option>
           )}
         </select>
-        <button type="button" onClick={props.onNewThread} disabled={props.loading}>
-          新しい相談
+        <button type="button" className="thread-new-button" onClick={props.onNewThread} disabled={props.loading}>
+          <span aria-hidden="true">＋</span>
+          新規
         </button>
       </div>
       <ChatConversation {...props} />
@@ -3629,6 +4898,23 @@ function AiSidebar(props: {
   );
 }
 
+function AiLockedPanel({ planLabel, onClose, onUpgrade }: { planLabel: string; onClose: () => void; onUpgrade: () => void }) {
+  return (
+    <aside id="ai-sidebar" className="ai-sidebar ai-locked-panel" aria-label="AIチャットロック">
+      <header className="ai-sidebar-header">
+        <div className="ai-header-copy"><h2>AI広告相談</h2><p>{planLabel}プランでは通常チャットは利用できません。</p></div>
+        <button type="button" className="ai-close-button" onClick={onClose} aria-label="閉じる">×</button>
+      </header>
+      <div className="ai-locked-content">
+        <InlineIcon name="lock" />
+        <h3>3日ごとの改善レポートはそのまま届きます</h3>
+        <p>スタンダード以上に変更すると、レポートの詳細確認や通常のAI相談を利用できます。</p>
+        <button type="button" onClick={onUpgrade}>プランを確認</button>
+      </div>
+    </aside>
+  );
+}
+
 function ChatConversation({
   input,
   setInput,
@@ -3638,6 +4924,7 @@ function ChatConversation({
   loading,
   error,
   advisorMode,
+  threadLoading,
   onAdvisorModeChange,
   onCreateTodos,
   onToggleTodo,
@@ -3651,6 +4938,7 @@ function ChatConversation({
   loading: boolean;
   error: string;
   advisorMode: AdvisorMode;
+  threadLoading: boolean;
   onAdvisorModeChange: (mode: AdvisorMode) => void;
   onCreateTodos: (message: ChatMessage) => void;
   onToggleTodo: (todoId: string) => void;
@@ -3659,16 +4947,32 @@ function ChatConversation({
   return (
     <div className="chat-conversation">
       <div className="messages" aria-live="polite">
-        {messages.map((message, index) => (
-          <article key={message.id ?? `${message.role}-${index}`} className={`message ${message.role}`}>
-            <MarkdownContent content={message.content} />
-            {message.role === "assistant" && extractTodosFromMessage(message.content).length > 0 && (
-              <button type="button" className="todo-create-button" onClick={() => onCreateTodos(message)}>
-                ToDoを生成
-              </button>
+        {threadLoading ? (
+          <div className="chat-loading-state"><span className="loading-circle" aria-hidden="true" />会話を読み込んでいます</div>
+        ) : messages.map((message, index) => (
+          <div key={message.id ?? `${message.role}-${index}`} className={`message-row ${message.role}`}>
+            {message.role === "assistant" && (
+              <span className="message-avatar" aria-hidden="true">
+                <img src={mascotStaticSrc} alt="" width={28} height={30} />
+              </span>
             )}
-          </article>
+            <article className={`message ${message.role}`}>
+              <MarkdownContent content={message.content} />
+              {message.role === "assistant" && extractTodosFromMessage(message.content).length > 0 && (
+                <button type="button" className="todo-create-button" onClick={() => onCreateTodos(message)}>
+                  ToDoを生成
+                </button>
+              )}
+            </article>
+          </div>
         ))}
+        {!threadLoading && !messages.some((message) => message.role === "user") && !input.trim() && (
+          <div className="chat-suggestions" aria-label="相談例">
+            <button type="button" onClick={() => setInput("CPAが悪化した原因と、最初に確認する項目を教えて")}>CPA悪化の原因を確認</button>
+            <button type="button" onClick={() => setInput("今週、優先して実施する広告改善を整理して")}>今週の優先施策を整理</button>
+            <button type="button" onClick={() => setInput("コンバージョン計測で確認すべき設定を教えて")}>計測設定を確認</button>
+          </div>
+        )}
         {todos.length > 0 && <TodoList items={todos} onToggle={onToggleTodo} />}
         {loading && (
           <ThinkingMessage text={thinkingStatus} />
@@ -3676,35 +4980,36 @@ function ChatConversation({
       </div>
       {error && <p className="error">{error}</p>}
       <div className="composer md3-chat-field">
-        <label className="composer-label" htmlFor="ai-chat-input">AIへの相談内容</label>
+        <label className="composer-label" htmlFor="ai-chat-input">相談内容</label>
         <textarea
           id="ai-chat-input"
           value={input}
           onChange={(event) => setInput(event.target.value)}
-          placeholder="例: CPAが悪化した原因と、今日確認する順番を教えて"
-          rows={3}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              if (!loading && input.trim()) onSend();
+            }
+          }}
+          placeholder="広告運用で気になることを入力"
+          rows={2}
         />
         <div className="composer-supporting-row">
-          <span className="composer-supporting-text">
-            {advisorMode === "beginner" ? "専門用語をほどいて、確認順に整理します" : "指標・仮説・運用判断を短く深掘りします"}
-          </span>
-          <div className="composer-actions">
-            <label className="advisor-mode-select">
-              <span>回答</span>
-              <select
-                aria-label="AI回答モード"
-                value={advisorMode}
-                onChange={(event) => onAdvisorModeChange(event.target.value as AdvisorMode)}
-                disabled={loading}
-              >
-                <option value="beginner">はじめて</option>
-                <option value="experienced">実務</option>
-              </select>
-            </label>
-            <button type="button" onClick={onSend} disabled={loading} aria-label={loading ? "分析中" : "送信"}>
-              {loading ? "…" : "↑"}
-            </button>
-          </div>
+          <label className="advisor-mode-select">
+            <select
+              aria-label="AI回答モード"
+              value={advisorMode}
+              onChange={(event) => onAdvisorModeChange(event.target.value as AdvisorMode)}
+              disabled={loading}
+            >
+              <option value="beginner">はじめて向け</option>
+              <option value="experienced">実務者向け</option>
+            </select>
+          </label>
+          <span className="composer-key-hint">Enterで送信</span>
+          <button type="button" className="composer-send-button" onClick={onSend} disabled={loading || !input.trim()} aria-label={loading ? "分析中" : "送信"}>
+            {loading ? "…" : "↑"}
+          </button>
         </div>
       </div>
     </div>
@@ -3748,10 +5053,27 @@ function ThinkingMessage({ text }: { text: string }) {
 
 function MarkdownContent({ content }: { content: string }) {
   const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const impactCandidates = lines
+    .map((line, index) => ({ line, index, magnitude: impactMagnitude(line) }))
+    .filter((candidate): candidate is { line: string; index: number; magnitude: number } => candidate.magnitude !== null)
+    .sort((left, right) => right.magnitude - left.magnitude);
+  const primaryImpactLine = impactCandidates[0]?.line ?? null;
   const elements: React.ReactNode[] = [];
   let paragraph: string[] = [];
   let orderedItems: string[] = [];
   let unorderedItems: string[] = [];
+
+  function renderLine(line: string) {
+    if (line !== primaryImpactLine) return renderInlineMarkdown(line);
+    const tone = impactTone(line);
+    if (!tone) return renderInlineMarkdown(line);
+    return (
+      <span className={`impact-highlight impact-${tone}`}>
+        <span className="impact-label">影響大・{tone === "positive" ? "プラス" : "マイナス"}</span>
+        {renderInlineMarkdown(line)}
+      </span>
+    );
+  }
 
   function flushParagraph() {
     if (paragraph.length === 0) return;
@@ -3759,7 +5081,7 @@ function MarkdownContent({ content }: { content: string }) {
       <p key={`p-${elements.length}`}>
         {paragraph.map((line, index) => (
           <span key={`${line}-${index}`}>
-            {renderInlineMarkdown(line)}
+            {renderLine(line)}
             {index < paragraph.length - 1 && <br />}
           </span>
         ))}
@@ -3773,7 +5095,7 @@ function MarkdownContent({ content }: { content: string }) {
     elements.push(
       <ol key={`ol-${elements.length}`}>
         {orderedItems.map((item, index) => (
-          <li key={`${item}-${index}`}>{renderInlineMarkdown(item)}</li>
+          <li key={`${item}-${index}`}>{renderLine(item)}</li>
         ))}
       </ol>,
     );
@@ -3785,7 +5107,7 @@ function MarkdownContent({ content }: { content: string }) {
     elements.push(
       <ul key={`ul-${elements.length}`}>
         {unorderedItems.map((item, index) => (
-          <li key={`${item}-${index}`}>{renderInlineMarkdown(item)}</li>
+          <li key={`${item}-${index}`}>{renderLine(item)}</li>
         ))}
       </ul>,
     );
@@ -3851,6 +5173,24 @@ function MarkdownContent({ content }: { content: string }) {
       {elements}
     </div>
   );
+}
+
+function impactMagnitude(line: string) {
+  if (!/(CPA|CVR|CPC|ROAS|CTR|CV|成果|費用|売上|要因|影響|悪化|改善|低下|上昇|増加|減少)/i.test(line)) return null;
+  const percentages = [...line.matchAll(/([+-]?\d+(?:\.\d+)?)\s*%/g)].map((match) => Math.abs(Number(match[1])));
+  return percentages.length > 0 ? Math.max(...percentages) : null;
+}
+
+function impactTone(line: string): "positive" | "negative" | null {
+  const signedValue = line.match(/([+-])\s*\d+(?:\.\d+)?\s*%/);
+  if (signedValue) {
+    const isInverseMetric = /(CPA|CPC|費用|コスト)/i.test(line);
+    const isPositiveChange = signedValue[1] === "+";
+    return isInverseMetric === isPositiveChange ? "negative" : "positive";
+  }
+  if (/(悪化|低下|減少|下落|不足|欠損)/.test(line)) return "negative";
+  if (/(改善|向上|増加|上昇|回復)/.test(line)) return "positive";
+  return null;
 }
 
 function renderInlineMarkdown(text: string) {
@@ -3952,35 +5292,160 @@ async function readChatStream(response: Response, onStatus: (status: string) => 
   return finalChat;
 }
 
-function PageHeader({ title, description, children }: { title: string; description: string; children?: React.ReactNode }) {
-  return <header className="page-header"><div><h1>{title}</h1><p>{description}</p></div>{children}</header>;
+function PageHeader({
+  title,
+  description,
+  children,
+  className = "",
+}: {
+  title: string;
+  description: string;
+  children?: React.ReactNode;
+  className?: string;
+}) {
+  return <header className={`page-header${className ? ` ${className}` : ""}`}><div><h1>{title}</h1>{description && <p>{description}</p>}</div>{children}</header>;
 }
 
 function FilterControls({
   range,
+  dateRange,
   platform,
+  timezone,
   onRangeChange,
+  onDateRangeChange,
   onPlatformChange,
 }: {
   range: number;
+  dateRange: DashboardDateRange;
   platform: PlatformFilter;
+  timezone: string;
   onRangeChange: (range: number) => void;
+  onDateRangeChange: (dateRange: DashboardDateRange) => void;
   onPlatformChange: (platform: PlatformFilter) => void;
 }) {
+  const invalidRange = Boolean(dateRange.from && dateRange.to && dateRange.from > dateRange.to);
   return (
     <div className="filters">
-      <select aria-label="期間" value={range} onChange={(event) => onRangeChange(Number(event.target.value))}>
-        <option value="7">7日</option>
-        <option value="14">14日</option>
-        <option value="30">30日</option>
-      </select>
-      <select aria-label="媒体" value={platform} onChange={(event) => onPlatformChange(event.target.value as PlatformFilter)}>
-        <option value="all">全媒体</option>
-        <option value="google">Google</option>
-        <option value="meta">Meta</option>
-        <option value="yahoo">Yahoo</option>
-      </select>
+      <label>
+        <span>期間プリセット</span>
+        <select aria-label="期間プリセット" value={dateRange.from || dateRange.to ? "custom" : range} onChange={(event) => {
+          if (event.target.value !== "custom") onRangeChange(Number(event.target.value));
+        }}>
+          <option value="7">7日</option>
+          <option value="14">14日</option>
+          <option value="30">30日</option>
+          {(dateRange.from || dateRange.to) && <option value="custom">指定期間</option>}
+        </select>
+      </label>
+      <fieldset className="date-range-filter" aria-label="日付範囲">
+        <legend>日付範囲</legend>
+        <label>
+          <span>開始日</span>
+          <input
+            type="date"
+            value={dateRange.from}
+            max={dateRange.to || todayDateInputValue()}
+            onChange={(event) => onDateRangeChange({ ...dateRange, from: event.target.value })}
+          />
+        </label>
+        <span aria-hidden="true">–</span>
+        <label>
+          <span>終了日</span>
+          <input
+            type="date"
+            value={dateRange.to}
+            min={dateRange.from || undefined}
+            max={todayDateInputValue()}
+            onChange={(event) => onDateRangeChange({ ...dateRange, to: event.target.value })}
+          />
+        </label>
+        {(dateRange.from || dateRange.to) && (
+          <button type="button" className="filter-clear-button" onClick={() => onRangeChange(range)}>
+            クリア
+          </button>
+        )}
+        <small className="date-range-timezone">広告アカウントのタイムゾーン: {timezone}</small>
+      </fieldset>
+      {invalidRange && <span className="filter-error" role="alert">開始日は終了日以前を指定してください。</span>}
+      <label>
+        <span>媒体</span>
+        <select aria-label="媒体" value={platform} onChange={(event) => onPlatformChange(event.target.value as PlatformFilter)}>
+          <option value="all">全媒体</option>
+          <option value="google">Google</option>
+          <option value="meta">Meta</option>
+          <option value="yahoo">LINEヤフー広告</option>
+        </select>
+      </label>
     </div>
+  );
+}
+
+function HierarchySelector({
+  options,
+  selectedAdAccountId,
+  selectedCampaignId,
+  selectedAdGroupId,
+  selectedAdId,
+  onAdAccountChange,
+  onCampaignChange,
+  onAdGroupChange,
+  onAdChange,
+}: {
+  options: DashboardFilterOptions;
+  selectedAdAccountId: string;
+  selectedCampaignId: string;
+  selectedAdGroupId: string;
+  selectedAdId: string;
+  onAdAccountChange: (value: string) => void;
+  onCampaignChange: (value: string) => void;
+  onAdGroupChange: (value: string) => void;
+  onAdChange: (value: string) => void;
+}) {
+  const campaigns = options.campaigns.filter((item) => !selectedAdAccountId || item.adAccountId === selectedAdAccountId);
+  const adGroups = options.adGroups.filter((item) => (
+    (!selectedAdAccountId || item.adAccountId === selectedAdAccountId)
+    && (!selectedCampaignId || item.campaignId === selectedCampaignId)
+  ));
+  const ads = options.ads.filter((item) => (
+    (!selectedAdAccountId || item.adAccountId === selectedAdAccountId)
+    && (!selectedCampaignId || item.campaignId === selectedCampaignId)
+    && (!selectedAdGroupId || item.adGroupId === selectedAdGroupId)
+  ));
+  return (
+    <fieldset className="hierarchy-filter" aria-label="広告対象の絞り込み">
+      <legend>広告対象</legend>
+      <label>
+        <span>広告アカウント</span>
+        <select value={selectedAdAccountId} onChange={(event) => onAdAccountChange(event.target.value)} disabled={options.accounts.length === 0}>
+          <option value="">すべて</option>
+          {options.accounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
+        </select>
+      </label>
+      <span className="hierarchy-separator" aria-hidden="true">›</span>
+      <label>
+        <span>キャンペーン</span>
+        <select value={selectedCampaignId} onChange={(event) => onCampaignChange(event.target.value)} disabled={campaigns.length === 0}>
+          <option value="">すべて</option>
+          {campaigns.map((campaign) => <option key={`${campaign.adAccountId}:${campaign.id}`} value={campaign.id}>{campaign.name}</option>)}
+        </select>
+      </label>
+      <span className="hierarchy-separator" aria-hidden="true">›</span>
+      <label>
+        <span>広告グループ</span>
+        <select value={selectedAdGroupId} onChange={(event) => onAdGroupChange(event.target.value)} disabled={adGroups.length === 0}>
+          <option value="">すべて</option>
+          {adGroups.map((group) => <option key={`${group.adAccountId}:${group.id}`} value={group.id}>{group.name}</option>)}
+        </select>
+      </label>
+      <span className="hierarchy-separator" aria-hidden="true">›</span>
+      <label>
+        <span>広告</span>
+        <select value={selectedAdId} onChange={(event) => onAdChange(event.target.value)} disabled={ads.length === 0}>
+          <option value="">すべて</option>
+          {ads.map((ad) => <option key={`${ad.adGroupId}:${ad.id}`} value={ad.id}>{ad.name}</option>)}
+        </select>
+      </label>
+    </fieldset>
   );
 }
 
@@ -3992,7 +5457,7 @@ function MetricPicker({ selected, onToggle }: { selected: MetricKey[]; onToggle:
         <strong>{selected.length}個を表示中</strong>
       </div>
       <div className="metric-chip-grid">
-        {(Object.keys(metricCatalog) as MetricKey[]).map((metric) => (
+        {dashboardMetricKeys.map((metric) => (
           <button
             key={metric}
             type="button"
@@ -4051,43 +5516,203 @@ function KpiCards({
       anomalous: anomalousMetrics.has(metric),
     };
   });
+  const primaryCards = primaryDashboardMetrics
+    .map((metric) => cards.find((card) => card.key === metric))
+    .filter((card): card is NonNullable<typeof card> => Boolean(card));
+  const secondaryCards = secondaryDashboardMetrics
+    .map((metric) => cards.find((card) => card.key === metric))
+    .filter((card): card is NonNullable<typeof card> => Boolean(card));
+
+  function renderCards(group: typeof cards) {
+    return group.map((card) => (
+      <article key={card.key} className={`card kpi-card kpi-card-${card.tone}${card.anomalous ? " is-alert" : ""}`}>
+        <div className="kpi-card-label-row">
+          <p>{card.label}</p>
+          <span className="kpi-help" tabIndex={0} aria-label={`${card.subLabel}: ${card.help}`}>
+            ?
+            <span role="tooltip">{card.help}</span>
+          </span>
+        </div>
+        <span className="kpi-sub-label">{card.subLabel}</span>
+        <strong>{card.value}</strong>
+        <span className={changeClass(card.change)}>{formatChange(card.change)}</span>
+        {card.anomalous && <em>要確認</em>}
+      </article>
+    ));
+  }
+
   return (
-    <section aria-label="KPIサマリー" className="kpi-grid">
-      {cards.map((card) => (
-        <article key={card.key} className={`card kpi-card kpi-card-${card.tone}${card.anomalous ? " is-alert" : ""}`}>
-          <div className="kpi-card-label-row">
-            <p>{card.label}</p>
-            <span className="kpi-help" tabIndex={0} aria-label={`${card.subLabel}: ${card.help}`}>
-              ?
-              <span role="tooltip">{card.help}</span>
-            </span>
+    <section aria-label="KPIサマリー" className="dashboard-kpi-groups">
+      <div className="dashboard-kpi-group">
+        <div className="dashboard-kpi-heading">
+          <div>
+            <p className="eyebrow">primary metrics</p>
+            <h2>主要指標</h2>
           </div>
-          <span className="kpi-sub-label">{card.subLabel}</span>
-          <strong>{card.value}</strong>
-          <span className={changeClass(card.change)}>{formatChange(card.change)}</span>
-          {card.anomalous && <em>要確認</em>}
-        </article>
-      ))}
+          <span>費用・CV・CPA・CTR</span>
+        </div>
+        {primaryCards.length > 0
+          ? <div className="kpi-grid kpi-grid-primary">{renderCards(primaryCards)}</div>
+          : <p className="dashboard-kpi-empty">表示指標から主要指標を選んでください。</p>}
+      </div>
+      <div className="dashboard-kpi-group dashboard-kpi-group-secondary">
+        <div className="dashboard-kpi-heading">
+          <div>
+            <p className="eyebrow">supporting metrics</p>
+            <h2>補助指標</h2>
+          </div>
+          <span>配信量とクリック効率の変化</span>
+        </div>
+        {secondaryCards.length > 0
+          ? <div className="kpi-grid kpi-grid-secondary">{renderCards(secondaryCards)}</div>
+          : <p className="dashboard-kpi-empty">表示指標から補助指標を選んでください。</p>}
+      </div>
     </section>
   );
 }
 
-function SimpleMetric({ label, value }: { label: string; value: string }) {
-  return <article className="card simple-metric"><p>{label}</p><strong>{value}</strong></article>;
-}
-
-function CampaignTable({ rows, compact }: { rows: Campaign[]; compact: boolean }) {
+function CampaignTable({
+  rows,
+  compact,
+  writeEnabled,
+  onWrite,
+  onLocked,
+}: {
+  rows: Campaign[];
+  compact: boolean;
+  writeEnabled?: boolean;
+  onWrite?: (campaign: Campaign) => void;
+  onLocked?: () => void;
+}) {
+  const showWrite = !compact && Boolean(onWrite || onLocked);
   return (
     <div className="table-wrap">
       <table>
-        <thead><tr><th>キャンペーン</th><th>媒体</th><th>費用</th>{!compact && <th>売上</th>}<th>CPA</th><th>ROAS</th>{compact && <th>CTR</th>}{compact && <th>CVR</th>}</tr></thead>
-        <tbody>{rows.map((item) => <tr key={item.campaignId}><td>{item.campaign}</td><td>{item.platform}</td><td>{formatMoney(item.cost)}</td>{!compact && <td>{formatMoney(item.revenue)}</td>}<td>{formatMoney(item.cpa)}</td><td>{formatPercent(item.roas)}</td>{compact && <td>{formatPercent(item.ctr, 2)}</td>}{compact && <td>{formatPercent(item.cvr, 2)}</td>}</tr>)}</tbody>
+        <thead><tr><th>キャンペーン</th><th>媒体</th><th>費用</th>{!compact && <th>売上</th>}<th>CPA</th><th>ROAS</th>{compact && <th>CTR</th>}{compact && <th>CVR</th>}{showWrite && <th>承認付き変更</th>}</tr></thead>
+        <tbody>{rows.map((item) => <tr key={`${item.adAccountId ?? "account"}-${item.campaignId}`}><td>{item.campaign}<small>{item.status ? ` / ${item.status}` : ""}</small></td><td>{platformLabel(item.platform)}</td><td>{formatMoney(item.cost)}</td>{!compact && <td>{formatMoney(item.revenue)}</td>}<td>{formatMoney(item.cpa)}</td><td>{formatPercent(item.roas)}</td>{compact && <td>{formatPercent(item.ctr, 2)}</td>}{compact && <td>{formatPercent(item.cvr, 2)}</td>}{showWrite && <td><button type="button" className={writeEnabled ? "md3-tonal-button" : "md3-outlined-button"} onClick={() => writeEnabled ? onWrite?.(item) : onLocked?.()} disabled={!item.customerId}>{writeEnabled ? "変更を確認" : "ロック / プラン変更"}</button></td>}</tr>)}</tbody>
       </table>
     </div>
   );
 }
 
-function AnomalyTable({ anomalies }: { anomalies: DashboardResponse["anomalies"] }) {
+function GoogleWriteModal({
+  campaign,
+  candidate,
+  authHeaders,
+  onClose,
+}: {
+  campaign: Campaign;
+  candidate?: WriteCandidate;
+  authHeaders: (extra?: HeadersInit) => HeadersInit;
+  onClose: () => void;
+}) {
+  const [preview, setPreview] = useState<{
+    current: {
+      status: "ENABLED" | "PAUSED";
+      budgetAmount: number | null;
+      currency: string | null;
+      budgetExplicitlyShared: boolean;
+    };
+    observedAt: string;
+  } | null>(null);
+  const [operation, setOperation] = useState<"status" | "budget">(candidate?.operation === "campaign_budget" ? "budget" : "status");
+  const [status, setStatus] = useState<"ENABLED" | "PAUSED">(
+    candidate?.operation === "campaign_status" && String(candidate.proposed_value).toUpperCase() === "ENABLED"
+      ? "ENABLED"
+      : "PAUSED",
+  );
+  const [budget, setBudget] = useState(candidate?.operation === "campaign_budget" ? String(candidate.proposed_value) : "");
+  const [approvalNote, setApprovalNote] = useState(candidate ? `${candidate.approval_reason}。${candidate.rollback_condition}` : "");
+  const [confirmed, setConfirmed] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [result, setResult] = useState<Record<string, unknown> | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(`${apiBaseUrl}/google/customers/${campaign.customerId}/campaigns/${campaign.campaignId}/change-preview`, {
+      headers: authHeaders(),
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data?.error ?? "変更前の現在値を取得できませんでした。");
+        setPreview(data.preview);
+        if (!candidate) {
+          setStatus(data.preview.current.status === "PAUSED" ? "ENABLED" : "PAUSED");
+          setBudget(data.preview.current.budgetAmount === null ? "" : String(data.preview.current.budgetAmount));
+        }
+      })
+      .catch((caught) => setNotice(caught instanceof Error ? caught.message : "previewの取得に失敗しました。"))
+      .finally(() => setLoading(false));
+    return () => controller.abort();
+  }, [campaign.customerId, campaign.campaignId, candidate]);
+
+  async function submit(rollback = false) {
+    if (!preview || !confirmed || approvalNote.trim().length < 10 || !hasRollbackCondition(approvalNote)) {
+      setNotice("明示確認と、理由・戻し条件を含む10文字以上の承認メモが必要です。");
+      return;
+    }
+    setLoading(true);
+    setNotice("");
+    const statusTarget = rollback ? preview.current.status : status;
+    const budgetTarget = rollback ? preview.current.budgetAmount : Number(budget);
+    const path = operation === "status" ? "status" : "budget";
+    const rollbackAuditId = rollback ? String(result?.auditId ?? "") || undefined : undefined;
+    const body = operation === "status"
+      ? { status: statusTarget, expectedCurrentStatus: rollback ? status : preview.current.status, confirmed: true, approvalNote, rollbackAuditId }
+      : { amount: budgetTarget, expectedCurrentAmount: rollback ? Number(budget) : preview.current.budgetAmount, confirmed: true, approvalNote, rollbackAuditId };
+    try {
+      const response = await fetch(`${apiBaseUrl}/google/customers/${campaign.customerId}/campaigns/${campaign.campaignId}/${path}`, {
+        method: "POST",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify(body),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(response.status === 409 ? `競合を検知しました: ${data?.error ?? "再度previewを確認してください。"}` : data?.error ?? "変更に失敗しました。");
+      setResult(data);
+      setNotice(rollback ? "元の値へ復元しました。" : "変更と監査記録が完了しました。");
+    } catch (caught) {
+      setNotice(caught instanceof Error ? caught.message : "変更に失敗しました。");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="write-modal-backdrop" role="presentation">
+      <section className="write-modal" role="dialog" aria-modal="true" aria-labelledby="write-modal-title">
+        <div className="section-header"><div><p className="eyebrow">live change preview</p><h2 id="write-modal-title">{campaign.campaign}</h2></div><button type="button" className="text-button" onClick={onClose}>閉じる</button></div>
+        {loading && !preview ? <p>現在値をGoogle Adsから再取得中...</p> : preview && (
+          <>
+            <dl className="write-preview-list">
+              <div><dt>現在status</dt><dd>{preview.current.status}</dd></div>
+              <div><dt>現在日予算</dt><dd>{preview.current.budgetAmount === null ? "取得できません" : `${preview.current.budgetAmount.toLocaleString("ja-JP")} ${preview.current.currency ?? ""}`}</dd></div>
+              <div><dt>観測時刻</dt><dd>{new Date(preview.observedAt).toLocaleString("ja-JP")}</dd></div>
+            </dl>
+            <label>変更種別<select value={operation} onChange={(event) => setOperation(event.target.value as "status" | "budget")}><option value="status">campaign status</option><option value="budget">日予算</option></select></label>
+            {operation === "status" ? <label>変更後<select value={status} onChange={(event) => setStatus(event.target.value as "ENABLED" | "PAUSED")}><option value="ENABLED">ENABLED</option><option value="PAUSED">PAUSED</option></select></label> : <label>変更後日予算<input type="number" min="1" value={budget} onChange={(event) => setBudget(event.target.value)} disabled={preview.current.budgetExplicitlyShared} /></label>}
+            {operation === "budget" && preview.current.budgetExplicitlyShared && <p className="form-message">この日予算は複数キャンペーンで共有されているため、安全のため変更できません。</p>}
+            <p><strong>リスク:</strong> 配信量・CV数・学習状態が変化する可能性があります。24時間の観察条件と戻し条件を承認メモに残してください。</p>
+            <label>根拠・リスク・ロールバック条件<textarea rows={4} value={approvalNote} onChange={(event) => setApprovalNote(event.target.value)} placeholder="例: CPA改善のため一時停止し、24時間後に改善しなければ元に戻す。" /></label>
+            <label className="confirmation-check"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />対象・現在値・変更後・リスクを確認し、実行を承認します。</label>
+            <div className="inline-actions"><button type="button" disabled={loading || !confirmed || (operation === "budget" && preview.current.budgetExplicitlyShared)} onClick={() => void submit(false)}>承認して実行</button>{result && <button type="button" className="secondary-button" disabled={loading} onClick={() => void submit(true)}>元の値に戻す</button>}</div>
+          </>
+        )}
+        {result && <pre className="write-result">audit ID: {String(result.auditId ?? "-")}\n{JSON.stringify({ before: result.before, after: result.after }, null, 2)}</pre>}
+        {notice && <p className="form-message">{notice}</p>}
+      </section>
+    </div>
+  );
+}
+
+function AnomalyTable({
+  anomalies,
+  onAsk,
+}: {
+  anomalies: DashboardResponse["anomalies"];
+  onAsk: (anomaly: DashboardResponse["anomalies"][number]) => void;
+}) {
   return (
     <section className="card anomaly-card anomaly-alert-surface">
       <div className="section-header">
@@ -4095,16 +5720,15 @@ function AnomalyTable({ anomalies }: { anomalies: DashboardResponse["anomalies"]
           <h2>注意アラート</h2>
           <p className="muted">赤=重要 / 黄=注意 / 青=様子見</p>
         </div>
-        <button type="button" className="md3-tonal-button">しきい値を調整</button>
       </div>
       <div className="table-wrap">
         <table>
-          <thead><tr><th>日付</th><th>媒体</th><th>変化</th><th>状態</th><th>詳細</th></tr></thead>
+          <thead><tr><th>日付</th><th>媒体</th><th>変化</th><th>状態</th><th>詳細</th><th><span className="sr-only">AIに相談</span></th></tr></thead>
           <tbody>
             {anomalies.map((item) => (
               <tr key={`${item.date}-${item.type}-${item.detail}`} className={`anomaly-row anomaly-${item.severity.toLowerCase()}`}>
                 <td>{item.date}</td>
-                <td>{item.platform}</td>
+                <td>{platformLabel(item.platform)}</td>
                 <td>
                   <span className="anomaly-type">
                     <span aria-hidden="true">!</span>
@@ -4113,6 +5737,12 @@ function AnomalyTable({ anomalies }: { anomalies: DashboardResponse["anomalies"]
                 </td>
                 <td><span className={`severity-badge severity-${item.severity.toLowerCase()}`}>{severityLabel(item.severity)}</span></td>
                 <td>{item.detail}</td>
+                <td>
+                  <button type="button" className="anomaly-ask-button" onClick={() => onAsk(item)}>
+                    <InlineIcon name="ai" />
+                    AIに聞く
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -4349,13 +5979,6 @@ function createLegacyProductionScope(readiness: ReadinessResponse): ReadinessSco
   };
 }
 
-function isMockDataExperience(usingDemoData: boolean, readiness: ReadinessResponse | null) {
-  if (usingDemoData) return true;
-  if (!readiness) return false;
-  const productionChecks = readiness.scopes?.production.checks ?? [];
-  return readiness.status.includes("mock") || productionChecks.some((check) => check.status !== "pass");
-}
-
 function readColumnBookmarks() {
   if (typeof window === "undefined") return [];
   try {
@@ -4385,6 +6008,13 @@ function readAuthErrorFromUrl() {
     hashParams.get("error");
   if (!error) return "";
   return decodeURIComponent(error).replace(/\+/g, " ");
+}
+
+function clearBillingReturnFromUrl() {
+  const url = new URL(window.location.href);
+  url.searchParams.delete("billing");
+  url.searchParams.delete("session_id");
+  window.history.replaceState({}, document.title, `${url.pathname}${url.search}${url.hash}`);
 }
 
 function createDemoChatResponse(question: string, data: DashboardResponse | null): ChatResponse {
@@ -4480,30 +6110,125 @@ function severityLabel(severity: string) {
   return "様子見";
 }
 
+function platformLabel(platform: PlatformFilter) {
+  if (platform === "google") return "Google";
+  if (platform === "meta") return "Meta";
+  if (platform === "yahoo") return "LINEヤフー広告";
+  return "全媒体";
+}
+
 function createDashboardComment(data: DashboardResponse) {
   const highAnomaly = data.anomalies.find((item) => item.severity === "High") ?? data.anomalies[0];
   if (highAnomaly) {
-    const tag = highAnomaly.tags[0] ? `${highAnomaly.tags[0]}が` : "";
-    return `${tag}動いています。まず「${highAnomaly.type}」を確認してください。`;
+    if (highAnomaly.tags.includes("CPA") && data.changes.cpa !== null) {
+      const percentage = Math.round(Math.abs(data.changes.cpa) * 100);
+      const direction = data.changes.cpa > 0 ? "悪化" : "改善";
+      return `今日は前期間に比べて獲得単価が${percentage}%${direction}しています。次に確認することを一緒に整理しましょう。`;
+    }
+    return `今日は「${highAnomaly.type}」を検知しています。対象と原因を確認して、次の対応を決めましょう。`;
   }
   if ((data.changes.cpa ?? 0) > 0.15) return "獲得単価が上がっています。CVRとCPCを分けて確認してください。";
   if ((data.changes.conversions ?? 0) < -0.08) return "コンバージョン数が減っています。計測と流入量を先に確認してください。";
   return "大きな異常はありません。費用とCVのバランスをこのまま観察できます。";
 }
 
-function buildRecommendedActions(data: DashboardResponse) {
+function buildRecommendedActionCards(data: DashboardResponse) {
   const firstAnomaly = data.anomalies[0];
-  if (!firstAnomaly) return ["今日は大きな異常はありません。費用、CV、CPAの順で短く確認してください。"];
-  if (firstAnomaly.tags.includes("CPA")) {
-    return ["CPA悪化の要因を、CPCとCVRに分けて確認してください。", "対象キャンペーンの変更履歴と計測状態を先に見てください。"];
-  }
-  if (firstAnomaly.tags.includes("CTR")) {
-    return ["CTRが落ちている広告の訴求、検索語句、クリエイティブ疲れを確認してください。"];
-  }
-  if (firstAnomaly.tags.includes("ROAS")) {
-    return ["コンバージョン値が計測できているか確認し、未計測ならROAS判断を外してください。"];
-  }
-  return [`${firstAnomaly.type} の対象キャンペーンを開き、前期間との差分を確認してください。`];
+  const highestCostCampaign = [...data.campaigns].sort((left, right) => right.cost - left.cost)[0];
+  const anomalyTitle = firstAnomaly ? `${firstAnomaly.type}の原因を分解` : "主要指標を短く確認";
+  const anomalyDescription = firstAnomaly
+    ? `${firstAnomaly.platform === "all" ? "全媒体" : firstAnomaly.platform}の変化を、関連指標ごとに切り分けます。`
+    : "費用・CV・CPAの順で、前期間からの変化を確認します。";
+  const anomalyPrompt = firstAnomaly
+    ? `「${firstAnomaly.type}」について、${firstAnomaly.tags.join("・")}の順に原因仮説と確認手順を整理してください。`
+    : "主要指標に大きな異常がないか、確認順と判断基準を整理してください。";
+
+  return [
+    {
+      title: anomalyTitle,
+      description: anomalyDescription,
+      prompt: anomalyPrompt,
+      tone: "alert",
+    },
+    {
+      title: "対象キャンペーンを特定",
+      description: highestCostCampaign
+        ? `${highestCostCampaign.campaign}を起点に、影響の大きい対象を絞ります。`
+        : "費用と成果への影響が大きいキャンペーンから確認します。",
+      prompt: highestCostCampaign
+        ? `「${highestCostCampaign.campaign}」を起点に、優先して確認する対象と比較軸を整理してください。`
+        : "費用と成果への影響が大きいキャンペーンを特定する手順を整理してください。",
+      tone: "focus",
+    },
+    {
+      title: "計測と変更履歴を確認",
+      description: "設定変更やCV計測漏れを確認し、数字の変化と運用変更を切り分けます。",
+      prompt: "CV計測、タグ、媒体の変更履歴について、担当者が確認する順番と見落としやすい点を整理してください。",
+      tone: "check",
+    },
+    {
+      title: "実施後の観察条件を決める",
+      description: "変更は自動実行せず、担当者が戻し条件と観察期間を決めてから進めます。",
+      prompt: "実施前チェック、24時間後に見る指標、悪化時の戻し条件を人間向けの手順として整理してください。",
+      tone: "observe",
+    },
+  ];
+}
+
+function buildAnomalyConsultationPrompt(
+  anomaly: DashboardResponse["anomalies"][number],
+  range: number,
+  dateRange: DashboardDateRange,
+  platform: PlatformFilter,
+  scope: { adAccount: string; campaign: string; adGroup: string; ad: string },
+) {
+  const targetPlatform = platform === "all" ? "全媒体" : platform;
+  const targetScope = [
+    scope.adAccount ? `広告アカウント ${scope.adAccount}` : "すべての広告アカウント",
+    scope.campaign ? `キャンペーン ${scope.campaign}` : "",
+    scope.adGroup ? `広告グループ ${scope.adGroup}` : "",
+    scope.ad ? `広告 ${scope.ad}` : "",
+  ].filter(Boolean).join("・");
+  const targetPeriod = dateRange.from && dateRange.to
+    ? `${dateRange.from}〜${dateRange.to}`
+    : `直近${range}日`;
+  return [
+    `注意アラート「${anomaly.type}」について相談したいです。`,
+    `検知日: ${anomaly.date} / 重要度: ${severityLabel(anomaly.severity)} / 検知媒体: ${anomaly.platform}`,
+    `詳細: ${anomaly.detail}`,
+    `対象は${targetPeriod}・${targetPlatform}・${targetScope}です。`,
+    "原因仮説、確認するデータ、人間が実施する手順、実施前チェック、戻し条件を整理してください。まだ変更は実行しないでください。",
+  ].join("\n");
+}
+
+function buildDashboardConsultationPrompt(
+  comment: string,
+  range: number,
+  dateRange: DashboardDateRange,
+  platform: PlatformFilter,
+  scope: { adAccount: string; campaign: string; adGroup: string; ad: string },
+) {
+  const targetPlatform = platform === "all" ? "全媒体" : platform;
+  const targetScope = [
+    scope.adAccount ? `広告アカウント ${scope.adAccount}` : "すべての広告アカウント",
+    scope.campaign ? `キャンペーン ${scope.campaign}` : "",
+    scope.adGroup ? `広告グループ ${scope.adGroup}` : "",
+    scope.ad ? `広告 ${scope.ad}` : "",
+  ].filter(Boolean).join("・");
+  const targetPeriod = dateRange.from && dateRange.to
+    ? `${dateRange.from}〜${dateRange.to}`
+    : `直近${range}日`;
+  return [
+    `ダッシュボードの一言コメント「${comment}」について相談したいです。`,
+    `対象は${targetPeriod}・${targetPlatform}・${targetScope}です。`,
+    "この状況の根拠、原因仮説、優先して確認すること、人間が実施する手順を整理してください。",
+  ].join("\n");
+}
+
+function todayDateInputValue() {
+  const now = new Date();
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 10);
 }
 
 function findAnomalousMetrics(data: DashboardResponse) {
@@ -4543,6 +6268,30 @@ function formatMoney(value: number | null) {
   return `¥${Math.round(value).toLocaleString("ja-JP")}`;
 }
 
+function formatPlanAmount(amount: number, currency: string) {
+  return new Intl.NumberFormat("ja-JP", { style: "currency", currency: currency.toUpperCase(), maximumFractionDigits: 0 }).format(amount);
+}
+
+function billingStatusLabel(status: BillingStatus | null) {
+  if (!status?.subscription) return "未契約";
+  if (status.access === "active") return "利用中";
+
+  switch (status.subscription.status) {
+    case "past_due":
+    case "unpaid":
+    case "incomplete":
+    case "incomplete_expired":
+      return "お支払いの確認が必要";
+    case "canceled":
+      return "解約済み";
+    case "active":
+    case "trialing":
+      return "反映待ち";
+    default:
+      return "確認中";
+  }
+}
+
 function formatPercent(value: number | null, digits = 1) {
   if (value === null) return "-";
   return `${(value * 100).toFixed(digits)}%`;
@@ -4563,12 +6312,6 @@ function changeClass(value: number | null) {
 
 function numericValue(value: unknown) {
   return typeof value === "number" ? value : Number(value ?? 0);
-}
-
-function platformColor(platform: Exclude<PlatformFilter, "all">) {
-  if (platform === "google") return brandChartColors.yellow;
-  if (platform === "meta") return brandChartColors.green;
-  return brandChartColors.greenSoft;
 }
 
 function formatDateTime(value: string) {

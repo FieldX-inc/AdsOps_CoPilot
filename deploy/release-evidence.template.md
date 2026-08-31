@@ -2,7 +2,7 @@
 
 Copy this template for each release candidate into an operator-owned evidence note. Do not commit real secrets, access tokens, refresh tokens, webhook secrets, service role keys, or OAuth codes.
 
-Production is not ready until every field below is filled with non-secret evidence and the final `EXPECT_PRODUCTION_READY=true` smoke passes.
+Initial production Go is not ready until every required field below is filled with non-secret evidence and the `EXPECT_PRODUCTION_READY=true` smoke passes with media writes disabled.
 
 After deployed URLs exist, generate a non-secret health/readiness summary with:
 
@@ -57,7 +57,9 @@ npm run collect:release-evidence
 
 ## Supabase Evidence
 
-- `supabase db push` applied through `supabase/migrations/20260604_openai_google_write_stripe.sql`:
+- Base Google Ads write and Stripe migration `supabase/migrations/20260604_openai_google_write_stripe.sql` is present remotely:
+- `supabase db push` applied `supabase/migrations/20260715_pricing_usage_reports.sql`:
+- `supabase db push` applied `supabase/migrations/20260716_service_role_app_schema.sql`:
 - `npm run e2e:supabase` passed:
 - Billing tables and RLS confirmed:
 - Google Ads connection and OAuth state tables confirmed:
@@ -87,12 +89,15 @@ npm run collect:release-evidence
 - Audit payload recorded `confirmed=true`, `approvalType=explicit_user_confirmation`, `approvedByUserId`, and `approvedAt`:
 - Restore value differed from write value:
 - `/audit-logs/recent?eventTypePrefix=google_ads.` showed write and restore rows:
-- Final campaign status or budget matched the original restore value:
+- Staging real-provider E2E used only a dedicated campaign `ENABLED`/`PAUSED` status round trip; budget remained provider-fake/contract-test only:
+- A final provider live preview was fetched after restore and its campaign status matched `GOOGLE_RESTORE_STATUS`; audit rows alone were not used as final-state evidence:
 - `GOOGLE_ADS_STAGING_E2E_PASSED_AT`:
 
 ## Stripe Evidence
 
-- Stripe Price exists and matches `STRIPE_PRICE_ID`:
+- User-approved 3 monthly prices + 3 setup fees, plus separately approved AI limits and consultation estimates, are recorded:
+- `BILLING_PLANS_JSON` resolved all 3 recurring monthly and 3 one-time setup-fee Prices without exposing Price IDs to the browser:
+- Production API used a Restricted `STRIPE_API_KEY`:
 - Stripe webhook endpoint is `<API_PUBLIC_ORIGIN>/billing/webhook`:
 - Hosted Checkout completed in staging test mode:
 - Existing Stripe customer reuse sent `customer=<existing customer>` without `customer_email`:
@@ -107,19 +112,30 @@ npm run collect:release-evidence
 - `STRIPE_FULL_E2E_CONFIRMATION` mentioned checkout, existing customer reuse, webhook, billing gate, and customer/workspace mismatch rejection:
 - `STRIPE_STAGING_E2E_PASSED_AT`:
 
+## Usage, Report, And Email Evidence
+
+- At least 10 report runs and 30 chat turns were measured; p50/p95 and plan gross-margin scenarios are attached:
+- setup/chat/scheduled-report usage rows were idempotent and report credits did not consume chat credits:
+- Cloud Run Job and hourly Scheduler IDs:
+- Duplicate claim, retry, reconnect-required and email-failure paths passed:
+- User-approved sending domain, SPF, DKIM and DMARC:
+- HTML/plain delivery, unsubscribe, queue/delivery/bounce passed without secret/internal-ID leakage:
+- `SUPABASE_STAGING_E2E_PASSED_AT`:
+- `REPORT_EMAIL_STAGING_E2E_PASSED_AT`:
+
 ## Evidence Window
 
-- `OPENAI_AGENT_STAGING_E2E_PASSED_AT`, `GOOGLE_ADS_STAGING_E2E_PASSED_AT`, and `STRIPE_STAGING_E2E_PASSED_AT` are valid ISO timestamps:
-- The three evidence timestamps are no more than 7 days apart:
-- The three evidence timestamps are newer than 90 days:
+- Supabase, OpenAI Agent, Google Ads, Stripe, and report-email staging timestamps are valid ISO timestamps:
+- All staging evidence timestamps are no more than 7 days apart:
+- All staging evidence timestamps are newer than 90 days:
 - API `/readiness` included `staging-e2e-evidence-window=pass`:
 - API `/readiness` included `agent-service-modern-env=pass`:
 
-## Final Smoke
+## Initial Production Go Smoke
 
 - `npm run smoke:deploy` passed against production URLs:
-- `EXPECT_PRODUCTION_READY=true npm run smoke:deploy` passed against production URLs:
-- Final smoke used `AGENT_SERVICE_URL`, checked `WEB_ORIGIN` HTML/root plus JS/CSS asset references, and rejected legacy ADK aliases:
+- `EXPECT_PRODUCTION_READY=true npm run smoke:deploy` passed against production URLs with `GOOGLE_ADS_WRITE_ENABLED=false`:
+- Initial Go smoke used `AGENT_SERVICE_URL`, checked `WEB_ORIGIN` HTML/root plus JS/CSS asset references, and rejected legacy ADK aliases:
 - `npm run collect:release-evidence` produced non-secret health/readiness evidence:
 - `npm run collect:release-evidence` failed closed unless API health, Agent health, readiness `Go`, required readiness checks, and final smoke were complete:
 - Collector printed `export PRODUCTION_SMOKE_PASSED_AT=...` and `export RELEASE_EVIDENCE_COLLECTED_AT=...` only after final production evidence passed:
@@ -128,7 +144,7 @@ npm run collect:release-evidence
 - `RELEASE_EVIDENCE_NOTE_PATH` pointed to this filled operator-owned release evidence note for the final audit:
 - `npm run audit:completion -- --with-verify` returned `overallStatus=complete`:
 - API `/health` reported `mode=agent-proxy`:
-- API `/health` reported `mediaWriteEnabled=true`:
+- API `/health` reported `mediaWriteEnabled=false`:
 - API `/health` reported `billingConfigured=true`:
 - API `/health` reported `supabaseConfigured=true`:
 - API `/health` reported `authConfigured=true`:
@@ -138,6 +154,15 @@ npm run collect:release-evidence
 - Agent `/health` reported OpenAI runtime diagnostics with SDK import and required symbols available:
 - Agent `/health` reported `dataSafetyConfigured=true`:
 - API `/readiness` production decision was `Go`:
+- Initial production deployment kept `GOOGLE_ADS_WRITE_ENABLED=false`; write activation was not treated as a Go prerequisite:
+
+## Post-Go Google Ads Write Activation Evidence
+
+- Separate production write activation approval owner, time, and scope:
+- `EXPECT_GOOGLE_ADS_WRITE_ACTIVATION=true node scripts/check-env.mjs .env.production.api` passed with `GOOGLE_ADS_WRITE_ENABLED=true`:
+- `EXPECT_GOOGLE_ADS_WRITE_ACTIVATION=true npm run smoke:deploy` passed with API `/health` `mediaWriteEnabled=true`:
+- `EXPECT_GOOGLE_ADS_WRITE_ACTIVATION=true npm run collect:release-evidence` produced `GOOGLE_ADS_WRITE_ACTIVATION_PASSED_AT`:
+- Activation failure rollback restored `GOOGLE_ADS_WRITE_ENABLED=false`, if exercised:
 
 ## Go Decision
 

@@ -5,18 +5,24 @@ import types as pytypes
 
 import pytest
 
-from ad_ops_advisor.openai_agents_runtime import generate_openai_agents_response, openai_agents_configuration_status
+from ad_ops_advisor.openai_agents_runtime import (
+    PRODUCTION_OPENAI_AGENT_NAMES,
+    PRODUCTION_OPENAI_TOOL_NAMES,
+    generate_openai_agents_response,
+    openai_agents_configuration_status,
+)
 from ad_ops_advisor.runtime import AgentRuntimeError, generate_agent_response, is_agent_runtime_configured
 
 
 class FakeToolAgent:
     instances = {}
 
-    def __init__(self, name, model=None, instructions="", tools=None):  # noqa: ANN001
+    def __init__(self, name, model=None, instructions="", tools=None, output_type=None):  # noqa: ANN001
         self.name = name
         self.model = model
         self.instructions = instructions
         self.tools = tools or []
+        self.output_type = output_type
         FakeToolAgent.instances[name] = self
 
     def as_tool(self, tool_name: str, tool_description: str) -> dict:
@@ -39,7 +45,7 @@ class FakeResult:
         "人間向け作業手順:\n1. 予算を下げる\n"
         "自信度:\nMedium"
     )
-    last_agent = pytypes.SimpleNamespace(name="ad_ops_advisor_orchestrator")
+    last_agent = pytypes.SimpleNamespace(name="root_agent")
 
 
 class FakeRunner:
@@ -84,15 +90,13 @@ def test_generate_openai_agents_response_builds_manager_style_orchestrator(monke
     assert result["mode"] == "openai_agents"
     assert result["model"] == "gpt-test"
     assert result["orchestration"]["runtime"] == "openai_agents"
-    assert FakeRunner.captured["agent"].name == "ad_ops_advisor_orchestrator"
-    assert [tool["tool_name"] for tool in FakeRunner.captured["agent"].tools] == [
-        "setup_advisor",
-        "performance_analyst",
-        "budget_learning",
-        "media_spec",
-        "action_plan",
-        "qa_review",
-    ]
+    assert FakeRunner.captured["agent"].name == "root_agent"
+    assert tuple(FakeToolAgent.instances) == PRODUCTION_OPENAI_AGENT_NAMES[1:] + ("root_agent",)
+    assert set(FakeToolAgent.instances) == set(PRODUCTION_OPENAI_AGENT_NAMES)
+    assert "setup_intake_agent" not in FakeToolAgent.instances
+    assert "ad_ops_advisor" not in FakeToolAgent.instances
+    assert tuple(tool["tool_name"] for tool in FakeRunner.captured["agent"].tools) == PRODUCTION_OPENAI_TOOL_NAMES
+    assert FakeRunner.captured["agent"].output_type.__name__ == "AdvisorStructuredOutput"
     assert FakeRunner.captured["run_config"].kwargs["trace_include_sensitive_data"] is False
     assert "予算を下げる" not in result["message"]["content"]
     assert "予算引き下げ候補" in result["message"]["content"]
@@ -101,7 +105,7 @@ def test_generate_openai_agents_response_builds_manager_style_orchestrator(monke
     performance = FakeToolAgent.instances["performance_analyst_agent"].instructions
     action_plan = FakeToolAgent.instances["action_plan_agent"].instructions
     qa = FakeToolAgent.instances["qa_agent"].instructions
-    root = FakeToolAgent.instances["ad_ops_advisor_orchestrator"].instructions
+    root = FakeToolAgent.instances["root_agent"].instructions
     descriptions = "\n".join(tool["tool_description"] for tool in FakeRunner.captured["agent"].tools)
 
     assert "商材、顧客、ペルソナ" in setup
@@ -115,6 +119,8 @@ def test_generate_openai_agents_response_builds_manager_style_orchestrator(monke
     assert "entryAgent: performance_analyst_experienced" in root
     assert "experiencedではKPI分解" in root
     assert "承認付きAPI候補" in descriptions
+    assert "campaign作成は提案と人間向け手順に限る" in descriptions
+    assert "重複のない作業候補" in descriptions
     assert "OAuth token" not in descriptions
 
 

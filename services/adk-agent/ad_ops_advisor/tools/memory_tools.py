@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..policies.no_write_policy import looks_secret
+from ..policies.memory_policy import memory_rejection_reason
 from ..repositories import RepositoryError, get_repository, is_database_configured
 from ..tool_audit import audited_tool
 
@@ -32,13 +32,14 @@ def write_user_memory(workspace_id: str, user_id: str, memory_type: str, content
 
     Implementations must reject secrets, tokens, and raw customer lists.
     """
-    if looks_secret(content):
+    rejection_reason = memory_rejection_reason(memory_type, content)
+    if rejection_reason:
         return {
             "workspace_id": workspace_id,
             "user_id": user_id,
             "memory_type": memory_type,
             "status": "rejected",
-            "error": "memory content must not contain secrets",
+            "error": rejection_reason,
         }
 
     if is_database_configured():

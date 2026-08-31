@@ -120,12 +120,14 @@ STAGING_TARGET_CONFIRMATION="staging non-production environment confirmed"
 Record these evidence env values only after the corresponding checks pass:
 
 - `OPENAI_AGENT_STAGING_E2E_PASSED_AT`: Agent `/health`, API-to-Agent routing, and OpenAI chat E2E passed.
-- `GOOGLE_ADS_STAGING_E2E_PASSED_AT`: Google Ads OAuth, customer list/connect/sync, approved reversible write, restore, and audit payload checks passed.
-- `STRIPE_STAGING_E2E_PASSED_AT`: hosted Checkout, existing customer reuse, webhook delivery, billing row update, authenticated unpaid-user `402 billing_required`, active-user gate open, and customer/workspace mismatch rejection passed.
+- `GOOGLE_ADS_STAGING_E2E_PASSED_AT`: Google Ads OAuth, customer list/connect/sync, dedicated campaign status write/restore, audit payload checks, and final provider live-preview restore confirmation passed.
+- `STRIPE_STAGING_E2E_PASSED_AT`: all three recurring monthly and three one-time setup-fee test Prices, hosted mixed-cart Checkout, initial-invoice-only setup fee, Portal, plan change, existing customer reuse, webhook delivery, billing row update, unpaid gate, and customer/workspace mismatch rejection passed.
+- `SUPABASE_STAGING_E2E_PASSED_AT`: Email/Google login, migrations, RLS matrix, invitation/member limits, and cross-workspace rejection passed.
+- `REPORT_EMAIL_STAGING_E2E_PASSED_AT`: report Job claim/retry/reconnect, separate usage, sending-domain delivery, unsubscribe, queue/bounce handling passed.
 
-All three `*_STAGING_E2E_PASSED_AT` values must be generated in the same release validation window. `scripts/check-env.mjs` rejects production env files when the three evidence timestamps are more than 7 days apart.
+All five `*_STAGING_E2E_PASSED_AT` values must be generated in the same release validation window. `scripts/check-env.mjs` rejects production env files when the evidence timestamps are more than 7 days apart.
 
-For Google Ads write evidence, use only a reversible staging or test campaign. Campaign status write is limited to `ENABLED` and `PAUSED`; do not use `REMOVED` for MVP write E2E or production. The write must include `confirmed=true`, `CONFIRM_GOOGLE_WRITE=true`, a human approval note, a rollback condition, a restore value different from the write value, audit payload approval metadata (`approvalType=explicit_user_confirmation`, `approvedByUserId`, `approvedAt`), and a `GOOGLE_ADS_MAX_BUDGET_AMOUNT` cap that is no higher than the release owner approved. After the write and restore run, open the web Data Connection screen and confirm the audit review panel shows both rows with the expected customer, campaign, and approval metadata before setting `GOOGLE_ADS_STAGING_E2E_PASSED_AT`.
+For Google Ads write evidence, use only a dedicated reversible staging or test campaign. Real-provider E2E is limited to campaign status `ENABLED` and `PAUSED`; `GOOGLE_WRITE_KIND=budget` is rejected and budget stays provider-fake/contract-test only. Do not use `REMOVED`. The status write must include `confirmed=true`, `CONFIRM_GOOGLE_WRITE=true`, a human approval note, a rollback condition, a restore value different from the write value, and audit payload approval metadata (`approvalType=explicit_user_confirmation`, `approvedByUserId`, `approvedAt`). After write and restore, the script must re-read the provider live preview and match `GOOGLE_RESTORE_STATUS`; audit rows alone are insufficient. Then open the web Data Connection audit review panel and confirm both rows before setting `GOOGLE_ADS_STAGING_E2E_PASSED_AT`.
 
 Google Ads access tokens expire. Before production Go, confirm that a near-expiry or expired access token is refreshed with the stored refresh token before `/google/customers`, `/sync/google`, or approved write routes call Google Ads.
 
@@ -167,8 +169,25 @@ EVIDENCE_OWNER=<operator-name> \
 npm run collect:release-evidence
 ```
 
-The final smoke must prove API `/readiness` returns production decision `Go`, the `agent-service-modern-env` and `staging-e2e-evidence-window` checks are present and passing, all production checks pass, API `/health` reports `mode=agent-proxy`, `mediaWriteEnabled=true`, `billingConfigured=true`, `supabaseConfigured=true`, and `authConfigured=true`, and Agent `/health` reports OpenAI mode with `selectedRuntime=openai` or `selectedRuntime=openai_agents`, `runtimeConfigured=true`, and `dataSafetyConfigured=true`.
+The initial production Go smoke must prove API `/readiness` returns production decision `Go`, the `agent-service-modern-env` and `staging-e2e-evidence-window` checks are present and passing, all production checks pass, API `/health` reports `mode=agent-proxy`, `mediaWriteEnabled=false`, `billingConfigured=true`, `supabaseConfigured=true`, and `authConfigured=true`, and Agent `/health` reports OpenAI mode with `selectedRuntime=openai` or `selectedRuntime=openai_agents`, `runtimeConfigured=true`, and `dataSafetyConfigured=true`.
 
 The collector must produce a non-secret health/readiness/smoke summary for the release evidence note. With `EXPECT_PRODUCTION_READY=true`, it must independently fail if API health, Agent health, readiness `Go`, required readiness checks, or the final smoke are incomplete. If `EXPECT_PRODUCTION_READY=true npm run smoke:deploy` fails, `npm run collect:release-evidence` must fail too unless the operator explicitly sets `ALLOW_INCOMPLETE_EVIDENCE=true` for a partial diagnostic note.
 
-Only after this point should deployment ownership move from code readiness to traffic rollout.
+Only after this point should deployment ownership move from code readiness to traffic rollout. Google Ads write activation is not part of this initial Go decision.
+
+## 6. Post-Go Google Ads Write Activation
+
+After a separate user approval, validate and deploy the API env with `GOOGLE_ADS_WRITE_ENABLED=true`:
+
+```sh
+EXPECT_GOOGLE_ADS_WRITE_ACTIVATION=true \
+node scripts/check-env.mjs .env.production.api
+
+EXPECT_GOOGLE_ADS_WRITE_ACTIVATION=true \
+API_ORIGIN=https://api.example.com \
+AGENT_SERVICE_URL=https://agent.example.com \
+WEB_ORIGIN=https://app.example.com \
+npm run smoke:deploy
+```
+
+The activation gate requires `mediaWriteEnabled=true` and does not replace the earlier initial Go evidence. Capture it with `EXPECT_GOOGLE_ADS_WRITE_ACTIVATION=true npm run collect:release-evidence`. If validation fails, restore `GOOGLE_ADS_WRITE_ENABLED=false` and rerun the initial production Go smoke.

@@ -3,6 +3,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 from ad_ops_advisor import tool_audit
+from ad_ops_advisor.policies.memory_policy import memory_rejection_reason
 from ad_ops_advisor.policies.no_write_policy import contains_secret, has_platform_write_intent, is_forbidden_tool_name
 from ad_ops_advisor.tools import human_task_tools, memory_tools
 
@@ -74,6 +75,46 @@ def test_write_user_memory_rejects_secret_like_content_before_repository() -> No
     assert "refresh_token=should-not-be-stored" not in str(result)
 
 
+def test_write_user_memory_rejects_transient_kpi_before_repository() -> None:
+    with (
+        patch.object(tool_audit, "is_database_configured", return_value=False),
+        patch.object(memory_tools, "is_database_configured", return_value=True),
+        patch.object(memory_tools, "get_repository", side_effect=AssertionError("repository should not be used")),
+    ):
+        result = memory_tools.write_user_memory(
+            "workspace-1",
+            "user-1",
+            "business_context",
+            "今週のCPAは12,000円でCVRは2.4%",
+        )
+
+    assert result["status"] == "rejected"
+    assert "temporary" in result["error"] or "transient KPI" in result["error"]
+
+
+def test_write_user_memory_rejects_personal_contact_information_before_repository() -> None:
+    with (
+        patch.object(tool_audit, "is_database_configured", return_value=False),
+        patch.object(memory_tools, "is_database_configured", return_value=True),
+        patch.object(memory_tools, "get_repository", side_effect=AssertionError("repository should not be used")),
+    ):
+        result = memory_tools.write_user_memory(
+            "workspace-1",
+            "user-1",
+            "business_context",
+            "担当者の連絡先は sales@example.com",
+        )
+
+    assert result["status"] == "rejected"
+    assert "personal contact information" in result["error"]
+    assert "sales@example.com" not in str(result)
+
+
+def test_memory_policy_accepts_stable_preferences_and_rejects_unknown_types() -> None:
+    assert memory_rejection_reason("preference", "毎週月曜日に確認順を短く出してほしい") is None
+    assert memory_rejection_reason("kpi_snapshot", "CPAは12,000円") == "memory type is not an allowed stable category"
+
+
 def test_create_human_task_uses_workspace_user_scope() -> None:
     repository = FakeRepository()
 
@@ -108,6 +149,8 @@ def test_create_human_task_uses_workspace_user_scope() -> None:
 def test_no_write_policy_detects_forbidden_tools_and_messages() -> None:
     assert is_forbidden_tool_name("update_campaign_budget")
     assert is_forbidden_tool_name("pause_campaign")
+    assert is_forbidden_tool_name("create_campaign")
+    assert is_forbidden_tool_name("google_campaign_creation")
     assert has_platform_write_intent("CPAが悪いキャンペーンを停止して")
     assert has_platform_write_intent("新しい広告を入稿して")
     assert has_platform_write_intent("Please change the budget to 10000")

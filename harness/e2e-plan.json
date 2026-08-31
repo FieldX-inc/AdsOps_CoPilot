@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "policy": {
+    "browserRunner": "Playwright",
+    "browserDependencyStatus": "installed-and-verified",
+    "browsers": ["chromium-desktop", "chromium-mobile"],
+    "providerWrites": {
+      "googleAdsCampaignStatus": "staging-round-trip-only-with-explicit-approval",
+      "googleAdsCampaignBudget": "provider-fake-only",
+      "googleAdsCampaignCreate": "out-of-scope",
+      "stripe": "test-mode-only-before-release",
+      "supabaseMigration": "remote-apply-requires-explicit-approval"
+    },
+    "artifactRoot": "harness/evidence"
+  },
+  "layers": [
+    {
+      "id": "local",
+      "name": "Deterministic local quality",
+      "requiredCommands": ["npm run harness:validate", "npm run verify"],
+      "networkAllowed": false
+    },
+    {
+      "id": "integration",
+      "name": "Provider contract fakes",
+      "requiredCommands": ["npm run test:api", "npm run test:agent"],
+      "networkAllowed": false
+    },
+    {
+      "id": "browser",
+      "name": "Playwright user journeys",
+      "requiredCommands": ["npm run e2e:browser"],
+      "networkAllowed": false,
+      "status": "active"
+    },
+    {
+      "id": "staging",
+      "name": "Real provider rehearsal",
+      "requiredCommands": ["npm run e2e:staging", "npm run e2e:supabase", "npm run e2e:stripe-webhook"],
+      "networkAllowed": true,
+      "requiresHumanApproval": true
+    },
+    {
+      "id": "production-smoke",
+      "name": "Read-only production smoke",
+      "requiredCommands": ["npm run smoke:deploy"],
+      "networkAllowed": true,
+      "requiresHumanApproval": true,
+      "constraints": ["GOOGLE_ADS_WRITE_ENABLED=false"]
+    }
+  ],
+  "scenarios": [
+    {"id": "filters-hierarchy", "issues": [12, 13, 14], "layer": "browser", "assertions": ["account/campaign/ad-group/ad selection is preserved", "custom start/end range scopes every data consumer", "ROAS filter is absent and CVR labels are Japanese"]},
+    {"id": "help-navigation", "issues": [16, 17, 19], "layer": "browser", "assertions": ["Help is reachable", "CMS loading/empty/error/fallback states are explicit", "BI and Ad column dead links do not remain"]},
+    {"id": "dashboard-chat-character", "issues": [4, 9, 15, 20], "layer": "browser", "assertions": ["a scoped briefing bubble appears before up to four recommended action cards", "alert rows and the nearby severity summary expose comparable detail without color-only meaning", "a recommendation card or alert row/button opens the existing chat drawer with the selected item and active scope as a draft", "opening the drawer does not send or append a chat message", "trend appears before primary cost/conversions/CPA/CTR and secondary impressions/clicks/CPC/CVR", "desktop/mobile/keyboard flows preserve semantic order and do not cause page-level horizontal overflow", "loading/empty/error/partial/mock states are visible and not presented as complete live data"]},
+    {"id": "billing-entry", "issues": [3, 11], "layer": "browser", "assertions": ["plan selection precedes auth", "auth resumes the chosen plan", "Checkout uses server-mapped catalog", "pending payment remains fail closed"]},
+    {"id": "setup-questionnaire", "issues": [10], "layer": "browser", "assertions": ["single-choice questions are keyboard accessible", "answers persist", "output is a draft and human procedure", "campaign creation is not executed"]},
+    {"id": "conversation-consistency", "issues": [6, 20], "layer": "integration", "assertions": ["recommendations cite scoped conversation context", "temporary KPIs and secrets are not stored as memory", "contradictions produce a clarification or explicit uncertainty"]},
+    {"id": "approved-status-write", "issues": [1], "layer": "staging", "assertions": ["live preview precedes confirmation", "stale expected value returns 409", "approval metadata is audited", "ENABLED/PAUSED is restored and re-read"]},
+    {"id": "budget-write-contract", "issues": [1], "layer": "integration", "assertions": ["budget cap is enforced", "budget mutation uses only the fake provider", "rollback payload links to the original audit"]},
+    {"id": "scheduled-report", "issues": [18], "layer": "staging", "assertions": ["three-day claim is idempotent", "reconnect replaces fabricated analysis on missing data", "HTML/plain email and unsubscribe work", "retry policy distinguishes 4xx from 429/5xx"]},
+    {"id": "demo-reset", "issues": [2], "layer": "integration", "assertions": ["fixture workspace reset is deterministic", "secrets and real customer data are absent", "demo states cover dashboard/setup/chat/report/write review"]},
+    {"id": "release-read-only-smoke", "issues": [1, 2, 3, 4, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20], "layer": "production-smoke", "assertions": ["readiness is Go", "write flag is off", "preview and mock bypasses are off", "release evidence is tied to one commit SHA"]}
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "manifestVersion": 2,
+  "issue": {"number": 17, "url": "https://github.com/FieldX-inc/AdsOps_CoPilot/issues/17", "title": "microCMSによるヘルプコンテンツ配信基盤", "slug": "microcms-help-content"},
+  "state": "browser_verified",
+  "wave": "wave-3-information-architecture",
+  "summary": "Create a server-side microCMS Help adapter with redacted public content models, caching, preview separation, and resilient fallback states.",
+  "decisions": ["microCMS credentials stay server-side and are never exposed to the browser or Agent.", "The product consumes a narrow Help content DTO rather than raw CMS responses.", "Preview/draft content cannot appear in production without an explicit authorized preview path."],
+  "scope": {"in": ["Help content schema", "Server-side adapter", "Index/detail API", "Cache and timeout policy", "Published/draft separation", "Provider fake", "Fallback state"], "out": ["Client-side CMS secret", "General-purpose CMS proxy", "Automatic AI content publishing"]},
+  "requirementRefs": ["docs/architecture.md#trust-boundaries", "REQUIREMENTS.md#11-セキュリティと受け入れ"],
+  "dependencies": [],
+  "blockers": [],
+  "risks": [
+    {"id": "cms-secret-leak", "level": "critical", "description": "A CMS key may reach browser code, logs, or Agent context.", "mitigation": "Use server-only environment access, redact errors, and contract-test public responses."},
+    {"id": "draft-leak", "level": "high", "description": "Draft or preview content may be shown publicly.", "mitigation": "Separate published queries and production-disabled preview authorization."},
+    {"id": "cms-outage", "level": "medium", "description": "A provider outage may block Help navigation.", "mitigation": "Bound timeouts, cache last valid published content, and render explicit fallback guidance."}
+  ],
+  "gates": [
+    {"id": "microcms-project", "type": "external_prerequisite", "requiredAt": "before_staging_verification", "status": "pending", "owner": "user", "description": "Provide the approved staging service/domain, content model, and least-privilege read credential through secret storage."},
+    {"id": "cms-security-review", "type": "security_review", "requiredAt": "before_local_verification", "status": "pending", "owner": "contract-guard", "description": "Verify server-only credential use, public DTO allowlist, error redaction, and preview isolation."}
+  ],
+  "ownership": {"primaryAgent": "api-db-provider-agent", "reviewAgents": ["contract-guard", "product-ui-agent", "qa-release-agent"], "allowedPaths": ["apps/api/src/**/*help*.ts", "apps/api/src/**/*cms*.ts", "apps/api/src/index.ts", "apps/api/src/index.test.ts", "apps/web/src/**", "docs/**", ".env.example"], "forbiddenPaths": ["services/adk-agent/**", "supabase/migrations/**", ".env", "deploy/production-*.env*"]},
+  "acceptanceCriteria": ["CMS credentials and raw provider errors never reach the browser or logs.", "Published index/detail responses expose only the approved Help DTO.", "Draft preview is authenticated and forcibly disabled in production unless explicitly designed and approved.", "Timeout, not-found, rate-limit, and provider error behavior is covered with a fake.", "Staging retrieves approved published content and records redacted provider evidence."],
+  "verification": {"commands": ["npm --workspace @adops/api test", "npm --workspace @adops/web run typecheck", "npm run e2e:browser"], "scenarioIds": ["help-navigation", "release-read-only-smoke"]},
+  "evidence": {"requiredArtifacts": ["test-log", "api-contract", "screenshot", "provider-confirmation"], "retention": "release-lifetime"},
+  "rollback": {"strategy": "Disable the live CMS adapter and serve the last valid/fallback Help response; do not expose provider errors.", "verification": "Help remains reachable with an explicit fallback and no secret appears in browser payloads or logs."}
+}

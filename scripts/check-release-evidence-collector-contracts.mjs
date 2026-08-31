@@ -22,6 +22,7 @@ await runContract("prints non-secret evidence when health/readiness/smoke pass",
     "Release branch or commit SHA: abc1234",
     "Evidence owner: release-owner",
     "mode: agent-proxy",
+    "mediaWriteEnabled: false",
     "selectedRuntime: openai",
     "runtimeConfigured: true",
     "runtimeDiagnostics: openaiApiKeyConfigured=true, openaiAgentsSdkImportable=true, openaiAgentsSdkAvailable=true, missingOpenaiAgentsSymbols=none",
@@ -38,6 +39,43 @@ await runContract("prints non-secret evidence when health/readiness/smoke pass",
   ],
   mustNotIncludeStdout: ["secret-auth-token-that-must-not-print", "whsec-secret-that-must-not-print"],
   mustNotIncludeStderr: ["secret-auth-token-that-must-not-print", "whsec-secret-that-must-not-print"],
+});
+
+await runContract("collects the separate Google Ads write activation gate", {
+  apiHealth: productionApiHealth({ mediaWriteEnabled: true }),
+  readiness: productionReadiness("Go"),
+  agentHealth: productionAgentHealth(),
+  expectStatus: 0,
+  extraEnv: {
+    EXPECT_PRODUCTION_READY: "false",
+    EXPECT_GOOGLE_ADS_WRITE_ACTIVATION: "true",
+  },
+  mustIncludeStdout: [
+    "Production gate: google-ads-write-activation",
+    "mediaWriteEnabled: true",
+    "EXPECT_GOOGLE_ADS_WRITE_ACTIVATION=true npm run smoke:deploy: exit 0",
+    "export GOOGLE_ADS_WRITE_ACTIVATION_PASSED_AT=",
+  ],
+  mustNotIncludeStdout: [
+    "export PRODUCTION_SMOKE_PASSED_AT=",
+    "export RELEASE_EVIDENCE_COLLECTED_AT=",
+  ],
+});
+
+await runContract("rejects disabled media writes at the activation gate", {
+  apiHealth: productionApiHealth(),
+  readiness: productionReadiness("Go"),
+  agentHealth: productionAgentHealth(),
+  expectStatus: 1,
+  extraEnv: {
+    EXPECT_PRODUCTION_READY: "false",
+    EXPECT_GOOGLE_ADS_WRITE_ACTIVATION: "true",
+  },
+  mustIncludeStderr: [
+    "Production evidence: API health mediaWriteEnabled expected true, got false.",
+    "EXPECT_GOOGLE_ADS_WRITE_ACTIVATION=true npm run smoke:deploy did not pass.",
+  ],
+  mustNotIncludeStdout: ["export GOOGLE_ADS_WRITE_ACTIVATION_PASSED_AT="],
 });
 
 await runContract("fails when final production smoke is requested but readiness is No-Go", {
@@ -62,7 +100,7 @@ await runContract("fails when final production smoke is requested but readiness 
 });
 
 await runContract("fails with named production evidence issues when health is incomplete", {
-  apiHealth: productionApiHealth({ mediaWriteEnabled: false }),
+  apiHealth: productionApiHealth({ mediaWriteEnabled: true }),
   readiness: productionReadiness("Go"),
   agentHealth: productionAgentHealth({
     selectedRuntime: "mock",
@@ -78,14 +116,14 @@ await runContract("fails with named production evidence issues when health is in
   extraEnv: {
     EXPECT_PRODUCTION_READY: "true",
   },
-  mustIncludeStdout: ["mediaWriteEnabled: false", "selectedRuntime: mock", "runtimeConfigured: false", "Production decision: Go"],
+  mustIncludeStdout: ["mediaWriteEnabled: true", "selectedRuntime: mock", "runtimeConfigured: false", "Production decision: Go"],
   mustNotIncludeStdout: [
     "export PRODUCTION_SMOKE_PASSED_AT=",
     "export RELEASE_EVIDENCE_COLLECTED_AT=",
     "export RELEASE_EVIDENCE_NOTE_PATH=",
   ],
   mustIncludeStderr: [
-    "Production evidence: API health mediaWriteEnabled expected true, got false.",
+    "Production evidence: API health mediaWriteEnabled expected false, got true.",
     "Production evidence: Agent health selectedRuntime expected OpenAI runtime",
     "Production evidence: Agent health runtimeConfigured expected true.",
     "Production evidence: Agent runtime diagnostics: openaiApiKeyConfigured=true, openaiAgentsSdkImportable=false, openaiAgentsSdkAvailable=false, missingOpenaiAgentsSymbols=Runner",
@@ -271,7 +309,7 @@ function productionApiHealth(overrides = {}) {
     ok: true,
     service: "adops-api",
     mode: "agent-proxy",
-    mediaWriteEnabled: true,
+    mediaWriteEnabled: false,
     billingConfigured: true,
     supabaseConfigured: true,
     authConfigured: true,

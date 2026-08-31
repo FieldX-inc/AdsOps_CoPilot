@@ -18,7 +18,7 @@ Cloudflare Pages must receive only `VITE_*` browser-safe values. Server secrets,
 
 ## Cloud Run API
 
-Target: Hono API, OAuth callback, Stripe webhook, Google Ads read/write routes
+Target: Hono API, OAuth callback, Stripe webhook, Google Ads read/approved-write routes, and the report Job image
 
 Build:
 
@@ -29,7 +29,9 @@ docker build -f apps/api/Dockerfile -t adops-api .
 Runtime env template: `deploy/cloud-run-api.env.example`
 Production env template: `deploy/production-cloud-run-api.env.example`
 
-The API owns Supabase service role access, token encryption, Google Ads OAuth/API credentials, Stripe credentials, `AGENT_SERVICE_URL`, and production readiness evidence env. The deploy command plan passes the operator-owned API env file to Cloud Run with `--env-vars-file="$API_ENV_FILE"`.
+The API owns Supabase service role access, token encryption, Google Ads OAuth/API credentials, restricted Stripe API access, Cloudflare Email Sending access, `AGENT_SERVICE_URL`, and production readiness evidence env. Because `gcloud --env-vars-file` chooses its parser from the filename extension, the deploy command plan copies the operator-owned API file into a mode-600 temporary file ending in `.env`, passes that path to Cloud Run, and removes the temporary directory on shell exit.
+
+The same image is deployed as a Cloud Run Job with `node apps/api/dist/report-job.js`. An hourly Cloud Scheduler trigger starts it; the Job itself selects each workspace's 3-day local-9:00 due schedule.
 
 When the Agent Service is private Cloud Run, the API service account must have `roles/run.invoker` on the Agent service, and the API env must use `AGENT_SERVICE_AUTH_MODE=google_id_token` with `AGENT_SERVICE_AUDIENCE=<agent-service-url>`.
 
@@ -46,7 +48,7 @@ docker build -f services/adk-agent/Dockerfile -t adops-agent .
 Runtime env template: `deploy/cloud-run-agent.env.example`
 Production env template: `deploy/production-cloud-run-agent.env.example`
 
-The Agent owns `OPENAI_API_KEY`, OpenAI Agents SDK model/runtime settings, sensitive tracing/logging controls, and optional `ADOPS_DATABASE_URL`. The deploy command plan passes the operator-owned Agent env file to Cloud Run with `--env-vars-file="$AGENT_ENV_FILE"`.
+The Agent owns `OPENAI_API_KEY`, OpenAI Agents SDK model/runtime settings, sensitive tracing/logging controls, and optional `ADOPS_DATABASE_URL`. The deploy command plan uses the same mode-600 temporary `.env` copy for the Agent deploy, so filenames such as `.env.staging.agent` are never misread as YAML.
 
 ## Release Gate
 
@@ -124,5 +126,7 @@ WEB_ORIGIN=https://app.example.com \
 npm run smoke:deploy
 ```
 
-The final smoke requires API `/health` to report `mode=agent-proxy`, `mediaWriteEnabled=true`, `billingConfigured=true`, `supabaseConfigured=true`, and `authConfigured=true`, plus Agent `/health` OpenAI runtime/data-safety readiness, API `/readiness` production `Go`, and Web app HTML/root plus reachable JS/CSS asset references from `WEB_ORIGIN`.
+The initial production Go deployment keeps `GOOGLE_ADS_WRITE_ENABLED=false`. Its `EXPECT_PRODUCTION_READY=true` smoke requires API `/health` to report `mode=agent-proxy`, `mediaWriteEnabled=false`, `billingConfigured=true`, `usageCostConfigured=true`, `reportEmailConfigured=true`, `supabaseConfigured=true`, and `authConfigured=true`, plus Agent `/health` OpenAI runtime/data-safety readiness, API `/readiness` production `Go`, and Web app HTML/root plus reachable JS/CSS asset references from `WEB_ORIGIN`.
 When `EXPECT_PRODUCTION_READY=true npm run collect:release-evidence` passes, copy the printed `export PRODUCTION_SMOKE_PASSED_AT=...` and `export RELEASE_EVIDENCE_COLLECTED_AT=...` candidates only after the collector output is recorded in the release evidence note, then set `RELEASE_EVIDENCE_NOTE_PATH=<path-to-filled-release-evidence-note>` before rerunning the final completion audit.
+
+Google Ads write activation is a separate post-Go gate. Only after explicit approval, validate the API env with `EXPECT_GOOGLE_ADS_WRITE_ACTIVATION=true node scripts/check-env.mjs .env.production.api`, deploy `GOOGLE_ADS_WRITE_ENABLED=true`, and run `EXPECT_GOOGLE_ADS_WRITE_ACTIVATION=true npm run smoke:deploy`; this later gate requires `mediaWriteEnabled=true`. Staging real-provider evidence is limited to a dedicated campaign `ENABLED`/`PAUSED` status round trip with a final provider live-preview re-read; budget remains provider-fake/contract-test only.

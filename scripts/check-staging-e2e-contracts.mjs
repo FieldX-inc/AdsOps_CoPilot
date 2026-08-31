@@ -23,7 +23,7 @@ await runContract("Google status write requires a meaningful rollback note and d
   ],
 });
 
-await runContract("Google budget write requires different write and restore amounts", {
+await runContract("Google budget write is rejected for real-provider staging E2E", {
   env: {
     CHECK_GOOGLE_WRITE: "true",
     CONFIRM_GOOGLE_WRITE: "true",
@@ -35,7 +35,7 @@ await runContract("Google budget write requires different write and restore amou
     GOOGLE_WRITE_ROLLBACK: "increase to 1000 then restore to 1000 after audit observation",
   },
   expectStatus: 1,
-  mustIncludeStderr: ["GOOGLE_WRITE_AMOUNT different from GOOGLE_RESTORE_AMOUNT"],
+  mustIncludeStderr: ["GOOGLE_WRITE_KIND=status only", "budget is provider-fake/contract-test only"],
 });
 
 await runContract("Google status write rejects non-reversible REMOVED status", {
@@ -97,6 +97,28 @@ await runContract("Google status write evidence rejects restore audit without ap
   useLocalApi: true,
   googleWriteScenario: "missingRestoreApprovalMetadata",
   mustIncludeStderr: ["Google write audit: expected recent google_ads.campaign_status_updated", "audit log with approval metadata"],
+  mustNotIncludeStdout: ["export GOOGLE_ADS_STAGING_E2E_PASSED_AT="],
+});
+
+await runContract("Google status write evidence requires final provider live preview to match restore status", {
+  env: {
+    CHECK_AGENT: "false",
+    CHECK_STRIPE: "false",
+    CHECK_BILLING_GATE: "false",
+    CHECK_GOOGLE_READ: "false",
+    CHECK_GOOGLE_WRITE: "true",
+    CONFIRM_GOOGLE_WRITE: "true",
+    GOOGLE_CUSTOMER_ID: "1234567890",
+    GOOGLE_CAMPAIGN_ID: "987654321",
+    GOOGLE_WRITE_KIND: "status",
+    GOOGLE_WRITE_STATUS: "PAUSED",
+    GOOGLE_RESTORE_STATUS: "ENABLED",
+    GOOGLE_WRITE_ROLLBACK: "restore campaign status to ENABLED after audit observation",
+  },
+  expectStatus: 1,
+  useLocalApi: true,
+  googleWriteScenario: "finalLivePreviewMismatch",
+  mustIncludeStderr: ["Google status final live preview", "audit rows alone are not sufficient evidence"],
   mustNotIncludeStdout: ["export GOOGLE_ADS_STAGING_E2E_PASSED_AT="],
 });
 
@@ -388,7 +410,13 @@ async function runStripeWebhookContract(name, contract) {
 
 function createApiServer(googleWriteScenario = "") {
   return new Promise((resolve) => {
-    const context = { googleWriteScenario, googleWriteAuditLogs: [], googleWriteCount: 0 };
+    const context = {
+      googleWriteScenario,
+      googleWriteAuditLogs: [],
+      googleWriteCount: 0,
+      googleCampaignStatus: "ENABLED",
+      googleCampaignBudgetAmount: 1000,
+    };
     const server = http.createServer(async (req, res) => {
       const payload = await localApiPayload(req, context);
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -405,6 +433,17 @@ async function localApiPayload(req, context) {
   }
   if (url.pathname === "/audit-logs/recent" && req.method === "GET") {
     return { logs: context.googleWriteAuditLogs };
+  }
+  const previewMatch = url.pathname.match(/^\/google\/customers\/([^/]+)\/campaigns\/([^/]+)\/change-preview$/);
+  if (previewMatch && req.method === "GET") {
+    return {
+      preview: {
+        current: {
+          status: context.googleCampaignStatus,
+          budgetAmount: context.googleCampaignBudgetAmount,
+        },
+      },
+    };
   }
   const writeMatch = url.pathname.match(/^\/google\/customers\/([^/]+)\/campaigns\/([^/]+)\/(status|budget)$/);
   if (writeMatch && req.method === "POST") {
@@ -423,7 +462,11 @@ async function localApiPayload(req, context) {
         omitApprovalMetadata,
       }),
     });
-    return { mode: "executed" };
+    if (!(kind === "status" && context.googleWriteScenario === "finalLivePreviewMismatch" && context.googleWriteCount === 2)) {
+      if (kind === "status") context.googleCampaignStatus = body.status;
+    }
+    if (kind === "budget") context.googleCampaignBudgetAmount = body.amount;
+    return { mode: "executed", auditId: `00000000-0000-4000-8000-${String(context.googleWriteCount).padStart(12, "0")}` };
   }
   if (req.url === "/agent/chat" && req.method === "POST") {
     const body = await readRequestJson(req);

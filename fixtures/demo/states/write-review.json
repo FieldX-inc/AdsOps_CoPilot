@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "id": "write-review",
+  "synthetic": true,
+  "workspaceId": "demo-workspace-0002",
+  "state": {
+    "reviewId": "demo-write-review-0002",
+    "operation": "campaign_status",
+    "campaignId": "demo-campaign-search-0002",
+    "campaignName": "DEMO_検索_空室対策（架空）",
+    "expectedCurrentValue": "ENABLED",
+    "proposedValue": "PAUSED",
+    "reason": "架空データで承認UIを確認するため",
+    "rollbackCondition": "架空の確認終了後にENABLED候補を再度レビューする",
+    "approval": {
+      "required": true,
+      "confirmed": false,
+      "status": "awaiting_human_review"
+    },
+    "execution": {
+      "status": "not_requested",
+      "providerAccess": false,
+      "databaseAccess": false
+    }
+  },
+  "assertions": [
+    "preview precedes explicit confirmation",
+    "the default fixture never executes a write",
+    "provider and database access remain disabled"
+  ]
+}

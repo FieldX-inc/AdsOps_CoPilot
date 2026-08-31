@@ -17,6 +17,8 @@ if (!["staging", "production"].includes(target)) {
 const suffix = target === "production" ? "prod" : "staging";
 const apiService = `adops-api-${suffix}`;
 const agentService = `adops-agent-${suffix}`;
+const reportJob = `adops-report-${suffix}`;
+const reportScheduler = `adops-report-hourly-${suffix}`;
 const webProject = target === "production" ? "<cloudflare-pages-production-project>" : "<cloudflare-pages-staging-project>";
 const apiEnvFile = target === "production" ? ".env.production.api" : ".env.staging.api";
 const agentEnvFile = target === "production" ? ".env.production.agent" : ".env.staging.agent";
@@ -40,11 +42,18 @@ printCommands([
   "export ARTIFACT_REPOSITORY=adops-advisor",
   "export RELEASE_TAG=$(git rev-parse --short HEAD)",
   "export API_SERVICE_ACCOUNT=<api-cloud-run-service-account-email>",
+  "export SCHEDULER_SERVICE_ACCOUNT=<scheduler-service-account-email>",
   `export SUPABASE_PROJECT_REF=<${target}-supabase-project-ref>`,
   `export SUPABASE_URL=https://your-${target}-project.supabase.co`,
   `export API_ENV_FILE=${apiEnvFile}`,
   `export AGENT_ENV_FILE=${agentEnvFile}`,
   `export WEB_ENV_FILE=${webEnvFile}`,
+  'export DEPLOY_ENV_TMP_DIR=$(mktemp -d)',
+  'trap \'rm -rf "$DEPLOY_ENV_TMP_DIR"\' EXIT',
+  'install -m 600 "$API_ENV_FILE" "$DEPLOY_ENV_TMP_DIR/api.env"',
+  'install -m 600 "$AGENT_ENV_FILE" "$DEPLOY_ENV_TMP_DIR/agent.env"',
+  'export API_GCLOUD_ENV_FILE="$DEPLOY_ENV_TMP_DIR/api.env"',
+  'export AGENT_GCLOUD_ENV_FILE="$DEPLOY_ENV_TMP_DIR/agent.env"',
 ]);
 console.log("## 3. Artifact Registry");
 printCommands([
@@ -60,9 +69,12 @@ printCommands([
 ]);
 console.log("## 5. Deploy Cloud Run");
 printCommands([
-  `gcloud run deploy ${apiService} --project="$GCP_PROJECT" --region="$GCP_REGION" --image="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT/$ARTIFACT_REPOSITORY/adops-api:$RELEASE_TAG" --allow-unauthenticated --port=8787 --env-vars-file="$API_ENV_FILE"`,
-  `gcloud run deploy ${agentService} --project="$GCP_PROJECT" --region="$GCP_REGION" --image="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT/$ARTIFACT_REPOSITORY/adops-agent:$RELEASE_TAG" --no-allow-unauthenticated --port=8000 --env-vars-file="$AGENT_ENV_FILE"`,
+  `gcloud run deploy ${apiService} --project="$GCP_PROJECT" --region="$GCP_REGION" --image="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT/$ARTIFACT_REPOSITORY/adops-api:$RELEASE_TAG" --allow-unauthenticated --port=8787 --env-vars-file="$API_GCLOUD_ENV_FILE"`,
+  `gcloud run deploy ${agentService} --project="$GCP_PROJECT" --region="$GCP_REGION" --image="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT/$ARTIFACT_REPOSITORY/adops-agent:$RELEASE_TAG" --no-allow-unauthenticated --port=8000 --env-vars-file="$AGENT_GCLOUD_ENV_FILE"`,
   `gcloud run services add-iam-policy-binding ${agentService} --project="$GCP_PROJECT" --region="$GCP_REGION" --member="serviceAccount:$API_SERVICE_ACCOUNT" --role="roles/run.invoker"`,
+  `gcloud run jobs deploy ${reportJob} --project="$GCP_PROJECT" --region="$GCP_REGION" --image="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT/$ARTIFACT_REPOSITORY/adops-api:$RELEASE_TAG" --service-account="$API_SERVICE_ACCOUNT" --command=node --args=apps/api/dist/report-job.js --env-vars-file="$API_GCLOUD_ENV_FILE" --tasks=1 --max-retries=0`,
+  `gcloud run jobs add-iam-policy-binding ${reportJob} --project="$GCP_PROJECT" --region="$GCP_REGION" --member="serviceAccount:$SCHEDULER_SERVICE_ACCOUNT" --role="roles/run.invoker"`,
+  `gcloud scheduler jobs create http ${reportScheduler} --project="$GCP_PROJECT" --location="$GCP_REGION" --schedule="0 * * * *" --uri="https://run.googleapis.com/v2/projects/$GCP_PROJECT/locations/$GCP_REGION/jobs/${reportJob}:run" --http-method=POST --oauth-service-account-email="$SCHEDULER_SERVICE_ACCOUNT" || gcloud scheduler jobs update http ${reportScheduler} --project="$GCP_PROJECT" --location="$GCP_REGION" --schedule="0 * * * *" --uri="https://run.googleapis.com/v2/projects/$GCP_PROJECT/locations/$GCP_REGION/jobs/${reportJob}:run" --http-method=POST --oauth-service-account-email="$SCHEDULER_SERVICE_ACCOUNT"`,
 ]);
 console.log("## 6. Deploy Web");
 printCommands([
@@ -82,6 +94,7 @@ if (target === "staging") {
     "CHECK_GOOGLE_WRITE=true CONFIRM_GOOGLE_WRITE=true GOOGLE_CUSTOMER_ID=<customer-id> GOOGLE_CAMPAIGN_ID=<campaign-id> GOOGLE_WRITE_KIND=status GOOGLE_WRITE_STATUS=PAUSED GOOGLE_RESTORE_STATUS=ENABLED GOOGLE_WRITE_ROLLBACK=\"restore campaign status to ENABLED after audit observation\" API_ORIGIN=https://api.staging.example.com AGENT_SERVICE_URL=https://agent.staging.example.com WORKSPACE_ID=<workspace-id> npm run e2e:staging # reversible Google Ads write evidence; requires AUTH_TOKEN in operator env",
     "CONFIRM_STRIPE_WEBHOOK_TEST=true API_ORIGIN=https://api.staging.example.com WORKSPACE_ID=<workspace-id> USER_ID=<user-id> npm run e2e:stripe-webhook # requires STRIPE_WEBHOOK_SECRET and AUTH_TOKEN in operator env",
     "CONFIRM_STRIPE_FULL_E2E=true STRIPE_FULL_E2E_CONFIRMATION=\"checkout existing customer reuse webhook billing gate customer/workspace mismatch rejection confirmed\" API_ORIGIN=https://api.staging.example.com AGENT_SERVICE_URL=https://agent.staging.example.com WORKSPACE_ID=<workspace-id> npm run e2e:staging # set only after hosted Stripe evidence is recorded; requires AUTH_TOKEN and UNPAID_AUTH_TOKEN in operator env",
+    `gcloud run jobs execute ${reportJob} --project="$GCP_PROJECT" --region="$GCP_REGION" --wait # verify report claim, structured output, separate usage, and Cloudflare Email delivery before setting REPORT_EMAIL_STAGING_E2E_PASSED_AT`,
     "# Confirm the web Data Connection audit review panel shows the Google write and restore rows with approval metadata before setting GOOGLE_ADS_STAGING_E2E_PASSED_AT.",
   ]);
 } else {

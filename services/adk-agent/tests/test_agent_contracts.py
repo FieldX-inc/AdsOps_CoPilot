@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from ad_ops_advisor import agent
+from ad_ops_advisor import openai_agents_runtime
 from ad_ops_advisor.policies.no_write_policy import is_forbidden_tool_name
 from ad_ops_advisor.tools import ad_account_tools, human_task_tools, memory_tools, metrics_tools, search_tools
 
@@ -61,6 +62,8 @@ def test_root_instruction_keeps_no_write_and_answer_shape_contract() -> None:
     assert "承認付きwrite APIへ移行" in instruction
     assert "confirmed=true" in instruction
     assert "AI toolとして直接変更したと主張してはいけません" in instruction
+    assert "campaign作成は承認付きAPIの対象外" in instruction
+    assert "失敗済み方針は代替案または再検証チェックポイント" in instruction
     for section in REQUIRED_ANSWER_SECTIONS:
         assert section in instruction
 
@@ -91,6 +94,32 @@ def test_prompt_files_preserve_policy_and_evidence_contracts() -> None:
     assert "これから何を優先すべき" in action_plan_prompt
     assert "どこをコンバージョンとして設定" in setup_prompt
     assert "そもそもこの媒体で合ってる" in setup_prompt
+    assert "recentRecommendations" in root_prompt
+    assert "未完了の同一タスクを新規作成せず" in action_plan_prompt
+    assert "campaign作成もAPI実行対象外" in action_plan_prompt
+
+
+def test_production_openai_runtime_is_exactly_five_agents_and_decoupled_from_legacy_adk() -> None:
+    source = (SERVICE_ROOT / "ad_ops_advisor/openai_agents_runtime.py").read_text(encoding="utf-8")
+
+    assert openai_agents_runtime.PRODUCTION_OPENAI_AGENT_NAMES == (
+        "root_agent",
+        "setup_advisor_agent",
+        "performance_analyst_agent",
+        "action_plan_agent",
+        "qa_agent",
+    )
+    assert openai_agents_runtime.PRODUCTION_OPENAI_TOOL_NAMES == (
+        "setup_advisor",
+        "performance_analyst",
+        "action_plan",
+        "qa_review",
+    )
+    assert "from .agent import ROOT_INSTRUCTION" not in source
+    assert "from .instructions import ROOT_INSTRUCTION" in source
+    assert "setup_intake_agent" not in source
+    assert "google.adk" not in source
+    assert "create_campaign" not in openai_agents_runtime.PRODUCTION_OPENAI_TOOL_NAMES
 
 
 def test_tool_signatures_require_scope_and_do_not_accept_secrets() -> None:

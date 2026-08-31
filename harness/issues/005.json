@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "manifestVersion": 1,
+  "issue": {"number": 5, "url": "https://github.com/FieldX-inc/AdsOps_CoPilot/issues/5", "title": "【要判断】ポイント", "slug": "decision-points"},
+  "state": "blocked",
+  "wave": "wave-1-decisions",
+  "summary": "Resolve whether this empty issue represents a product requirement, a decision log, or obsolete backlog before implementation.",
+  "decisions": ["Do not infer implementation scope from an empty issue body.", "Either add explicit purpose and acceptance criteria or close the issue as obsolete."],
+  "scope": {"in": ["Recover original intent", "Record an explicit decision", "Add acceptance criteria or close recommendation"], "out": ["Product code changes based on guessed meaning"]},
+  "requirementRefs": ["AGENTS.md#6-実装ルール"],
+  "dependencies": [],
+  "blockers": ["The issue body has no actionable requirement or completion condition."],
+  "risks": [
+    {"id": "invented-scope", "level": "high", "description": "Implementation would encode an assumption not made by the product owner.", "mitigation": "Keep blocked until the issue is completed or explicitly closed."}
+  ],
+  "gates": [
+    {"id": "issue-purpose", "type": "product_decision", "requiredAt": "before_specified", "status": "pending", "owner": "user", "description": "State what Point means, its user value, and done condition, or approve closure."}
+  ],
+  "ownership": {"primaryAgent": "contract-guard", "reviewAgents": ["implementation-orchestrator"], "allowedPaths": ["REQUIREMENTS.md", "DESIGN.md", "docs/**", "harness/issues/005.json"], "forbiddenPaths": ["apps/**", "services/**", "supabase/**", "deploy/**"]},
+  "acceptanceCriteria": ["The issue has an explicit product outcome and testable completion criteria, or is closed as obsolete.", "Any resulting scope is linked to the correct source document and implementation wave."],
+  "verification": {"commands": ["npm run harness:validate"], "scenarioIds": []},
+  "evidence": {"requiredArtifacts": ["decision-record"], "retention": "permanent"},
+  "rollback": {"strategy": "Reopen the decision if new source material contradicts it; no product rollback is needed before code exists.", "verification": "The manifest and issue body again agree on state and purpose."}
+}

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "manifestVersion": 2,
+  "issue": {"number": 3, "url": "https://github.com/FieldX-inc/AdsOps_CoPilot/issues/3", "title": "プラン実装", "slug": "billing-plans"},
+  "state": "local_verified",
+  "wave": "wave-5-onboarding-billing",
+  "summary": "Implement config-driven Minimum, Standard, and Premium plans for monthly/yearly billing, entitlements, usage, members, accounts, and locked UI states.",
+  "decisions": ["Plan IDs are minimum, standard, and premium with month/year intervals.", "Prices, AI allowances, consultation estimates, and annual discount stay configuration-driven until approved.", "Unavailable features remain visible with lock and upgrade guidance."],
+  "scope": {"in": ["Public redacted plan catalog", "Server-side entitlement checks", "DB member/account limits", "AI usage presentation", "Locked and upgrade states", "Portal plan management"], "out": ["Hard-coded unapproved prices", "Free trial", "In-app premium booking system"]},
+  "requirementRefs": ["REQUIREMENTS.md#3-プランと権限", "REQUIREMENTS.md#5-stripe-billing", "REQUIREMENTS.md#6-ai利用量と原価", "DESIGN.md#4-ロックとアップグレード", "docs/database.md#billing-constraints"],
+  "dependencies": [],
+  "blockers": [],
+  "risks": [
+    {"id": "catalog-drift", "level": "high", "description": "UI, API, Stripe Price, and DB entitlements may disagree.", "mitigation": "Map six approved server-side Price entries from one versioned configuration and fail closed on unknown Price."},
+    {"id": "customer-cost-leak", "level": "high", "description": "Internal token or cost fields may leak to the browser.", "mitigation": "Expose only credit usage, remaining consultation estimate, and reset date."}
+  ],
+  "gates": [
+    {"id": "pricing-approval", "type": "product_decision", "requiredAt": "before_staging_verification", "status": "pending", "owner": "user", "description": "Approve six prices, AI allowances, consultation estimates, and annual discount after cost measurement."},
+    {"id": "stripe-catalog", "type": "external_prerequisite", "requiredAt": "before_staging_verification", "status": "pending", "owner": "user", "description": "Approve Stripe test catalog, Portal, and webhook configuration."}
+  ],
+  "ownership": {"primaryAgent": "api-db-provider-agent", "reviewAgents": ["contract-guard", "product-ui-agent", "qa-release-agent"], "allowedPaths": ["apps/api/src/billing.ts", "apps/api/src/billing.test.ts", "apps/api/src/usage.ts", "apps/api/src/usage.test.ts", "apps/api/src/index.ts", "apps/web/src/main.tsx", "apps/web/src/styles.css", "supabase/migrations/*.sql", "docs/billing.md", "REQUIREMENTS.md", "DESIGN.md"], "forbiddenPaths": ["services/adk-agent/**", ".env*", "deploy/production-*.env*"]},
+  "acceptanceCriteria": ["The public plan endpoint never returns Price IDs or secrets.", "Unknown or unpaid subscriptions fail closed.", "Member, ad-account, chat, and write limits are enforced server-side; member/account limits also have DB enforcement.", "Downgrade preserves existing rows and rejects only new over-limit additions.", "Customer UI never shows tokens or internal cost.", "Pricing remains configuration-driven until the approval gate is satisfied."],
+  "verification": {"commands": ["npm --workspace @adops/api test", "npm run check:migrations", "npm run e2e:browser", "npm run e2e:stripe-webhook"], "scenarioIds": ["billing-entry", "release-read-only-smoke"]},
+  "evidence": {"requiredArtifacts": ["test-log", "api-contract", "migration-check", "screenshot", "provider-confirmation"], "retention": "release-lifetime"},
+  "rollback": {"strategy": "Disable the affected Stripe Price mapping and preserve subscription/data rows; revert UI availability without deleting customer data.", "verification": "Unknown/disabled Prices fail closed and existing workspace data remains readable under the documented billing gate."}
+}
